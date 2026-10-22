@@ -1,47 +1,46 @@
 # Release Pipelines
 
-Verified: 2026-10-06
+Verified: 2026-10-22
 
-- [GitHub](../../.github/workflows/tuyen-release.yml) and
-  [Azure](../../.ado/workflows/tuyen-release.yaml) keep tag-only automatic Windows
-  desktop releases and manual CLI/desktop target selection. Desktop selections
-  schedule companion CLI jobs on supported targets. Tagged Windows releases build
-  both binaries in parallel, retain separate payload artifacts, and join them in
-  a dependent installer job; CLI-only archive releases remain separate.
-  Azure omits macOS ARM64;
-  GitHub retains it. Azure Intel macOS uses `macos-15`, not GitHub's `macos-15-intel`.
-- Azure's `Plan.SetMatrix` validates the full source tag and emits `Matrix.matrix`,
-  `Matrix.version` and `Matrix.buildInstaller` without Library secrets. `Release` alone links the `GitHub`
-  and `Regressify` variable groups, and skips pull-request runs.
-- Stage-level `lockBehavior: sequential` creates an Azure stage lock without a
-  separate Library check, per the [Azure documentation](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/approvals#exclusive-lock).
-  GitHub and Azure locks are independent; publishing the same immutable version
-  from both providers is not supported.
-- Azure Windows uses Tuyen's native PowerShell installer with `CLI_INSTALL` under
-  the agent temporary directory and `task.prependpath`. Shared Bash scripts run
-  in explicit Git Bash. `ci/install-rust.sh` writes cross-compilation settings to
-  `GITHUB_ENV`; the Azure wrapper forwards the linker and `CC` to subsequent tasks.
-- Azure MSBuild discovery buffers `vswhere` output before selecting the first path.
-  Direct piping into `Select-Object -First 1` can leave `$LASTEXITCODE` stale even
-  with a valid MSBuild result; native Windows reproduction and the offline
-  discovery regression verify the failure and fix.
-- [Offline tests](../../ci/test-release.py) exercise 192 GitHub and 96 Azure
-  selections, real publish scripts with a stub CLI, and Azure PowerShell wrappers.
-  Use `python ci/test-release.py`; PyYAML, Bash, and PowerShell 7.4+ are required.
-  On Windows, set `BASH_PATH` to Git Bash for the build-argument tests.
-  [Setup details](../../docs/desktop.md#azure-pipelines) include Library permissions
-  and the hosted-job timeout limit. Hosted Azure execution remains a separate gate.
-- The [installer](../../installer/regressify-desktop.iss) installs both executables
+- [GitHub](../../.github/workflows/tuyen-release.yml) publishes only automatic
+  tags in `precise-alloy/regressify-rs`; Azure publishing is retired. Ten build
+  jobs and offline checks run independently. Publication waits for all of them
+  plus Windows packaging, then deployment waits for verified publication.
+- [Staging](../../ci/release_feed.py) requires all 20 archives, 20 checksums, and
+  setup before writing output. The manifest is the 42nd uploaded asset. Drafts
+  become public only after exact names, sizes, uploaded state, URL, and GitHub
+  SHA-256 digest checks. Reruns never clobber published assets. Deployment repeats
+  the public inventory check before website build.
+- Only `publish` receives write permission and the built-in GitHub token.
+  Only Cloudflare deployment receives `CLOUDFLARE_ACCOUNT_ID` and
+  `CLOUDFLARE_API_TOKEN`. Hosted execution remains unverified; see
+  [outstanding issues](../../OUTSTANDING_ISSUES.md).
+- GitHub retains binaries; the website serves `/downloads/latest.txt`, terminal
+  installers, pages, and `/mcp`. The feed records every archive as
+  `archive.<filename>=<size>:<sha256>`; Rust additionally requires Windows ZIPs.
+  Binary limits are 1 GiB, manifest 16 KiB. Cloudflare's binary size limit is no
+  longer part of application distribution.
+- [Offline tests](../../ci/test-release.py) exercise all 192 GitHub selections,
+  full inventories and mocked publication, all supported Unix target scripts,
+  and mocked Windows script execution. Set `BASH_PATH` to Git Bash on Windows.
+- The [bootstrapper](../../installer/regressify.iss) installs both executables
   directly in `{app}` and registers that shared directory only in the user PATH.
   Ownership metadata survives upgrades; uninstall preserves unowned entries,
-  later PATH edits and the registry value type. Both packaging jobs set
+  later PATH edits and the registry value type. The packaging job sets
   `ISCC_PATH` and run `python ci/test-release.py InstallerTests`: native fixtures
   use isolated registry keys and a temporary synthetic setup/uninstall cycle,
   without changing the real user PATH or app registration. The separate release
   smoke test verifies actual CLI lookup from a fresh process and uninstall cleanup.
 - Inno's uninstaller launcher exits before its second-phase PATH cleanup. The
-  [smoke helper](../../ci/build-desktop-installer.ps1) uses bounded
+  [smoke helper](../../ci/build-installer.ps1) uses bounded
   `Start-Process -Wait` to await descendants and retains `uninstall.log`.
   Native regression assertions run inside the invoking PowerShell process so
   inherited output handles cannot hide an early return; separate fixtures cover
   nonzero exits and timeout cleanup of a surviving second phase.
+- Prepare-only mode is verified with the real compiled script and synthetic ZIPs
+  while the app mutex is held. Corrupt sources remove a stale ready receipt.
+  Returning false from InitializeSetup returns 1; forced ExitProcess skips cleanup.
+- The deferred [bridge rollout](../../docs/desktop.md#bridge-rollout) starts from
+  `d066dc81a2befb9cb622762cbf3c7a21e8c198fc` only after live-site confirmation.
+  Old clients need an old-name installer on the old feed, containing a backported
+  new updater. Numeric ordering must be old < bridge < site.

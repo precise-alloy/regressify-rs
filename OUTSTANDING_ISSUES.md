@@ -3,6 +3,38 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## GitHub Releases And Cloudflare Deployment (2026-10-22)
+
+- Open: no hosted tag release or live Cloudflare deployment has verified the
+  [new pipeline](docs/desktop.md#release-pipeline). Configure the repository's
+  built-in release-token permissions and Cloudflare secrets/domain in
+  `precise-alloy/regressify-rs`. Azure release publishing is removed.
+- Resolved offline: partial inventories previously passed staging, and publication
+  could overwrite assets. Now all 20 archives, 20 sidecars, setup, and the manifest
+  must match before a draft is published; a second public inventory gate blocks
+  website builds/deploys until GitHub metadata matches every local file.
+- The website hosts only metadata/install scripts/pages/MCP. GitHub retains
+  versioned binaries, so Cloudflare's 25 MiB asset limit no longer constrains them.
+  Windows uses a bootstrapper with baked payload hashes and background prepare-only
+  mode. Local receipts cannot override feed hashes. Native regressions cover
+  preparation while the app runs, stale receipts, and descendant cancellation.
+- Offline evidence: all release/installer/script fixtures, updater model tests,
+  website type checks/unit tests, and a production site build using a synthetic
+  complete feed. Browser checks cover all archive links, OS-specific homepage
+  buttons, and desktop/narrow layouts. Real Linux/macOS packaging and native
+  application execution remain hosted-run gates, not claims from simulated targets.
+  Real Windows application installation, directory migration, and uninstall smoke
+  also remain release-CI checks; local tests used isolated synthetic fixtures only.
+- Open: the final Tuyen Drive bridge is intentionally deferred until the maintainer
+  confirms the new site. Start from `d066dc81a2befb9cb622762cbf3c7a21e8c198fc`,
+  backport new updater support, retain old-feed-compatible naming, and require
+  old < bridge < site versions. Old clients first install that bridge, then the
+  website-selected version. See [Bridge Rollout](docs/desktop.md#bridge-rollout).
+- The previously hosted `regressify-mcp` workers.dev Worker is no longer deployed
+  by CI. `regressify init` migrates workspaces to `https://regressify.eshn.dev/mcp`;
+  retire the old Worker once clients have moved. The root `bun run deploy` still
+  targets that standalone Worker.
+
 ## Third-Party Notices In Distributions (2026-10-22)
 
 - Open: release archives, the Windows installer, and published reports ship
@@ -1132,10 +1164,9 @@ it was risk-focused, not an exhaustive security certification.
   compatibility date, and exclusions. Uploads honor single-asset/concurrency hints,
   invalidate MIME changes, bound raw memory, and distinguish rejected publications
   from uncertain outcomes without retrying publication.
-- [Azure release preparation](.ado/workflows/tuyen-release.yaml) waits for `vswhere`
-  to finish before selecting MSBuild, avoiding a stale exit code that rejected a
-  valid installation. Native Windows reproduction and [offline release tests](ci/test-release.py)
-  cover successful, empty, and failed lookups without PATH updates on failure.
+- Historical: Azure release preparation waited for `vswhere` before selecting
+  MSBuild to avoid a stale native exit code. The Azure publishing pipeline and
+  its provider-specific checks were retired in the 2026-10-22 GitHub migration.
 - Source now supports selected-line comments, indentation, duplication, movement,
   and deletion through focused shortcuts and an Edit menu. GUI regressions cover
   undo/redo, JSON comment rejection, read-only and busy guards, Unicode/CRLF, and
