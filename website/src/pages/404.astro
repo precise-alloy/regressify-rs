@@ -1,0 +1,39 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Button from '../components/Button.astro';
+---
+
+<BaseLayout title="Page not found" description="The page you are looking for does not exist." noindex>
+  <div class="container not-found">
+    <p class="eyebrow">404</p>
+    <h1>Page not found</h1>
+    <p class="muted">The page may have moved, or the link may be mistyped.</p>
+    <div class="actions">
+      <Button variant="primary" href="/">Go home</Button>
+      <Button href="/docs/">Read the docs</Button>
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  .not-found {
+    display: grid;
+    justify-items: center;
+    gap: var(--space-md);
+    padding-block: 96px;
+    text-align: center;
+  }
+
+  h1 {
+    font-size: var(--text-3xl);
+    line-height: 1.2;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+  }
+</style>

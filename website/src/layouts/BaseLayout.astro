@@ -1,0 +1,67 @@
+---
+import '../styles/global.css';
+import Footer from '../components/Footer.astro';
+import Header from '../components/Header.astro';
+import { SITE, THEME_STORAGE_KEY } from '../config/site';
+
+interface Props {
+  title?: string;
+  description?: string;
+  type?: 'website' | 'article';
+  /** Exclude the page from search engines (e.g. 404). */
+  noindex?: boolean;
+}
+
+const { title, description = SITE.description, type = 'website', noindex = false } = Astro.props;
+const pageTitle = title ? `${title} | ${SITE.name}` : SITE.title;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const ogImage = new URL('/icon.png', Astro.site);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{pageTitle}</title>
+    <meta name="description" content={description} />
+    {/* A noindex page (the 404) has no real URL of its own, so it gets no canonical. */}
+    {!noindex && <link rel="canonical" href={canonical} />}
+    {noindex && <meta name="robots" content="noindex" />}
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8f8f8" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#171717" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/icon.png" />
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <link rel="alternate" type="application/rss+xml" title={`${SITE.name} blog`} href="/rss.xml" />
+    <meta property="og:type" content={type} />
+    <meta property="og:site_name" content={SITE.name} />
+    <meta property="og:title" content={pageTitle} />
+    <meta property="og:description" content={description} />
+    {!noindex && <meta property="og:url" content={canonical} />}
+    <meta property="og:image" content={ogImage} />
+    <meta name="twitter:card" content="summary" />
+    <meta name="generator" content={Astro.generator} />
+    <!--
+      Runs before first paint so a saved theme never flashes the wrong colors.
+      Only the two literal values are accepted from storage.
+    -->
+    <script is:inline define:vars={{ key: THEME_STORAGE_KEY }}>
+      try {
+        const saved = localStorage.getItem(key);
+        if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved;
+      } catch {}
+      document.documentElement.classList.add('js');
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <Header />
+    <main id="main">
+      <slot />
+    </main>
+    <Footer />
+  </body>
+</html>

@@ -1,0 +1,110 @@
+---
+// System / Light / Dark picker, matching the desktop theme menu. Hidden without
+// JavaScript (the page then follows prefers-color-scheme). The initial theme is
+// applied by the inline script in BaseLayout before first paint to avoid a flash.
+import Icon from './Icon.astro';
+import { THEME_STORAGE_KEY } from '../config/site';
+
+const choices = [
+  { value: 'system', label: 'Use system theme', icon: 'monitor' },
+  { value: 'light', label: 'Use light theme', icon: 'sun' },
+  { value: 'dark', label: 'Use dark theme', icon: 'moon' },
+] as const;
+---
+
+<div class="theme-toggle requires-js" role="group" aria-label="Color theme" data-storage-key={THEME_STORAGE_KEY}>
+  {
+    choices.map((choice) => (
+      <button type="button" class="choice" data-theme-choice={choice.value} aria-pressed="false" title={choice.label}>
+        <Icon name={choice.icon} size={14} />
+        <span class="visually-hidden">{choice.label}</span>
+      </button>
+    ))
+  }
+</div>
+
+<script>
+  type Choice = 'system' | 'light' | 'dark';
+
+  for (const group of document.querySelectorAll<HTMLElement>('.theme-toggle')) {
+    const key = group.dataset.storageKey ?? 'regressify-theme';
+    const buttons = [...group.querySelectorAll<HTMLButtonElement>('[data-theme-choice]')];
+
+    const current = (): Choice => {
+      const theme = document.documentElement.dataset.theme;
+      return theme === 'light' || theme === 'dark' ? theme : 'system';
+    };
+
+    const sync = () => {
+      const active = current();
+      for (const button of buttons) {
+        button.setAttribute('aria-pressed', String(button.dataset.themeChoice === active));
+      }
+    };
+
+    for (const button of buttons) {
+      button.addEventListener('click', () => {
+        const choice = button.dataset.themeChoice as Choice;
+        if (choice === 'system') delete document.documentElement.dataset.theme;
+        else document.documentElement.dataset.theme = choice;
+        try {
+          if (choice === 'system') localStorage.removeItem(key);
+          else localStorage.setItem(key, choice);
+        } catch {
+          // Storage can be unavailable (privacy mode); the choice lasts for this page.
+        }
+        sync();
+      });
+    }
+
+    sync();
+  }
+</script>
+
+<style>
+  .theme-toggle {
+    display: inline-flex;
+    gap: var(--space-xxs);
+    padding: var(--space-xxs);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--background);
+  }
+
+  .choice {
+    display: inline-grid;
+    place-items: center;
+    width: var(--control-sm);
+    height: var(--control-sm);
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--muted-foreground);
+    cursor: pointer;
+  }
+
+  .choice:hover {
+    background: var(--button-ghost-hover);
+    color: var(--foreground);
+  }
+
+  /*
+   * The selected background alone is about 1.3:1 against the toggle, below the
+   * WCAG 1.4.11 3:1 minimum, and forced-colors mode drops it. The inset outline
+   * keeps the state visible in both cases.
+   */
+  .choice[aria-pressed='true'] {
+    background: var(--secondary);
+    color: var(--secondary-foreground);
+    outline: var(--border-width) solid var(--focus-indicator);
+    outline-offset: calc(-1 * var(--border-width));
+  }
+
+  @media (forced-colors: active) {
+    .choice[aria-pressed='true'] {
+      outline: 2px solid Highlight;
+      outline-offset: -2px;
+    }
+  }
+</style>

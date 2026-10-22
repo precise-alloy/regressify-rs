@@ -1,0 +1,144 @@
+---
+// Mirrors gpui-component button.rs variants: default (outlined), primary
+// (inverted), and ghost. Renders a link when `href` is set, otherwise a button.
+import type { HTMLAttributes } from 'astro/types';
+
+type Variant = 'default' | 'primary' | 'ghost';
+type Size = 'sm' | 'md' | 'lg';
+
+type Props = {
+  variant?: Variant;
+  size?: Size;
+  href?: string;
+  /** Square icon-only button; requires an accessible `aria-label`. */
+  icon?: boolean;
+  class?: string;
+} & Omit<HTMLAttributes<'a'> & HTMLAttributes<'button'>, 'class'>;
+
+const { variant = 'default', size = 'md', href, icon = false, class: className, ...rest } = Astro.props;
+const classes = ['btn', `btn-${variant}`, `btn-${size}`, icon && 'btn-icon', className];
+---
+
+{
+  href ? (
+    <a href={href} class:list={classes} {...rest}>
+      <slot />
+    </a>
+  ) : (
+    <button type="button" class:list={classes} {...rest}>
+      <slot />
+    </button>
+  )
+}
+
+<style>
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-sm);
+    border: var(--border-width) solid transparent;
+    border-radius: var(--radius-md);
+    font: inherit;
+    /* gpui-component buttons draw labels at the theme's normal weight. */
+    font-weight: var(--weight-normal);
+    line-height: 1.25;
+    white-space: nowrap;
+    text-decoration: none;
+    cursor: pointer;
+    transition:
+      background-color var(--duration-fast) ease,
+      border-color var(--duration-fast) ease;
+  }
+
+  .btn-sm {
+    height: var(--control-sm);
+    padding-inline: var(--space-sm);
+    gap: var(--space-xs);
+    font-size: var(--text-sm);
+  }
+
+  .btn-md {
+    height: var(--control-md);
+    padding-inline: 10px;
+    font-size: var(--text-sm);
+  }
+
+  .btn-lg {
+    height: var(--control-lg);
+    padding-inline: var(--space-lg);
+    font-size: var(--text-md);
+  }
+
+  .btn-icon {
+    padding-inline: 0;
+  }
+
+  .btn-icon.btn-sm {
+    width: var(--control-sm);
+  }
+
+  .btn-icon.btn-md {
+    width: var(--control-md);
+  }
+
+  .btn-icon.btn-lg {
+    width: var(--control-lg);
+  }
+
+  .btn-default {
+    background: var(--button);
+    border-color: var(--input);
+    color: var(--button-foreground);
+  }
+
+  .btn-default:hover {
+    background: var(--button-hover);
+    color: var(--button-foreground);
+  }
+
+  .btn-default:active {
+    background: var(--button-active);
+  }
+
+  /* Desktop focus_style also recolors the control's own border to the ring. */
+  .btn-default:focus-visible {
+    border-color: var(--ring);
+  }
+
+  .btn-primary {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: var(--primary-foreground);
+  }
+
+  .btn-primary:hover {
+    background: var(--primary-hover);
+    border-color: var(--primary-hover);
+    color: var(--primary-foreground);
+  }
+
+  .btn-primary:active {
+    background: var(--primary-active);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--button-ghost-foreground);
+  }
+
+  .btn-ghost:hover {
+    background: var(--button-ghost-hover);
+    color: var(--button-ghost-foreground);
+  }
+
+  /* Desktop ghost buttons use button_active when pressed and secondary_active when selected. */
+  .btn-ghost:active {
+    background: var(--button-active);
+  }
+
+  .btn-ghost[aria-pressed='true'],
+  .btn-ghost[aria-current='page'] {
+    background: var(--button-ghost-selected);
+  }
+</style>

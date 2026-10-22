@@ -1,0 +1,249 @@
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  scroll-padding-top: calc(var(--header-height) + var(--space-lg));
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-md);
+  -webkit-font-smoothing: antialiased;
+}
+
+main {
+  flex: 1;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: var(--weight-semibold);
+  text-wrap: balance;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--link);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--link-hover);
+}
+
+code,
+kbd,
+pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono);
+}
+
+/*
+ * Desktop focus shape: a 3px ring outside the element following its radius.
+ * The transparent outline keeps focus visible in Windows forced-colors mode,
+ * where box-shadow is removed.
+ */
+:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px var(--focus-indicator);
+}
+
+.container {
+  width: 100%;
+  max-width: 1080px;
+  margin-inline: auto;
+  padding-inline: var(--space-lg);
+}
+
+@media (min-width: 640px) {
+  .container {
+    padding-inline: var(--space-xl);
+  }
+}
+
+.eyebrow {
+  font-size: var(--text-xs);
+  line-height: var(--leading-xs);
+  color: var(--muted-foreground);
+  text-transform: uppercase;
+}
+
+.muted {
+  color: var(--muted-foreground);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  left: var(--space-sm);
+  top: -100px;
+  z-index: 10;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: var(--text-sm);
+}
+
+.skip-link:focus {
+  top: var(--space-sm);
+  color: var(--primary-foreground);
+}
+
+/* Progressive enhancement: controls that need scripts stay hidden without JS. */
+html:not(.js) .requires-js {
+  display: none !important;
+}
+
+/* Long-form Markdown content from the docs and blog collections. */
+.prose {
+  max-width: 72ch;
+  font-size: var(--text-md);
+  line-height: 1.7;
+}
+
+.prose > * + * {
+  margin-top: var(--space-lg);
+}
+
+.prose h2 {
+  margin-top: var(--space-xxl);
+  padding-bottom: var(--space-sm);
+  border-bottom: var(--border-width) solid var(--border);
+  font-size: var(--text-xl);
+  line-height: var(--leading-xl);
+}
+
+.prose h3 {
+  margin-top: var(--space-xl);
+  font-size: var(--text-lg);
+  line-height: var(--leading-lg);
+}
+
+.prose ul,
+.prose ol {
+  padding-left: var(--space-xl);
+}
+
+.prose li + li {
+  margin-top: var(--space-xs);
+}
+
+.prose :not(pre) > code {
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  border: var(--border-width) solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.prose pre,
+.code-block pre {
+  margin: 0;
+  padding: var(--space-md) var(--space-lg);
+  overflow-x: auto;
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--muted);
+  color: var(--foreground);
+  line-height: var(--leading-sm);
+  tab-size: 2;
+}
+
+.prose blockquote {
+  margin-inline: 0;
+  padding: var(--space-sm) var(--space-lg);
+  border-left: var(--tab-underline-width) solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.prose th {
+  text-align: left;
+  color: var(--muted-foreground);
+  font-weight: var(--weight-medium);
+}
+
+.prose th,
+.prose td {
+  padding: var(--space-xs) var(--space-sm);
+  border-bottom: var(--border-width) solid var(--border);
+}
+
+.prose hr {
+  border: 0;
+  border-top: var(--border-width) solid var(--border);
+}
+
+/* App screenshots are dark window captures; the hairline border keeps their
+   edge visible on the dark page background. */
+.prose img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  /* Tall crops (the navigator) would otherwise fill the screen; the full-screen
+     viewer still shows them at full size. */
+  max-height: 640px;
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

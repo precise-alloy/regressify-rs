@@ -1,0 +1,119 @@
+---
+// Echoes the desktop title bar: logo, semibold wordmark, underline tabs with a
+// 2px active indicator, and ghost icon buttons on the right.
+import Button from './Button.astro';
+import Icon from './Icon.astro';
+import ThemeToggle from './ThemeToggle.astro';
+import { NAV_LINKS, SITE } from '../config/site';
+
+const path = Astro.url.pathname;
+const isActive = (href: string) => path === href || path.startsWith(href) || `${path}/` === href;
+---
+
+<header class="site-header">
+  <div class="container bar">
+    <a href="/" class="brand" aria-label="Regressify home">
+      <img src="/icon.svg" alt="" width="22" height="22" />
+      <span>{SITE.name}</span>
+    </a>
+    <nav aria-label="Main" class="tabs">
+      {
+        NAV_LINKS.map((link) => (
+          <a href={link.href} class="tab" aria-current={isActive(link.href) ? 'page' : undefined}>
+            {link.label}
+          </a>
+        ))
+      }
+    </nav>
+    <div class="actions">
+      {
+        SITE.repoUrl && (
+          <Button variant="ghost" size="sm" icon href={SITE.repoUrl} aria-label="Regressify source on GitHub" title="Source on GitHub">
+            <Icon name="github" />
+          </Button>
+        )
+      }
+      <ThemeToggle />
+    </div>
+  </div>
+</header>
+
+<style>
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--title-bar);
+    border-bottom: var(--border-width) solid var(--title-bar-border);
+  }
+
+  .site-header::before {
+    content: '';
+    display: block;
+    height: 2px;
+    background: var(--brand-gradient);
+  }
+
+  .bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: var(--space-xl);
+    min-height: 48px;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm);
+    min-height: 44px;
+    color: var(--foreground);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+    text-decoration: none;
+    border-radius: var(--radius-md);
+  }
+
+  .tabs {
+    display: flex;
+    align-self: stretch;
+    /* Desktop Underline tabs: no inner padding and a 16px gap, so the underline matches the label width. */
+    gap: var(--space-lg);
+    order: 3;
+    width: 100%;
+  }
+
+  .tab {
+    display: inline-flex;
+    align-items: center;
+    padding-inline: 0;
+    min-height: 36px;
+    color: var(--tab-foreground);
+    font-size: var(--text-sm);
+    text-decoration: none;
+    border-bottom: var(--tab-underline-width) solid transparent;
+  }
+
+  .tab:hover {
+    color: var(--tab-active-foreground);
+  }
+
+  .tab[aria-current='page'] {
+    color: var(--tab-active-foreground);
+    border-bottom-color: var(--tab-underline);
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-left: auto;
+  }
+
+  @media (min-width: 640px) {
+    .tabs {
+      order: 0;
+      width: auto;
+    }
+  }
+</style>

@@ -1,0 +1,175 @@
+/*
+ * Design tokens mirrored from the desktop app: GPUI Kit 0.8.0 stock shadcn
+ * "neutral" Light/Dark theme plus the contrast corrections applied in
+ * src/desktop/ui/design.rs::apply_theme. Values were computed from the crate's
+ * theme JSON (verified 2026-10-22) and may differ from the app by 1/255.
+ * When the desktop theme changes, update these values in the same change.
+ *
+ * Each color uses light-dark(light, dark). `color-scheme` picks the branch:
+ * the system preference by default, or [data-theme] when the visitor chooses a
+ * theme. Without JavaScript the system preference still applies.
+ */
+:root {
+  color-scheme: light dark;
+
+  /* Surfaces and text */
+  --background: light-dark(#ffffff, #0a0a0a);
+  --foreground: light-dark(#0a0a0a, #fafafa);
+  --muted: light-dark(#f5f5f5, #262626);
+  --muted-foreground: light-dark(#6f6f6f, #a3a3a3);
+  --card: light-dark(#ffffff, #0a0a0a);
+  --card-foreground: light-dark(#0a0a0a, #fafafa);
+  --popover: light-dark(#ffffff, #0a0a0a);
+  --popover-foreground: light-dark(#0a0a0a, #fafafa);
+  --popover-ring: light-dark(#0a0a0a1a, #fafafa1a);
+  --navigator: light-dark(#fbfbfb, #151515);
+  --title-bar: light-dark(#f8f8f8, #171717);
+  --title-bar-border: light-dark(#e5e5e5, #262626);
+  --status-bar: light-dark(#f8f8f8, #171717);
+  --overlay: light-dark(#0000000d, #00000033);
+  --selection: light-dark(#55a0fc4c, #1d4ed84c);
+
+  /* Lines and focus */
+  --border: light-dark(#e5e5e5, #262626);
+  --input: light-dark(#e5e5e5, #2f2f2f);
+  --ring: light-dark(#a3a3a3, #737373);
+  /* Desktop focus ring (ring at 50% alpha). */
+  --focus-ring: light-dark(#a3a3a380, #73737380);
+  /*
+   * Web deviation: the desktop ring is about 1.5:1 against the page, below the
+   * WCAG 1.4.11 3:1 minimum for focus indicators. The site keeps the same 3px
+   * outside ring shape but uses an opaque gray that reaches at least 3:1.
+   */
+  --focus-indicator: light-dark(#737373, #a3a3a3);
+
+  /* Roles */
+  --primary: light-dark(#171717, #fafafa);
+  --primary-hover: light-dark(#262626, #f5f5f5);
+  --primary-active: light-dark(#0a0a0a, #e5e5e5);
+  --primary-foreground: light-dark(#fafafa, #171717);
+  --secondary: light-dark(#e5e5e5, #262626);
+  --secondary-active: light-dark(#d4d4d4, #212121);
+  --secondary-foreground: light-dark(#171717, #fafafa);
+  --accent: light-dark(#f5f5f5, #262626);
+  --accent-foreground: light-dark(#171717, #fafafa);
+
+  /* Status text, tuned for >= 4.5:1 on --background and --muted. */
+  --success: light-dark(#16803d, #4ade80);
+  --warning: light-dark(#8b6b05, #facc15);
+  --danger: light-dark(#dd1313, #f87171);
+  --info: light-dark(#047a8e, #22d3ee);
+
+  /* Navigation */
+  --tab-foreground: light-dark(#404040, #d4d4d4);
+  --tab-active-foreground: light-dark(#171717, #fafafa);
+  --tab-underline: light-dark(#171717, #fafafa);
+  --list-hover: light-dark(#f5f5f5, #26262699);
+  --list-active: light-dark(#bfdbfe33, #1e40af33);
+  --list-active-border: light-dark(#60a5fa, #1d4ed8);
+  --link: light-dark(#0a0a0a, #fafafa);
+  --link-hover: light-dark(#404040, #ffffff);
+
+  /* Buttons (gpui-component button.rs variants) */
+  --button: light-dark(#ffffff, #151515);
+  --button-hover: light-dark(#f2f2f2, #1c1c1c);
+  --button-active: light-dark(#ededed, #242424);
+  --button-foreground: light-dark(#0a0a0a, #fafafa);
+  --button-border: light-dark(#e5e5e5, #2f2f2f);
+  --button-ghost-hover: light-dark(#f5f5f5, #26262680);
+  --button-ghost-selected: light-dark(#d4d4d4, #212121);
+  --button-ghost-foreground: light-dark(#171717, #fafafa);
+
+  /* Brand: the logo gradient is the only brand color; use it sparingly. */
+  --brand-gradient-start: #ff7a59;
+  --brand-gradient-mid: #ff00ff;
+  --brand-gradient-end: #7a7efa;
+  /* Stop positions match assets/icon.svg (magenta held from 42% to 64%). */
+  --brand-gradient: linear-gradient(
+    90deg,
+    var(--brand-gradient-start) 0%,
+    var(--brand-gradient-mid) 42%,
+    var(--brand-gradient-mid) 64%,
+    var(--brand-gradient-end) 100%
+  );
+
+  /* Typography: the desktop uses the platform UI font and no bundled fonts. */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, Menlo, Consolas, 'Cascadia Mono', 'DejaVu Sans Mono', monospace;
+  --text-xs: 0.75rem; /* 12/16 */
+  --leading-xs: 1rem;
+  --text-sm: 0.875rem; /* 14/20, desktop UI text */
+  --leading-sm: 1.25rem;
+  --text-md: 1rem; /* 16/24 */
+  --leading-md: 1.5rem;
+  --text-lg: 1.125rem; /* 18/28 */
+  --leading-lg: 1.75rem;
+  --text-xl: 1.25rem; /* 20/28 */
+  --leading-xl: 1.75rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+  --text-4xl: 2.25rem;
+  --text-mono: 0.8125rem; /* 13/20 */
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* Shape */
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 9999px;
+  --border-width: 1px;
+  --tab-underline-width: 2px;
+
+  /* Spacing (4px grid) */
+  --space-xxs: 2px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-xxl: 32px;
+
+  /* Control heights: desktop XSmall/Small/Medium. Large is a web-only 40px CTA. */
+  --control-xs: 20px;
+  --control-sm: 24px;
+  --control-md: 32px;
+  --control-lg: 40px;
+
+  /* Elevation (theme.shadow: black at 18%) */
+  --shadow-color: #0000002e;
+  --shadow-sm: 0 1px 2px 0 var(--shadow-color);
+  --shadow-md: 0 4px 8px -2px var(--shadow-color);
+  --shadow-lg: 0 12px 24px -4px var(--shadow-color);
+
+  --duration-fast: 120ms;
+
+  /*
+   * Sticky header height (Header.astro): 2px gradient + 48px bar + 1px border.
+   * Below 640px the tabs wrap under the 44px brand row: 2 + 44 + 36 + 1 = 83px.
+   * Used for scroll padding so fragment targets and focused elements are not
+   * hidden under the header. Update when the header layout changes.
+   */
+  --header-height: 51px;
+}
+
+@media (max-width: 639px) {
+  :root {
+    --header-height: 83px;
+  }
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+  }
+}

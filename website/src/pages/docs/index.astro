@@ -1,0 +1,62 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import { getDocs } from '../../lib/content';
+
+const docs = await getDocs();
+---
+
+<DocsLayout title="Documentation" description="Guides for installing Regressify, writing test suites, and reviewing visual changes.">
+  <div class="prose">
+    <h1>Documentation</h1>
+    <p>Guides for installing Regressify, writing test suites, and reviewing visual changes.</p>
+  </div>
+  <ul class="doc-list">
+    {
+      docs.map((doc) => (
+        <li>
+          <a href={`/docs/${doc.id}/`}>
+            <span class="title">{doc.data.title}</span>
+            <span class="description">{doc.data.description}</span>
+          </a>
+        </li>
+      ))
+    }
+  </ul>
+</DocsLayout>
+
+<style>
+  h1 {
+    font-size: var(--text-3xl);
+    line-height: 1.2;
+  }
+
+  .doc-list {
+    display: grid;
+    gap: var(--space-md);
+    margin: var(--space-xl) 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .doc-list a {
+    display: grid;
+    gap: var(--space-xs);
+    padding: var(--space-lg);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-lg);
+    text-decoration: none;
+  }
+
+  .doc-list a:hover {
+    background: var(--list-hover);
+  }
+
+  .title {
+    font-weight: var(--weight-semibold);
+  }
+
+  .description {
+    color: var(--muted-foreground);
+    font-size: var(--text-sm);
+  }
+</style>

@@ -1,0 +1,68 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import { formatDate } from '../lib/content';
+import ImageZoom from '../components/ImageZoom.astro';
+
+interface Props {
+  title: string;
+  description: string;
+  date: Date;
+  updated?: Date;
+  author?: string;
+}
+
+const { title, description, date, updated, author } = Astro.props;
+---
+
+<BaseLayout title={title} description={description} type="article">
+  <article class="container post">
+    <header class="post-header">
+      <a href="/blog/" class="back">Blog</a>
+      <h1>{title}</h1>
+      <p class="meta">
+        <time datetime={date.toISOString()}>{formatDate(date)}</time>
+        {author && <span> · {author}</span>}
+        {
+          updated && (
+            <span>
+              {' '}
+              · Updated <time datetime={updated.toISOString()}>{formatDate(updated)}</time>
+            </span>
+          )
+        }
+      </p>
+    </header>
+    <div class="prose">
+      <slot />
+    </div>
+  </article>
+  <ImageZoom />
+</BaseLayout>
+
+<style>
+  .post {
+    max-width: calc(72ch + 2 * var(--space-xl));
+    padding-block: var(--space-xxl);
+  }
+
+  .post-header {
+    display: grid;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-xl);
+  }
+
+  .back {
+    font-size: var(--text-sm);
+    color: var(--muted-foreground);
+  }
+
+  h1 {
+    font-size: var(--text-3xl);
+    line-height: 1.2;
+  }
+
+  .meta {
+    color: var(--muted-foreground);
+    font-size: var(--text-sm);
+  }
+</style>

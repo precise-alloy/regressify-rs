@@ -1,0 +1,82 @@
+---
+import { NAV_LINKS, SITE } from '../config/site';
+---
+
+<footer class="site-footer">
+  <div class="container inner">
+    <div class="brand">
+      <img src="/icon.svg" alt="" width="18" height="18" />
+      <span>{SITE.name}</span>
+      <span class="muted">Visual regression testing for web pages.</span>
+    </div>
+    <nav aria-label="Footer">
+      <ul>
+        {
+          NAV_LINKS.map((link) => (
+            <li>
+              <a href={link.href}>{link.label}</a>
+            </li>
+          ))
+        }
+        {
+          SITE.repoUrl && (
+            <li>
+              <a href={SITE.repoUrl}>GitHub</a>
+            </li>
+          )
+        }
+        <li><a href="/rss.xml">RSS</a></li>
+      </ul>
+    </nav>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    margin-top: var(--space-xxl);
+    border-top: var(--border-width) solid var(--border);
+    background: var(--status-bar);
+    font-size: var(--text-sm);
+    line-height: var(--leading-sm);
+  }
+
+  .inner {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-lg);
+    padding-block: var(--space-xl);
+  }
+
+  .brand {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+    font-weight: var(--weight-semibold);
+  }
+
+  .brand .muted {
+    font-weight: var(--weight-normal);
+  }
+
+  ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs) var(--space-lg);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  a {
+    color: var(--muted-foreground);
+    text-decoration: none;
+  }
+
+  a:hover {
+    color: var(--foreground);
+    text-decoration: underline;
+  }
+</style>

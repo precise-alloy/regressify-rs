@@ -1,0 +1,129 @@
+---
+// Monochrome code block, consistent with the desktop's neutral palette. `code`
+// is rendered as escaped text. The copy button is a progressive enhancement.
+import Icon from './Icon.astro';
+
+interface Props {
+  code: string;
+  /** Optional caption shown in the title strip, e.g. a shell or file name. */
+  title?: string;
+  lang?: string;
+}
+
+const { code, title, lang } = Astro.props;
+---
+
+<figure class="code-block">
+  {
+    title && (
+      <figcaption class="strip">
+        <span>{title}</span>
+      </figcaption>
+    )
+  }
+  <div class="body">
+    <pre data-lang={lang}><code>{code}</code></pre>
+    <button type="button" class="copy requires-js" data-copy aria-label="Copy code to clipboard" title="Copy">
+      <Icon name="copy" size={14} class="icon-copy" />
+      <Icon name="check" size={14} class="icon-done" />
+    </button>
+    <!-- Focused buttons rarely announce aria-label changes, so results go through a live region. -->
+    <span class="visually-hidden" aria-live="polite" data-copy-status></span>
+  </div>
+</figure>
+
+<script>
+  for (const button of document.querySelectorAll<HTMLButtonElement>('.code-block [data-copy]')) {
+    button.addEventListener('click', async () => {
+      const code = button.parentElement?.querySelector('code')?.textContent ?? '';
+      const status = button.parentElement?.querySelector<HTMLElement>('[data-copy-status]');
+      const announce = (message: string) => {
+        if (!status) return;
+        status.textContent = message;
+        setTimeout(() => {
+          if (status.textContent === message) status.textContent = '';
+        }, 1500);
+      };
+      try {
+        await navigator.clipboard.writeText(code);
+        button.dataset.copied = 'true';
+        announce('Copied to clipboard');
+        setTimeout(() => delete button.dataset.copied, 1500);
+      } catch {
+        // Clipboard access can be denied; the code remains selectable.
+        announce('Copy failed. Select the code to copy it manually.');
+      }
+    });
+  }
+</script>
+
+<style>
+  .code-block {
+    margin: 0;
+    min-width: 0;
+  }
+
+  .strip {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    height: 32px;
+    padding-inline: var(--space-md);
+    border: var(--border-width) solid var(--border);
+    border-bottom: 0;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    background: var(--title-bar);
+    color: var(--muted-foreground);
+    font-size: var(--text-xs);
+  }
+
+  .strip + .body pre {
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
+
+  .body {
+    position: relative;
+  }
+
+  /* Leave room for the copy button so it never covers the first line. */
+  .body pre {
+    padding-right: calc(var(--control-sm) + var(--space-lg));
+  }
+
+  .copy {
+    position: absolute;
+    top: var(--space-sm);
+    right: var(--space-sm);
+    display: inline-grid;
+    place-items: center;
+    width: var(--control-sm);
+    height: var(--control-sm);
+    padding: 0;
+    border: var(--border-width) solid var(--input);
+    border-radius: var(--radius-md);
+    background: var(--button);
+    color: var(--muted-foreground);
+    cursor: pointer;
+  }
+
+  .copy:hover {
+    background: var(--button-hover);
+    color: var(--foreground);
+  }
+
+  /* Desktop focus_style also recolors the control's own border to the ring. */
+  .copy:focus-visible {
+    border-color: var(--ring);
+  }
+
+  .copy :global(.icon-done),
+  .copy[data-copied] :global(.icon-copy) {
+    display: none;
+  }
+
+  .copy[data-copied] :global(.icon-done) {
+    display: block;
+    color: var(--success);
+  }
+</style>

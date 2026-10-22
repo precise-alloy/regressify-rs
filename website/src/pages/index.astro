@@ -1,0 +1,341 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Button from '../components/Button.astro';
+import Card from '../components/Card.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import DownloadButton from '../components/DownloadButton.astro';
+import Icon, { type IconName } from '../components/Icon.astro';
+import ReleaseMeta from '../components/ReleaseMeta.astro';
+import { SITE } from '../config/site';
+
+// Every claim below is sourced from README.md, docs/commands.md,
+// docs/create-action.md, or docs/desktop.md. Do not add unverified claims.
+const features: { icon: IconName; title: string; body: string }[] = [
+  {
+    icon: 'file-text',
+    title: 'Tests in YAML or JSON',
+    body: 'Each suite lists scenario URLs with optional actions and viewports. Settings resolve from scenario to suite to workspace to defaults.',
+  },
+  {
+    icon: 'globe',
+    title: 'Chromium, no Node',
+    body: 'Drives Chromium directly over the Chrome DevTools Protocol. One managed, pinned build is shared by the CLI, the desktop app, and every workspace.',
+  },
+  {
+    icon: 'camera',
+    title: 'Reference, test, approve',
+    body: 'Capture baselines, compare new screenshots against them, and promote intended changes. A failed capture never replaces a good reference.',
+  },
+  {
+    icon: 'mouse-pointer',
+    title: 'Interactions like a real user',
+    body: 'Click, type, hover, scroll, and more. Each action waits until its target is visible, stable, unobscured, and enabled, including inside frames.',
+  },
+  {
+    icon: 'shield-check',
+    title: 'Exit codes CI can trust',
+    body: 'Configuration and infrastructure problems fail the command. Visual mismatches go into the report, and one failing scenario never stops the others.',
+  },
+  {
+    icon: 'layout-dashboard',
+    title: 'Desktop app for QA',
+    body: 'Edit suites, run them with live progress, and review reference, current, and diff images side by side. The app bundles the engine.',
+  },
+];
+
+const steps = [
+  { title: 'Install', body: 'Run the Windows installer, which adds both the desktop app and the CLI, or build from source with Cargo.' },
+  { title: 'Describe', body: 'Run regressify init, then list the pages to check in visual_tests/<name>.tests.yaml.' },
+  { title: 'Capture', body: 'Take baseline screenshots with regressify ref. Only successful captures become references.' },
+  { title: 'Compare', body: 'After each deployment, run regressify test, review the report, and approve intended changes.' },
+];
+
+const quickstart = `# Create starter files in an empty folder
+regressify init
+
+# visual_tests/alloy.tests.yaml
+#   scenarios:
+#     - url: https://alloy.eshn.dev/pages/home.html
+
+# Capture baselines, then compare after a deployment
+regressify ref --test-suite alloy
+regressify test --test-suite alloy
+
+# Accept intended changes as the new references
+regressify approve --test-suite alloy`;
+---
+
+<BaseLayout>
+  <section class="hero">
+    <div class="container hero-inner">
+      <img class="logo" src="/icon.svg" alt="" width="64" height="64" />
+      <p class="eyebrow">Regressify</p>
+      <h1>Visual regression testing for web pages</h1>
+      <p class="lead">
+        Catch unintended visual changes before your users do, from the command line or a native desktop app. Regressify
+        drives Chromium with no Node or Playwright to install.
+      </p>
+      <div class="cta">
+        <div class="cta-buttons">
+          <DownloadButton />
+          <!--<Button size="lg" href="/docs/getting-started/">-->
+          <!--  Get started-->
+          <!--  <Icon name="arrow-right" />-->
+          <!--</Button>-->
+          {
+            SITE.repoUrl && (
+              <Button size="lg" variant="ghost" href={SITE.repoUrl}>
+                <Icon name="github" />
+                View on GitHub
+              </Button>
+            )
+          }
+        </div>
+        <ReleaseMeta />
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="summary-heading">
+    <div class="container summary">
+      <h2 id="summary-heading" class="visually-hidden">What Regressify does</h2>
+      <p>
+        Regressify takes screenshots of the pages in your test suites, compares them with approved reference images, and
+        builds an interactive report with side-by-side, wipe, overlay, and diff views. Use the CLI in scripts and CI, or
+        give QA staff the desktop app to edit suites, run them with live progress, and approve changes per scenario.
+      </p>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="features-heading">
+    <div class="container">
+      <p class="eyebrow">Features</p>
+      <h2 id="features-heading">Built for dependable visual checks</h2>
+      <ul class="features">
+        {
+          features.map((feature) => (
+            <Card as="li" class="feature">
+              <span class="feature-icon">
+                <Icon name={feature.icon} />
+              </span>
+              <h3>{feature.title}</h3>
+              <p>{feature.body}</p>
+            </Card>
+          ))
+        }
+      </ul>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="how-heading">
+    <div class="container how">
+      <div>
+        <p class="eyebrow">How it works</p>
+        <h2 id="how-heading">From first suite to approved change</h2>
+        <ol class="steps">
+          {
+            steps.map((step, index) => (
+              <li>
+                <span class="step-number" aria-hidden="true">
+                  {index + 1}
+                </span>
+                <div>
+                  <h3>{step.title}</h3>
+                  <p>{step.body}</p>
+                </div>
+              </li>
+            ))
+          }
+        </ol>
+      </div>
+      <CodeBlock title="Terminal" lang="sh" code={quickstart} />
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container">
+      <Card class="closing">
+        <div>
+          <h2>Ready to try it?</h2>
+          <p class="muted">The Windows installer adds the desktop app and the CLI to your PATH, without admin rights.</p>
+        </div>
+        <DownloadButton size="md" />
+      </Card>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .hero {
+    padding-block: 72px 48px;
+    border-bottom: var(--border-width) solid var(--border);
+    background:
+      radial-gradient(60% 80% at 20% 0%, var(--navigator), transparent 70%),
+      var(--background);
+  }
+
+  /* Keep the shared container width so the hero's left edge lines up with the
+     header and sections; cap only the text measure. */
+  .hero-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-lg);
+  }
+
+  .logo {
+    width: 64px;
+    height: 64px;
+  }
+
+  .hero .eyebrow {
+    margin-bottom: calc(-1 * var(--space-sm));
+  }
+
+  h1 {
+    max-width: 20ch;
+    font-size: clamp(var(--text-3xl), 6vw, 3rem);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+  }
+
+  .lead {
+    max-width: 62ch;
+    color: var(--muted-foreground);
+    font-size: var(--text-lg);
+    line-height: var(--leading-lg);
+  }
+
+  .cta {
+    display: grid;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+    width: 100%;
+  }
+
+  .cta-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-md);
+  }
+
+  .section {
+    padding-block: 56px 0;
+  }
+
+  .summary p {
+    max-width: 72ch;
+    font-size: var(--text-lg);
+    line-height: var(--leading-lg);
+  }
+
+  h2 {
+    margin-top: var(--space-xs);
+    font-size: var(--text-2xl);
+    line-height: 1.3;
+  }
+
+  .features {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: var(--space-md);
+    margin: var(--space-xl) 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .features :global(.feature) {
+    display: grid;
+    align-content: start;
+    gap: var(--space-sm);
+    padding: var(--space-lg);
+  }
+
+  .feature-icon {
+    display: inline-grid;
+    place-items: center;
+    width: var(--control-md);
+    height: var(--control-md);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--muted);
+  }
+
+  h3 {
+    font-size: var(--text-md);
+    line-height: var(--leading-md);
+  }
+
+  .feature p,
+  .steps p {
+    color: var(--muted-foreground);
+    font-size: var(--text-sm);
+    line-height: var(--leading-sm);
+  }
+
+  .how {
+    display: grid;
+    gap: var(--space-xl);
+    align-items: start;
+  }
+
+  .steps {
+    display: grid;
+    gap: var(--space-lg);
+    margin: var(--space-xl) 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .steps li {
+    display: flex;
+    gap: var(--space-md);
+  }
+
+  .step-number {
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    width: var(--control-sm);
+    height: var(--control-sm);
+    border-radius: var(--radius-full);
+    background: var(--primary);
+    color: var(--primary-foreground);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-semibold);
+  }
+
+  .how :global(.code-block) {
+    align-self: center;
+  }
+
+  :global(.closing) {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-lg);
+  }
+
+  :global(.closing) h2 {
+    margin: 0 0 var(--space-xs);
+    font-size: var(--text-xl);
+  }
+
+  /* Stack full-width on phones: a wrapped ghost button's padding otherwise
+     leaves its label visibly inset from the hero's left edge. */
+  @media (max-width: 479px) {
+    .cta-buttons {
+      flex-direction: column;
+      align-items: stretch;
+    }
+  }
+
+  @media (min-width: 900px) {
+    .how {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+      gap: var(--space-xxl);
+    }
+  }
+</style>

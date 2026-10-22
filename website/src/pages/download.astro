@@ -1,0 +1,277 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Button from '../components/Button.astro';
+import Card from '../components/Card.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Icon from '../components/Icon.astro';
+import { SITE } from '../config/site';
+import { downloadHref, formatSize, getRelease } from '../lib/release';
+
+// Facts on this page come from docs/desktop.md (Windows Installation and Updates,
+// Build and Launch) and README.md. Only Windows x64 has a public installer.
+const release = await getRelease();
+const latestHref = downloadHref(release);
+const repoUrl = SITE.repoUrl;
+const cloneUrl = repoUrl ? `${repoUrl}.git` : null;
+
+const verify = release.status === 'available' ? `Get-FileHash .\\${release.fileName} -Algorithm SHA256` : '';
+
+const fromSource = [
+  cloneUrl ? `git clone ${cloneUrl}\ncd regressify-rs` : '# From a checkout of the Regressify repository',
+  '',
+  '# Install the CLI into your Cargo bin directory',
+  'cargo install --path .',
+  '',
+  '# Optional: download the managed Chromium build ahead of offline runs',
+  'regressify install',
+].join('\n');
+
+const desktopFromSource = `cargo build --release --features gui --bin regressify-desktop`;
+---
+
+<BaseLayout title="Download" description="Download the Regressify desktop app and CLI for Windows, or build them from source.">
+  <div class="container page">
+    <header class="heading">
+      <h1>Download Regressify</h1>
+      <p class="muted">Get the desktop app and CLI together on Windows, or build them from source on any supported platform.</p>
+    </header>
+
+    <Card as="section" class="option">
+      <div class="option-head">
+        <span class="badge">Windows x64</span>
+        <h2>Desktop app and CLI installer</h2>
+      </div>
+      <ul class="facts">
+        <li>Per-user setup with no administrator rights.</li>
+        <li>Installs Regressify Desktop and the <code>regressify</code> CLI and adds them to your user PATH.</li>
+        <li>Prepares the managed Chromium build used for captures.</li>
+        <li>Checks for updates in the background and verifies each download by SHA-256.</li>
+      </ul>
+
+      {
+        release.status === 'available' ? (
+          <div class="release">
+            <Button variant="primary" size="lg" href={latestHref ?? release.url} rel="noopener">
+              <Icon name="download" />
+              Download for Windows
+            </Button>
+            {/* Details describe the release current when the site was built; the
+                button always fetches the newest one. */}
+            <dl class="details">
+              <div>
+                <dt>Version</dt>
+                <dd>{release.version}</dd>
+              </div>
+              <div>
+                <dt>File</dt>
+                <dd>
+                  <code>{release.fileName}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>Size</dt>
+                <dd>{formatSize(release.size)}</dd>
+              </div>
+              <div>
+                <dt>SHA-256</dt>
+                <dd>
+                  <code class="hash">{release.sha256}</code>
+                </dd>
+              </div>
+            </dl>
+            <p class="muted small">
+              The checksum is for version {release.version}, the latest when this page was built. If the installer you
+              receive has a newer version, this page has not been rebuilt yet; download{' '}
+              <a href={release.url} rel="noopener">
+                {release.fileName}
+              </a>{' '}
+              directly to match the hash. Verify it in PowerShell:
+            </p>
+            <CodeBlock code={verify} lang="powershell" />
+          </div>
+        ) : release.status === 'unpublished' ? (
+          <div class="notice" role="status">
+            <p>
+              <strong>The Windows installer is not published yet.</strong> Build from source below in the meantime; this page
+              updates with the next site build after a release.
+            </p>
+          </div>
+        ) : (
+          // A failed or invalid feed check says nothing about whether a release
+          // exists, so do not claim it is unpublished; the stable redirect still works.
+          <div class="release">
+            {latestHref && (
+              <Button variant="primary" size="lg" href={latestHref} rel="noopener">
+                <Icon name="download" />
+                Download for Windows
+              </Button>
+            )}
+            <div class="notice" role="status">
+              <p>
+                <strong>Version and checksum details could not be verified when this page was built.</strong> The button
+                still downloads the latest installer, or you can <a href="#source-heading">build from source</a> below.
+              </p>
+            </div>
+          </div>
+        )
+      }
+      <p class="muted small">
+        Installers are currently unsigned, so Windows may show a SmartScreen warning. Open a new terminal after setup to
+        use <code>regressify</code>.
+      </p>
+    </Card>
+
+    <Card as="section" class="option" aria-labelledby="source-heading">
+      <div class="option-head">
+        <span class="badge">Windows, macOS, Linux</span>
+        <h2 id="source-heading">Build from source</h2>
+      </div>
+      <p class="muted">
+        Requires the stable Rust toolchain. Regressify supports Chromium only; it downloads and caches its own pinned
+        build, so no Node or Playwright install is needed.
+      </p>
+      <CodeBlock title="CLI" code={fromSource} lang="sh" />
+      <p class="muted small">
+        The desktop app builds from the same checkout. On Windows it also needs the Visual Studio C++ build tools and the
+        Windows SDK.
+      </p>
+      <CodeBlock title="Desktop app" code={desktopFromSource} lang="sh" />
+      <div class="links">
+        <Button href="/docs/getting-started/">
+          Getting started guide
+          <Icon name="arrow-right" />
+        </Button>
+        {
+          repoUrl && (
+            <Button variant="ghost" href={repoUrl}>
+              <Icon name="github" />
+              Source on GitHub
+            </Button>
+          )
+        }
+      </div>
+    </Card>
+  </div>
+</BaseLayout>
+
+<style>
+  .page {
+    display: grid;
+    gap: var(--space-xl);
+    max-width: 880px;
+    padding-block: var(--space-xxl);
+  }
+
+  .heading {
+    display: grid;
+    gap: var(--space-sm);
+  }
+
+  h1 {
+    font-size: var(--text-3xl);
+    line-height: 1.2;
+  }
+
+  :global(.option) {
+    display: grid;
+    gap: var(--space-lg);
+    min-width: 0;
+  }
+
+  .option-head {
+    display: grid;
+    gap: var(--space-sm);
+    justify-items: start;
+  }
+
+  h2 {
+    font-size: var(--text-xl);
+    line-height: var(--leading-xl);
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    height: var(--control-xs);
+    padding-inline: var(--space-sm);
+    border: var(--border-width) solid var(--border);
+    border-radius: var(--radius-full);
+    background: var(--muted);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+  }
+
+  .facts {
+    display: grid;
+    gap: var(--space-xs);
+    margin: 0;
+    padding-left: var(--space-xl);
+    font-size: var(--text-sm);
+  }
+
+  .release {
+    display: grid;
+    gap: var(--space-md);
+    justify-items: start;
+    min-width: 0;
+  }
+
+  .release > :global(.code-block) {
+    width: 100%;
+  }
+
+  .details {
+    display: grid;
+    gap: var(--space-xs);
+    width: 100%;
+    margin: 0;
+    font-size: var(--text-sm);
+  }
+
+  .details div {
+    display: grid;
+    grid-template-columns: 80px minmax(0, 1fr);
+    gap: var(--space-md);
+    padding-block: var(--space-xs);
+    border-bottom: var(--border-width) solid var(--border);
+  }
+
+  dt {
+    color: var(--muted-foreground);
+  }
+
+  dd {
+    margin: 0;
+    min-width: 0;
+  }
+
+  .hash {
+    overflow-wrap: anywhere;
+  }
+
+  .notice {
+    padding: var(--space-md) var(--space-lg);
+    border: var(--border-width) solid var(--border);
+    border-left: 3px solid var(--info);
+    border-radius: var(--radius-md);
+    background: var(--muted);
+    font-size: var(--text-sm);
+  }
+
+  .small {
+    font-size: var(--text-sm);
+    line-height: var(--leading-sm);
+  }
+
+  code {
+    padding: 1px 4px;
+    border-radius: var(--radius-sm);
+    background: var(--muted);
+  }
+
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+  }
+</style>

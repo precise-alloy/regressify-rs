@@ -1,0 +1,10 @@
+{
+  "extends": "astro/tsconfigs/strict",
+  "include": [".astro/types.d.ts", "**/*"],
+  "exclude": ["dist"],
+  "compilerOptions": {
+    // TypeScript 6 no longer loads every @types package by default.
+    "types": ["bun"],
+    "noUncheckedIndexedAccess": true
+  }
+}

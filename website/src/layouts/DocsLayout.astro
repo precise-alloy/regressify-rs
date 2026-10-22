@@ -1,0 +1,120 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import { getDocs } from '../lib/content';
+import ImageZoom from '../components/ImageZoom.astro';
+
+interface Props {
+  title: string;
+  description: string;
+  /** Collection id of the current doc; omitted on the docs index. */
+  currentId?: string;
+}
+
+const { title, description, currentId } = Astro.props;
+const docs = await getDocs();
+---
+
+<BaseLayout title={title} description={description}>
+  <div class="container docs">
+    <aside class="sidebar">
+      <p class="eyebrow">Documentation</p>
+      <nav aria-label="Documentation">
+        <ul>
+          <li>
+            <a href="/docs/" aria-current={currentId === undefined ? 'page' : undefined}>Overview</a>
+          </li>
+          {
+            docs.map((doc) => (
+              <li>
+                <a href={`/docs/${doc.id}/`} aria-current={doc.id === currentId ? 'page' : undefined}>
+                  {doc.data.title}
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </nav>
+    </aside>
+    <article class="content">
+      <slot />
+    </article>
+  </div>
+  <ImageZoom />
+</BaseLayout>
+
+<style>
+  .docs {
+    display: grid;
+    gap: var(--space-xl);
+    padding-block: var(--space-xl) var(--space-xxl);
+  }
+
+  .sidebar {
+    font-size: var(--text-sm);
+    line-height: var(--leading-sm);
+  }
+
+  .sidebar .eyebrow {
+    margin-bottom: var(--space-sm);
+    padding-inline: var(--space-sm);
+  }
+
+  ul {
+    display: grid;
+    gap: var(--space-xxs);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .sidebar a {
+    display: flex;
+    align-items: center;
+    min-height: var(--control-md);
+    padding-inline: var(--space-sm);
+    border-radius: var(--radius-md);
+    color: var(--secondary-foreground);
+    text-decoration: none;
+  }
+
+  .sidebar a:hover {
+    background: var(--button-ghost-hover);
+  }
+
+  /*
+   * The active background is below 3:1 against the page and disappears in
+   * forced-colors mode, so the current page also gets a 2px indicator like the
+   * header tabs. Padding shrinks by the border width to keep the text in place.
+   */
+  .sidebar a[aria-current='page'] {
+    padding-left: calc(var(--space-sm) - var(--tab-underline-width));
+    border-left: var(--tab-underline-width) solid var(--tab-underline);
+    background: var(--secondary-active);
+    font-weight: var(--weight-medium);
+  }
+
+  @media (forced-colors: active) {
+    .sidebar a[aria-current='page'] {
+      border-left-color: Highlight;
+    }
+  }
+
+  .content {
+    min-width: 0;
+  }
+
+  @media (min-width: 860px) {
+    .docs {
+      grid-template-columns: 240px minmax(0, 1fr);
+      gap: var(--space-xxl);
+    }
+
+    .sidebar {
+      position: sticky;
+      top: 72px;
+      align-self: start;
+      padding-right: var(--space-lg);
+      border-right: var(--border-width) solid var(--border);
+    }
+  }
+</style>

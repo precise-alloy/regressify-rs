@@ -1,0 +1,134 @@
+---
+// Full-screen viewer for images inside `.prose`. Progressive enhancement: without
+// JavaScript, images render inline as usual and nothing here is interactive.
+// The viewer is always dark, whatever the page theme, so screenshots read the
+// same against the backdrop; its colors are therefore fixed rather than tokens.
+import Icon from './Icon.astro';
+---
+
+<dialog class="image-zoom" aria-label="Image viewer">
+  <button type="button" class="close" data-zoom-close aria-label="Close image viewer" title="Close (Esc)">
+    <Icon name="x" />
+  </button>
+  <img data-zoom-image alt="" />
+  <p class="caption" data-zoom-caption></p>
+</dialog>
+
+<script>
+  const dialog = document.querySelector<HTMLDialogElement>('dialog.image-zoom');
+  const view = dialog?.querySelector<HTMLImageElement>('[data-zoom-image]');
+  const caption = dialog?.querySelector<HTMLElement>('[data-zoom-caption]');
+
+  if (dialog && view && caption) {
+    let opener: HTMLElement | null = null;
+
+    const open = (image: HTMLImageElement) => {
+      opener = image;
+      // currentSrc is the optimized file the browser already loaded, so opening is instant.
+      view.src = image.currentSrc || image.src;
+      view.alt = image.alt;
+      caption.textContent = image.alt;
+      dialog.showModal();
+    };
+
+    for (const image of document.querySelectorAll<HTMLImageElement>('.prose img')) {
+      // Images are made operable only once this script runs, so no-JS readers never
+      // meet a focusable element that does nothing.
+      image.tabIndex = 0;
+      image.setAttribute('role', 'button');
+      image.setAttribute('aria-haspopup', 'dialog');
+      image.dataset.zoomable = '';
+      image.addEventListener('click', () => open(image));
+      image.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          open(image);
+        }
+      });
+    }
+
+    dialog.querySelector('[data-zoom-close]')?.addEventListener('click', () => dialog.close());
+    // Any click outside the picture itself (backdrop, padding, caption) closes the viewer.
+    dialog.addEventListener('click', (event) => {
+      if (event.target !== view) dialog.close();
+    });
+    dialog.addEventListener('close', () => {
+      view.removeAttribute('src');
+      opener?.focus();
+      opener = null;
+    });
+  }
+</script>
+
+<style>
+  .image-zoom {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100vh;
+    max-height: 100vh;
+    margin: 0;
+    padding: var(--space-xl);
+    border: 0;
+    background: transparent;
+    color: #fafafa;
+  }
+
+  .image-zoom[open] {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-md);
+  }
+
+  .image-zoom::backdrop {
+    background: rgb(0 0 0 / 0.88);
+  }
+
+  .image-zoom img {
+    min-height: 0;
+    max-width: 100%;
+    max-height: calc(100vh - 2 * var(--space-xl) - 48px);
+    object-fit: contain;
+    border: var(--border-width) solid #262626;
+    border-radius: var(--radius-lg);
+    cursor: zoom-out;
+  }
+
+  .caption {
+    max-width: 90ch;
+    color: #d4d4d4;
+    font-size: var(--text-sm);
+    line-height: var(--leading-sm);
+    text-align: center;
+  }
+
+  .close {
+    position: fixed;
+    top: var(--space-md);
+    right: var(--space-md);
+    display: inline-grid;
+    place-items: center;
+    width: var(--control-md);
+    height: var(--control-md);
+    border: var(--border-width) solid #2f2f2f;
+    border-radius: var(--radius-md);
+    background: #151515;
+    color: #fafafa;
+    cursor: pointer;
+  }
+
+  .close:hover {
+    background: #242424;
+  }
+
+  :global(.prose img[data-zoomable]) {
+    cursor: zoom-in;
+  }
+
+  @media (max-width: 640px) {
+    .image-zoom {
+      padding: var(--space-md);
+    }
+  }
+</style>

@@ -1,0 +1,23 @@
+---
+// Version/size line for the download call to action. Only validated release
+// fields are rendered; manifest text never reaches the page.
+import { formatSize, getRelease } from '../lib/release';
+
+const release = await getRelease();
+const text =
+  release.status === 'available'
+    ? `Version ${release.version} · ${formatSize(release.size)} · Windows x64`
+    : release.status === 'unpublished'
+      ? 'Windows installer coming soon. Build from source today.'
+      : 'Installer details unavailable. See the download page.';
+---
+
+<p class="release-meta">{text}</p>
+
+<style>
+  .release-meta {
+    color: var(--muted-foreground);
+    font-size: var(--text-xs);
+    line-height: var(--leading-xs);
+  }
+</style>

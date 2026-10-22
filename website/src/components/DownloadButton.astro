@@ -1,0 +1,32 @@
+---
+// Primary download call to action. Links the feed's stable latest-installer
+// redirect (see downloadHref in src/lib/release.ts) so the button stays current
+// between site builds, or the local download page when no release exists.
+// Pair with ReleaseMeta for the version line, placed by the caller so button
+// rows keep a uniform height.
+import Button from './Button.astro';
+import Icon from './Icon.astro';
+import { DOWNLOAD_PAGE_PATH } from '../config/site';
+import { downloadHref, getRelease } from '../lib/release';
+
+interface Props {
+  size?: 'md' | 'lg';
+}
+
+const { size = 'lg' } = Astro.props;
+const href = downloadHref(await getRelease());
+---
+
+{
+  href ? (
+    <Button variant="primary" size={size} href={href} rel="noopener">
+      <Icon name="download" />
+      Download for Windows
+    </Button>
+  ) : (
+    <Button variant="primary" size={size} href={DOWNLOAD_PAGE_PATH}>
+      <Icon name="download" />
+      Download
+    </Button>
+  )
+}

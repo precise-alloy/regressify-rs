@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="74 64 384 384" fill="none" role="img" aria-labelledby="title">
+  <title id="title">Regressify</title>
+  <defs>
+    <linearGradient id="r-gradient" x1="112" y1="76" x2="414" y2="436" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff7a59"/>
+      <stop offset="0.42" stop-color="#f0f"/>
+      <stop offset="0.64" stop-color="#f0f"/>
+      <stop offset="1" stop-color="#7a7efa"/>
+    </linearGradient>
+  </defs>
+  <path d="M144 408V104H264C334 104 376 142 376 202C376 262 334 300 264 300H144M268 300L388 408" stroke="url(#r-gradient)" stroke-width="76" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
