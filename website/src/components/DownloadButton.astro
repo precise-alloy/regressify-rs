@@ -1,9 +1,7 @@
 ---
-// Primary download call to action. Links the feed's stable latest-installer
-// redirect (see downloadHref in src/lib/release.ts) so the button stays current
-// between site builds, or the local download page when no release exists.
-// Pair with ReleaseMeta for the version line, placed by the caller so button
-// rows keep a uniform height.
+// Primary download call to action. Links the verified Windows installer when
+// available, and adapts to macOS/Linux visitors so they land on the multi-OS
+// download page. Falls back to /download/ when no verified release exists.
 import Button from './Button.astro';
 import Icon from './Icon.astro';
 import { DOWNLOAD_PAGE_PATH } from '../config/site';
@@ -19,14 +17,41 @@ const href = downloadHref(await getRelease());
 
 {
   href ? (
-    <Button variant="primary" size={size} href={href} rel="noopener">
+    <Button
+      variant="primary"
+      size={size}
+      href={DOWNLOAD_PAGE_PATH}
+      rel="noopener"
+      data-download-button
+      data-windows-href={href}
+      data-download-page={DOWNLOAD_PAGE_PATH}
+    >
       <Icon name="download" />
-      Download for Windows
+      <span data-download-label>Download Regressify</span>
     </Button>
   ) : (
-    <Button variant="primary" size={size} href={DOWNLOAD_PAGE_PATH}>
+    <Button variant="primary" size={size} href={DOWNLOAD_PAGE_PATH} data-download-button data-download-page={DOWNLOAD_PAGE_PATH}>
       <Icon name="download" />
-      Download
+      <span data-download-label>Download</span>
     </Button>
   )
 }
+
+<script is:inline>
+  (() => {
+    const ua = navigator.userAgent || '';
+    const platform = navigator.platform || '';
+    if (/Android|iPhone|iPad|iPod/i.test(ua) || (/Mac/i.test(platform) && navigator.maxTouchPoints > 1)) return;
+    const isMac = /Mac/i.test(platform) || /Macintosh/i.test(ua);
+    const isLinux = !isMac && /Linux/i.test(`${platform} ${ua}`);
+    const isWindows = /Win/i.test(platform) || /Windows/i.test(ua);
+    if (!isMac && !isLinux && !isWindows) return;
+    const label = isMac ? 'Download for macOS' : isLinux ? 'Download for Linux' : 'Download for Windows';
+    for (const button of document.querySelectorAll('[data-download-button]')) {
+      const page = button.getAttribute('data-download-page');
+      if (page) button.setAttribute('href', isWindows ? (button.getAttribute('data-windows-href') || `${page}#windows`) : `${page}#${isMac ? 'macos' : 'linux'}`);
+      const text = button.querySelector('[data-download-label]');
+      if (text) text.textContent = label;
+    }
+  })();
+</script>

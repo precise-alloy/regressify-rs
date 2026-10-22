@@ -75,3 +75,6 @@ Verified: 2026-10-15
   checks the previous inventory plus the new file; sidebar-scroll tests count all
   non-suite entries and cover seven/eight/nine/twelve total rows. These focused
   `gui-tests` regressions pass without changing runtime discovery or layout.
+- The managed MCP endpoint is `https://regressify.eshn.dev/mcp` (served by the website
+  Worker). Init's URL refresh migrates the retired
+  `regressify-mcp.tuyen-at-work.workers.dev` URL; see the [init regression](../../src/init.rs).

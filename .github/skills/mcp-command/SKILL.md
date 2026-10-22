@@ -12,7 +12,7 @@ description: 'Use when changing regressify mcp, standalone authoring or troubles
 ## Procedure and Invariants
 
 1. Keep `regressify mcp --output <new-directory>` in the default CLI feature set. Embed all templates/guides with the binary; generation must not read workspace content, fetch dependencies, start Chromium, or require a source checkout.
-1. Separate generation from publication. No Cloudflare API calls, credentials, automatic installs, or deployment subprocesses belong in the Rust command.
+1. Separate generation from publication. No Cloudflare API calls, credentials, automatic installs, or deployment subprocesses belong in the Rust command. The official endpoint (https://regressify.eshn.dev/mcp, REGRESSIFY_MCP_URL in init) is deployed by the [release pipeline](../release-pipeline/SKILL.md) inside the website Worker; template changes to compatibility settings must also update website/wrangler.jsonc.
 1. Require an existing parent and a new output directory. Reserve it with `create_dir`, validate embedded paths/directories, and use no-clobber temporary file publication. Preserve existing files and competing writes. A failed export may remain partial; do not recursively delete a directory another process could have edited. Do not claim protection from every ancestor race.
 1. Derive schemas from real Rust types. Keep viewport schema metadata available without desktop features. Cookie format guidance uses the real runtime parser in tests instead of introducing a second cookie schema.
    Cover local constraints negatively as well as valid examples: positive workspace

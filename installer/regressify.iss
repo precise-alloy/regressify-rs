@@ -7,15 +7,29 @@
 #ifndef InstallerOutput
   #define InstallerOutput "Output"
 #endif
+#ifndef ReleaseTag
+  #define ReleaseTag "v" + AppVersion
+#endif
+#define DesktopArchiveName "regressify-desktop-x86_64-pc-windows-msvc.zip"
+#define CliArchiveName "regressify-cli-x86_64-pc-windows-msvc.zip"
+#ifndef DesktopArchiveHash
+  #define DesktopArchiveHash Lowercase(GetSHA256OfFile(AddBackslash(SourceDir) + DesktopArchiveName))
+#endif
+#ifndef CliArchiveHash
+  #define CliArchiveHash Lowercase(GetSHA256OfFile(AddBackslash(SourceDir) + CliArchiveName))
+#endif
+#define ReleaseBaseUrl "https://github.com/precise-alloy/regressify-rs/releases/download/" + ReleaseTag
 
 [Setup]
 AppId={{ED6F0908-7E11-4608-A532-E43482AA117B}
-AppName=Regressify Desktop
+AppName=Regressify
 AppVersion={#AppVersion}
 AppPublisher=Tuyen Pham
 VersionInfoVersion={#AppVersion}
-DefaultDirName={localappdata}\Programs\Regressify Desktop
-DefaultGroupName=Regressify Desktop
+DefaultDirName={localappdata}\Programs\Regressify
+DefaultGroupName=Regressify
+UsePreviousAppDir=no
+UsePreviousGroup=no
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -25,12 +39,14 @@ DisableWelcomePage=yes
 DisableReadyPage=yes
 DisableFinishedPage=yes
 AppMutex=Local\Regressify.Desktop.Running.ED6F0908-7E11-4608-A532-E43482AA117B
-SetupMutex=Local\Regressify.Desktop.Setup.ED6F0908-7E11-4608-A532-E43482AA117B
+; SetupRunningMutex is acquired in InitializeSetup after /PREPARE handling:
+; SetupMutex=Local\Regressify.Desktop.Setup.ED6F0908-7E11-4608-A532-E43482AA117B
+ArchiveExtraction=full
 CloseApplications=no
 RestartApplications=no
 ChangesEnvironment=yes
 OutputDir={#InstallerOutput}
-OutputBaseFilename=Regressify-Desktop-Setup-{#AppVersion}-x64
+OutputBaseFilename=Regressify-Setup-{#AppVersion}-x64
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -39,8 +55,8 @@ SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\regressify-desktop.exe
 
 [Files]
-Source: "{#SourceDir}\regressify-desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\regressify.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{tmp}\{#DesktopArchiveName}"; DestDir: "{app}"; Hash: "{#DesktopArchiveHash}"; Flags: external extractarchive ignoreversion
+Source: "{tmp}\{#CliArchiveName}"; DestDir: "{app}"; Hash: "{#CliArchiveHash}"; Flags: external extractarchive ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSING.md"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -63,12 +79,25 @@ Filename: "{app}\regressify-desktop.exe"; Parameters: "{code:LaunchParameters}";
 const
   UserEnvironmentKey = 'Environment';
   CliPathOwnerKey = 'Software\Regressify\DesktopInstaller';
+  AppRunningMutex = 'Local\Regressify.Desktop.Running.ED6F0908-7E11-4608-A532-E43482AA117B';
+  SetupRunningMutex = 'Local\Regressify.Desktop.Setup.ED6F0908-7E11-4608-A532-E43482AA117B';
   BroadcastWindow = $FFFF;
   EnvironmentChangeMessage = $001A;
 
 var
   ChromiumPrepared: Boolean;
   ChromiumProgress: TOutputMarqueeProgressWizardPage;
+  PayloadProgress: TOutputMarqueeProgressWizardPage;
+  SetupMutexHandle: LongWord;
+
+function CreateSetupMutex(Attributes: LongWord; InitialOwner: BOOL; const Name: String): LongWord;
+  external 'CreateMutexW@kernel32.dll stdcall';
+
+function SetupMutexLastError(): LongWord;
+  external 'GetLastError@kernel32.dll stdcall';
+
+function CloseSetupMutex(Handle: LongWord): BOOL;
+  external 'CloseHandle@kernel32.dll stdcall';
 
 function SetForegroundWindow(Window: HWND): BOOL;
   external 'SetForegroundWindow@user32.dll stdcall';
@@ -312,6 +341,40 @@ begin
   end;
 end;
 
+const
+  UninstallRegistrationKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{ED6F0908-7E11-4608-A532-E43482AA117B}_is1';
+
+var
+  PreviousAppDir: String;
+  PreviousGroupName: String;
+
+procedure CleanupPreviousInstall(const CurrentDir, CurrentGroupName: String);
+var
+  LegacyDir, LegacyGroupDir: String;
+begin
+  LegacyDir := RemoveBackslashUnlessRoot(Trim(PreviousAppDir));
+  if (LegacyDir <> '') and
+     (CompareText(NormalizePathEntry(LegacyDir, False), NormalizePathEntry(CurrentDir, False)) <> 0) then
+  begin
+    { Remove only files owned by the previous installation so user data is never lost. }
+    DeleteFile(AddBackslash(LegacyDir) + 'regressify-desktop.exe');
+    DeleteFile(AddBackslash(LegacyDir) + 'regressify.exe');
+    DeleteFile(AddBackslash(LegacyDir) + 'LICENSE');
+    DeleteFile(AddBackslash(LegacyDir) + 'LICENSING.md');
+    DeleteFile(AddBackslash(LegacyDir) + 'unins000.exe');
+    DeleteFile(AddBackslash(LegacyDir) + 'unins000.dat');
+    DeleteFile(AddBackslash(LegacyDir) + 'unins000.msg');
+    RemoveDir(LegacyDir);
+  end;
+    if (CompareText(PreviousGroupName, 'Regressify Desktop') = 0) and
+      (CompareText(PreviousGroupName, CurrentGroupName) <> 0) then
+  begin
+    LegacyGroupDir := ExpandConstant('{userprograms}\') + PreviousGroupName;
+    DeleteFile(AddBackslash(LegacyGroupDir) + 'Regressify Desktop.lnk');
+    RemoveDir(LegacyGroupDir);
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if (CurStep = ssInstall) and WizardForm.Visible then
@@ -325,6 +388,7 @@ begin
   if CurStep = ssPostInstall then
   begin
     RegisterCliPath(ExpandConstant('{app}'));
+    CleanupPreviousInstall(ExpandConstant('{app}'), ExpandConstant('{groupname}'));
     PrepareChromium;
   end;
 end;
@@ -360,20 +424,234 @@ begin
   end;
 end;
 
+function VerifyArchiveFile(const FilePath, ExpectedHash: String): Boolean;
+begin
+  Result := False;
+  if not FileExists(FilePath) then
+    Exit;
+  try
+    Result := CompareText(GetSHA256OfFile(FilePath), ExpectedHash) = 0;
+  except
+    Result := False;
+  end;
+end;
+
+function PayloadDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
+begin
+  if PayloadProgress <> nil then
+  begin
+    if ProgressMax > 0 then
+      PayloadProgress.SetText('Downloading ' + FileName,
+        IntToStr((Progress * 100) div ProgressMax) + '% (' + IntToStr(Progress div 1024) + ' / ' + IntToStr(ProgressMax div 1024) + ' KiB)')
+    else
+      PayloadProgress.SetText('Downloading ' + FileName, IntToStr(Progress div 1024) + ' KiB');
+  end;
+  Result := True;
+end;
+
+function DownloadPayloadToTmp(const ArchiveName, ExpectedHash: String; var ErrorMessage: String): Boolean;
+var
+  PrimaryUrl: String;
+begin
+  Result := False;
+  PrimaryUrl := '{#ReleaseBaseUrl}/' + ArchiveName;
+  Log('Downloading payload archive: ' + PrimaryUrl);
+  try
+    DownloadTemporaryFile(PrimaryUrl, ArchiveName, ExpectedHash, @PayloadDownloadProgress);
+    Result := True;
+    Exit;
+  except
+    ErrorMessage := 'Network or SHA-256 verification failed. Check your connection and retry.';
+    Log('Payload download failed for ' + ArchiveName);
+  end;
+end;
+
+function AcquirePayloadArchive(const ArchiveName, ExpectedHash, SourceDir, TargetDir: String;
+  var ErrorMessage: String): Boolean;
+var
+  TargetPath, CandidatePath, TmpPath: String;
+begin
+  Result := False;
+  TargetPath := AddBackslash(TargetDir) + ArchiveName;
+  if VerifyArchiveFile(TargetPath, ExpectedHash) then
+  begin
+    Log('Reusing verified payload archive: ' + TargetPath);
+    Result := True;
+    Exit;
+  end;
+  if SourceDir <> '' then
+  begin
+    CandidatePath := AddBackslash(SourceDir) + ArchiveName;
+    if not VerifyArchiveFile(CandidatePath, ExpectedHash) then
+    begin
+      ErrorMessage := 'Payload archive ' + ArchiveName + ' in ' + SourceDir + ' is missing or failed SHA-256 verification.';
+      Exit;
+    end;
+    if CompareText(NormalizePathEntry(CandidatePath, False), NormalizePathEntry(TargetPath, False)) <> 0 then
+    begin
+      if not CopyFile(CandidatePath, TargetPath, False) then
+      begin
+        ErrorMessage := 'Cannot copy verified payload archive ' + ArchiveName + ' to ' + TargetDir + '.';
+        Exit;
+      end;
+    end;
+    if not VerifyArchiveFile(TargetPath, ExpectedHash) then
+    begin
+      ErrorMessage := 'Copied payload archive ' + ArchiveName + ' failed SHA-256 verification.';
+      Exit;
+    end;
+    Log('Prepared verified payload archive from source: ' + TargetPath);
+    Result := True;
+    Exit;
+  end;
+  CandidatePath := AddBackslash(ExtractFileDir(ExpandConstant('{srcexe}'))) + ArchiveName;
+  if VerifyArchiveFile(CandidatePath, ExpectedHash) then
+  begin
+    if CompareText(NormalizePathEntry(CandidatePath, False), NormalizePathEntry(TargetPath, False)) <> 0 then
+    begin
+      if not CopyFile(CandidatePath, TargetPath, False) then
+      begin
+        ErrorMessage := 'Cannot stage local payload archive ' + ArchiveName + '.';
+        Exit;
+      end;
+    end;
+    if VerifyArchiveFile(TargetPath, ExpectedHash) then
+    begin
+      Log('Reusing verified local payload archive: ' + CandidatePath);
+      Result := True;
+      Exit;
+    end;
+  end;
+  if not DownloadPayloadToTmp(ArchiveName, ExpectedHash, ErrorMessage) then
+  begin
+    ErrorMessage := 'Cannot download ' + ArchiveName + ': ' + ErrorMessage;
+    Exit;
+  end;
+  TmpPath := ExpandConstant('{tmp}\') + ArchiveName;
+  if CompareText(NormalizePathEntry(TmpPath, False), NormalizePathEntry(TargetPath, False)) <> 0 then
+  begin
+    if not CopyFile(TmpPath, TargetPath, False) then
+    begin
+      ErrorMessage := 'Cannot save downloaded payload archive ' + ArchiveName + ' to ' + TargetDir + '.';
+      Exit;
+    end;
+  end;
+  if not VerifyArchiveFile(TargetPath, ExpectedHash) then
+  begin
+    ErrorMessage := 'Downloaded payload archive ' + ArchiveName + ' failed SHA-256 verification.';
+    Exit;
+  end;
+  Result := True;
+end;
+
+function AcquirePayloads(const SourceDir, TargetDir: String; var ErrorMessage: String): Boolean;
+begin
+  Result :=
+    AcquirePayloadArchive('{#DesktopArchiveName}', '{#DesktopArchiveHash}', SourceDir, TargetDir, ErrorMessage) and
+    AcquirePayloadArchive('{#CliArchiveName}', '{#CliArchiveHash}', SourceDir, TargetDir, ErrorMessage);
+end;
+
+function InitializeSetup(): Boolean;
+var
+  PrepareDir, SourceDir, ErrorMessage, ManifestText: String;
+  MutexError: LongWord;
+begin
+  PrepareDir := Trim(ExpandConstant('{param:PREPARE|}'));
+  if PrepareDir <> '' then
+  begin
+    Result := False;
+    if not ForceDirectories(PrepareDir) then
+      Exit;
+    if FileExists(AddBackslash(PrepareDir) + 'prepared.txt') and
+       not DeleteFile(AddBackslash(PrepareDir) + 'prepared.txt') then
+      Exit;
+    DeleteFile(AddBackslash(PrepareDir) + 'prepare-error.txt');
+    SourceDir := Trim(ExpandConstant('{param:SOURCE|}'));
+    ErrorMessage := '';
+    if AcquirePayloads(SourceDir, PrepareDir, ErrorMessage) then
+    begin
+      ManifestText :=
+        'version={#AppVersion}' + #10 +
+        'desktop_sha256={#DesktopArchiveHash}' + #10 +
+        'cli_sha256={#CliArchiveHash}' + #10;
+      if not SaveStringToFile(AddBackslash(PrepareDir) + 'prepared.txt', ManifestText, False) then
+        SaveStringToFile(AddBackslash(PrepareDir) + 'prepare-error.txt', 'Cannot write prepared payload manifest.', False)
+      else
+        Log('Payload preparation completed in ' + PrepareDir);
+    end
+    else
+    begin
+      Log('Payload preparation failed: ' + ErrorMessage);
+      SaveStringToFile(AddBackslash(PrepareDir) + 'prepare-error.txt', ErrorMessage, False);
+    end;
+    Exit;
+  end;
+  { Check-and-create must be atomic; concurrent installers share file and PATH state. }
+  SetupMutexHandle := CreateSetupMutex(0, False, SetupRunningMutex);
+  MutexError := SetupMutexLastError;
+  if (SetupMutexHandle = 0) or (MutexError = 183) then
+  begin
+    if not WizardSilent then
+      SuppressibleMsgBox(SetupMessage(msgSetupAlreadyRunning), mbError, MB_OK, IDOK);
+    Result := False;
+    Exit;
+  end;
+  Result := True;
+end;
+
+procedure DeinitializeSetup;
+begin
+  if SetupMutexHandle <> 0 then
+    CloseSetupMutex(SetupMutexHandle);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
+  InstalledExecutable, SourceDir, ErrorMessage: String;
   InstalledMS, InstalledLS, SetupMS, SetupLS: Cardinal;
+  LocationIndex: Integer;
 begin
   Result := '';
-  if CheckForMutexes('Local\Regressify.Desktop.Running.ED6F0908-7E11-4608-A532-E43482AA117B') then
+  if CheckForMutexes(AppRunningMutex) then
   begin
     Result := 'Close all Regressify Desktop windows and wait for active runs to finish, then retry setup.';
     Exit;
   end;
-  if GetVersionNumbers(ExpandConstant('{app}\regressify-desktop.exe'), InstalledMS, InstalledLS) and
-     GetVersionNumbers(ExpandConstant('{srcexe}'), SetupMS, SetupLS) then
+  PreviousAppDir := '';
+  PreviousGroupName := '';
+  RegQueryStringValue(HKCU, UninstallRegistrationKey, 'Inno Setup: App Path', PreviousAppDir);
+  RegQueryStringValue(HKCU, UninstallRegistrationKey, 'Inno Setup: Icon Group', PreviousGroupName);
+  if not GetVersionNumbers(ExpandConstant('{srcexe}'), SetupMS, SetupLS) then
   begin
-    if (InstalledMS > SetupMS) or ((InstalledMS = SetupMS) and (InstalledLS > SetupLS)) then
+    Result := 'Cannot verify the setup version.';
+    Exit;
+  end;
+  for LocationIndex := 0 to 1 do
+  begin
+    InstalledExecutable := ExpandConstant('{app}\regressify-desktop.exe');
+    if (LocationIndex = 1) and (PreviousAppDir <> '') then
+      InstalledExecutable := AddBackslash(PreviousAppDir) + 'regressify-desktop.exe';
+    if GetVersionNumbers(InstalledExecutable, InstalledMS, InstalledLS) and
+       ((InstalledMS > SetupMS) or ((InstalledMS = SetupMS) and (InstalledLS > SetupLS))) then
+    begin
       Result := 'A newer version of Regressify Desktop is already installed. Downgrades are not supported.';
+      Exit;
+    end;
+  end;
+  SourceDir := Trim(ExpandConstant('{param:SOURCE|}'));
+  ErrorMessage := '';
+  if (WizardForm <> nil) and WizardForm.Visible then
+  begin
+    PayloadProgress := CreateOutputMarqueeProgressPage('Preparing Regressify', '');
+    PayloadProgress.SetText('Checking installation files', '');
+    PayloadProgress.Show;
+    PayloadProgress.Animate;
+  end;
+  try
+    if not AcquirePayloads(SourceDir, ExpandConstant('{tmp}'), ErrorMessage) then
+      Result := ErrorMessage;
+  finally
+    if PayloadProgress <> nil then
+      PayloadProgress.Hide;
   end;
 end;

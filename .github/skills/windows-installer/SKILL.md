@@ -7,18 +7,28 @@ description: 'Use when changing Inno Setup packaging, Windows installer versions
 
 ## Start Here
 
-[Inno script](../../../installer/regressify-desktop.iss),
-[builder/smoke](../../../ci/build-desktop-installer.ps1),
+[Inno script](../../../installer/regressify.iss),
+[builder/smoke](../../../ci/build-installer.ps1),
 [release tests](../../../ci/test-release.py), and [resources](../../../build.rs).
 
 ## Procedure and Invariants
 
 1. Preserve canonical four-part `N.N.N.N` installer/PE versions, matching executable
    resources, x64 artifact naming, and static MSVC runtime verification.
-1. Require both `regressify-desktop.exe` and `regressify.exe` in the payload source
-   directory and install them together in `{app}` with the repository `LICENSE` and
-   `LICENSING.md`. Verify each static runtime and
-   payload hash; the CLI keeps its Cargo version, not the desktop tag version.
+1. Build `Regressify-Setup-N.N.N.N-x64.exe` as a bootstrapper. Require both verified
+   Windows executables and their exact release ZIPs; validate ZIP entry names,
+   sizes, and bytes against the binaries/licenses before baking archive hashes.
+   Pass the exact version-matched tag, with no URL fallback or runtime latest lookup.
+   The CLI retains its Cargo version. Extract and register files through Inno so
+   uninstall tracks them; recheck hashes immediately before extraction.
+1. `/PREPARE=<cache>` downloads/verifies both archives without installation or
+   app/setup exclusion. Returning false from InitializeSetup cleans temporary
+   files and returns 1; a fresh receipt and both hashes additionally prove success.
+   `/SOURCE=<cache>` must fail closed for missing/bad files, never fetch substitutes.
+1. Keep the AppId, data paths, credentials, and GUI identity stable. Setup's name,
+   default install directory and Start-menu group are Regressify; GUI shortcuts
+   remain Regressify Desktop. Migrate the registered legacy directory only after
+   successful installation; delete only known owned files and preserve user data.
 1. Register `{app}` only in the user PATH. Preserve raw values, registry types,
    pre-existing entries and later edits; keep ownership across upgrades and remove
    only the owned entry on uninstall. Notify Explorer of environment changes.
@@ -44,7 +54,7 @@ python ci/test-release.py
 ```
 
 Requires PyYAML and PowerShell 7.4+. For authorized isolated Windows installer testing, build the
-matching desktop executable and companion CLI, then run `./ci/build-desktop-installer.ps1` with `-Version`,
+matching desktop executable and companion CLI, then run `./ci/build-installer.ps1` with `-Version`, `-ReleaseTag`,
 `-Compiler`, `-RequireStaticRuntime`, and `-SmokeTest`. Use the actual four-part
 release version, not the three-part Cargo package version. Inno Setup is required.
 
@@ -54,7 +64,11 @@ synthetic setup/uninstall cycle through the actual smoke helper, and a
 synthetic-payload compile without installing the app or changing the real user
 PATH. Assert cleanup inside the invoking process so inherited output handles do
 not mask premature return; cover both parent and orphaned second-phase timeouts.
-Both packaging jobs require this gate. The Inno 6 setup engine is 32-bit
+Execute the uninstall license check from its PowerShell AST against temporary
+directories: accept removed files, reject each leftover license, and preserve
+unrelated files, including paths with spaces and literal brackets. Parsing alone
+does not catch syntactically valid expressions referencing undefined variables.
+The Windows packaging job requires this gate. The Inno 6 setup engine is 32-bit
 even in x64 install mode; keep external Win32 declarations compatible. Inno's
 `RegWriteStringValue` preserves an existing `REG_EXPAND_SZ` type, so remove only
 the isolated fixture value before seeding a `REG_SZ` test case.
