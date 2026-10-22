@@ -661,14 +661,16 @@ mod tests {
     use crate::desktop::updates::Release;
 
     fn available_release() -> Release {
-        UpdateFeed::new("regressify")
+        UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(
                 &serde_json::json!({
                     "version": "9999.9999.9999.9999",
-                    "installer": "https://drive.tuyen.blog/downloads/regressify/Regressify-Desktop-Setup-9999.9999.9999.9999-x64.exe",
+                    "installer": "https://github.com/precise-alloy/regressify-rs/releases/download/v9999.9999.9999.9999/Regressify-Setup-9999.9999.9999.9999-x64.exe",
                     "sha256": "a".repeat(64),
                     "size": 100 * 1024 * 1024,
+                    "archive.regressify-desktop-x86_64-pc-windows-msvc.zip": format!("15:{:x}", <sha2::Sha256 as sha2::Digest>::digest(b"desktop-archive")),
+                    "archive.regressify-cli-x86_64-pc-windows-msvc.zip": format!("11:{:x}", <sha2::Sha256 as sha2::Digest>::digest(b"cli-archive")),
                 })
                 .to_string(),
             )
@@ -876,7 +878,8 @@ mod tests {
             view.update(cx, |this, cx| {
                 this.preferences_path = Some(directory.path().join("preferences.json"));
                 this.updates.update(cx, |state, _| {
-                    state.feed = Some(UpdateFeed::offline_for_test("regressify").unwrap());
+                    state.feed =
+                        Some(UpdateFeed::offline_for_test("https://regressify.eshn.dev").unwrap());
                 });
                 this.check_updates(window, cx);
             });
@@ -939,7 +942,8 @@ mod tests {
             view.update(cx, |this, cx| {
                 this.preferences_path = Some(directory.path().join("preferences.json"));
                 this.updates.update(cx, |state, _| {
-                    state.feed = Some(UpdateFeed::offline_for_test("regressify").unwrap());
+                    state.feed =
+                        Some(UpdateFeed::offline_for_test("https://regressify.eshn.dev").unwrap());
                 });
                 this.check_updates(window, cx);
             });
@@ -973,7 +977,9 @@ mod tests {
                 view.update(cx, |this, cx| {
                     this.preferences_path = Some(directory.path().join("preferences.json"));
                     this.updates.update(cx, |state, _| {
-                        state.feed = Some(UpdateFeed::offline_for_test("regressify").unwrap());
+                        state.feed = Some(
+                            UpdateFeed::offline_for_test("https://regressify.eshn.dev").unwrap(),
+                        );
                     });
                     this.watch_shared_updates(Duration::from_millis(50), window, cx);
                 });
@@ -1017,7 +1023,7 @@ mod tests {
         let (handle, view) = editor(cx, directory.path());
         let cache = directory.path().join("updates");
         PreparedUpdate::cache_for_test(available_release(), &cache).unwrap();
-        let feed = UpdateFeed::offline_for_test("regressify").unwrap();
+        let feed = UpdateFeed::offline_for_test("https://regressify.eshn.dev").unwrap();
         let owner = feed
             .check_shared(CURRENT_VERSION.parse().unwrap(), &cache, false, None)
             .unwrap();
@@ -1095,7 +1101,9 @@ mod tests {
                 view.update(cx, |this, cx| {
                     this.preferences_path = Some(directory.path().join("preferences.json"));
                     this.updates.update(cx, |state, _| {
-                        state.feed = Some(UpdateFeed::offline_for_test("regressify").unwrap());
+                        state.feed = Some(
+                            UpdateFeed::offline_for_test("https://regressify.eshn.dev").unwrap(),
+                        );
                     });
                     this.check_updates(window, cx);
                 });
@@ -1153,7 +1161,8 @@ mod tests {
             view.update(cx, |this, cx| {
                 this.preferences_path = Some(directory.path().join("preferences.json"));
                 this.updates.update(cx, |state, _| {
-                    state.feed = Some(UpdateFeed::offline_for_test("regressify").unwrap());
+                    state.feed =
+                        Some(UpdateFeed::offline_for_test("https://regressify.eshn.dev").unwrap());
                     state.complete_download(Err(crate::desktop::updates::RetryScheduled {
                         version: available_release().version,
                         retry_at: 0,
@@ -1292,7 +1301,7 @@ mod tests {
                     this.preferences_path = None;
                     let release = available_release();
                     let control = this.updates.update(cx, |state, cx| {
-                        state.feed = Some(UpdateFeed::new("regressify").unwrap());
+                        state.feed = Some(UpdateFeed::new("https://regressify.eshn.dev").unwrap());
                         state.available = Some(release.clone());
                         let control = state.begin_download(&release);
                         cx.notify();

@@ -20,17 +20,17 @@ bun run dev
 
 ## Layout
 
-| Path                          | Contents                                                          |
-| ----------------------------- | ----------------------------------------------------------------- |
-| `src/config/site.ts`          | Site name, description, repository URL, and navigation.           |
-| `src/styles/tokens.css`       | Design tokens mirrored from the desktop theme (light and dark).   |
-| `src/styles/global.css`       | Base element styles and Markdown `.prose` styles.                 |
-| `src/components/`             | Button, Card, CodeBlock, Header, Footer, ThemeToggle, and others. |
-| `src/layouts/`                | `BaseLayout`, `DocsLayout`, and `BlogLayout`.                     |
-| `src/pages/`                  | Routes: `/`, `/download/`, `/docs/`, `/blog/`, `/rss.xml`, 404.   |
-| `src/content/docs`, `/blog`   | Markdown content collections.                                     |
-| `src/lib/release.ts`          | Build-time installer resolution and validation.                   |
-| `public/`                     | Logo and favicons copied from [assets](../assets).                |
+| Path                        | Contents                                                          |
+| --------------------------- | ----------------------------------------------------------------- |
+| `src/config/site.ts`        | Site name, description, repository URL, and navigation.           |
+| `src/styles/tokens.css`     | Design tokens mirrored from the desktop theme (light and dark).   |
+| `src/styles/global.css`     | Base element styles and Markdown `.prose` styles.                 |
+| `src/components/`           | Button, Card, CodeBlock, Header, Footer, ThemeToggle, and others. |
+| `src/layouts/`              | `BaseLayout`, `DocsLayout`, and `BlogLayout`.                     |
+| `src/pages/`                | Routes: `/`, `/download/`, `/docs/`, `/blog/`, `/rss.xml`, 404.   |
+| `src/content/docs`, `/blog` | Markdown content collections.                                     |
+| `src/lib/release.ts`        | Build-time installer resolution and validation.                   |
+| `public/`                   | Logo and favicons copied from [assets](../assets).                |
 
 ## Add Docs and Blog Posts
 
@@ -77,30 +77,59 @@ To recapture:
 
 ## Download Resolution
 
-The Download buttons are resolved once at build time by [src/lib/release.ts](src/lib/release.ts):
+Installers, binaries, and checksum sidecars live in versioned GitHub Releases of
+`precise-alloy/regressify-rs`; older releases remain available. This site hosts
+`/downloads/latest.txt`, selecting the version supported by its deployment,
+plus `/install.ps1`, `/install.sh`, and `/mcp`. Release payloads are never committed;
+`website/public/downloads` must not exist.
 
-1. It requests `https://drive.tuyen.blog/downloads/<slug>/latest.txt`, the same feed the desktop updater reads, with redirects refused and a 10-second timeout. The slug defaults to `regressify`; set `PUBLIC_DRIVE_APP_SLUG` to override it.
-1. It validates the manifest with the same rules as the desktop app: version format, the exact versioned HTTPS installer URL on `drive.tuyen.blog`, a 64-character SHA-256, and a size between 1 byte and 1 GiB.
+The download buttons and the archive table are resolved once at build time by [src/lib/release.ts](src/lib/release.ts):
+
+1. Release deployments use `RELEASE_MANIFEST_FILE` and `RELEASE_REQUIRED=1`. Other builds request `<origin>/downloads/latest.txt` once, with redirects refused and a 10-second timeout. The default origin is `https://regressify.eshn.dev`; `PUBLIC_DOWNLOAD_ORIGIN` overrides the feed origin, not the trusted binary repository.
+1. Validate the version, exact `https://github.com/precise-alloy/regressify-rs/releases/download/<tag>/Regressify-Setup-<version>-x64.exe` URL, matching tag, SHA-256, size (1 byte to 1 GiB), and Windows payload metadata. Reject ambiguous fields. Keep the updater contract aligned.
 1. When valid, the buttons link straight to the installer and show its version and size; `/download/` also shows the file name and SHA-256.
-1. When the feed is unreachable, unpublished (HTTP 404), or invalid, the build still succeeds with a warning. The buttons link to `/download/`, which explains how to build from source. Only HTTP 404 is described as "not published yet"; other failures say the installer could not be verified at build time.
+1. `archive.<filename>=<size>:<sha256>` entries supply the archive tables from the same validated response, including normal hosted-feed builds. Group CLI and desktop downloads by Windows x64, macOS (Intel/Apple silicon), and Linux x64 glibc. Musl and Linux ARM64 releases are not available; the terminal installer rejects them before network access or writes. Every link pins the release tag, never a mutable latest redirect. OS-aware homepage buttons use the Windows setup or the appropriate platform section, with an all-platform fallback.
+1. When the feed is unreachable, unpublished (HTTP 404), or invalid, the build still succeeds with a warning and the buttons link to `/download/`, which explains how to build from source. Only HTTP 404 is described as "not published yet".
 
-Only validated values reach the page, as escaped text; manifest text is never rendered as HTML. Because the site is static, the version shown is as fresh as the last build, so rebuild after each release.
+Only validated values reach the page, as escaped text; manifest text is never rendered as HTML.
 
-| Variable                       | Effect                                                           |
-| ------------------------------ | ---------------------------------------------------------------- |
-| `PUBLIC_DRIVE_APP_SLUG`        | Tuyen Drive app slug (default `regressify`).                     |
-| `RELEASE_REQUIRED=1`           | Fail the build unless a valid release is found.                  |
-| `RELEASE_OFFLINE=1`            | Skip the request and render the fallback.                        |
-| `RELEASE_MANIFEST_FILE=<path>` | Validate a local manifest instead, to preview the release state. |
-| `SITE_URL`                     | Production origin for canonical, sitemap, and RSS URLs.          |
+| Variable                       | Effect                                                                                          |
+| ------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `PUBLIC_DOWNLOAD_ORIGIN`       | Site origin hosting `/downloads/` (default `https://regressify.eshn.dev`).                      |
+| `RELEASE_REQUIRED=1`           | Fail the build unless a valid release is found.                                                 |
+| `RELEASE_OFFLINE=1`            | Skip the request and render the fallback.                                                       |
+| `RELEASE_MANIFEST_FILE=<path>` | Validate a local manifest instead, to preview the release state.                                |
+| `SITE_URL`                     | Production origin for canonical, sitemap, and RSS URLs (default `https://regressify.eshn.dev`). |
 
 ## Deploy
 
-`bun run build` writes a fully static site to `dist/`. Upload that folder to any static host (for example Cloudflare, Netlify, Azure Static Web Apps, or GitHub Pages) and serve `404.html` for unknown paths. Before the first deployment, set the production origin in [astro.config.mjs](astro.config.mjs) or with `SITE_URL`.
+Tagged releases wait for all parallel binaries, offline checks, and bootstrapper
+packaging. A complete draft GitHub Release is uploaded and verified before
+publication. The separate deploy job checks all 34 published assets again before
+building this site (see the [release pipeline](../docs/desktop.md#release-pipeline)).
+[ci/deploy-cloudflare.sh](../ci/deploy-cloudflare.sh) builds from the verified
+manifest, copies only `latest.txt` into `dist/downloads/`, generates the MCP Worker
+into ignored `mcp-worker/` with the released CLI, verifies it, and deploys with
+[wrangler.jsonc](wrangler.jsonc).
+
+That configuration deploys one Worker, `regressify`, on the custom domain `regressify.eshn.dev` with `workers.dev` and preview URLs disabled. `dist/` is served as static assets with `404.html` for unknown paths, and `run_worker_first: ["/mcp"]` sends only `/mcp` to the MCP handler. Keep its `compatibility_date` and `compatibility_flags` in sync with [the MCP Worker template](../src/mcp/worker/wrangler.jsonc.template); `python ci/test-release.py` checks this. Deployment needs `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`, and the `eshn.dev` zone must belong to that account.
+
+Do not deploy without a verified release manifest: a deployment replaces site
+assets, including the update feed. GitHub binaries are not deleted by site deploys.
+
+## Terminal Installation
+
+The homepage and download page offer
+`irm https://regressify.eshn.dev/install.ps1 | iex` and
+`curl -fsSL https://regressify.eshn.dev/install.sh | sh`. Windows verifies and runs
+the bootstrapper; macOS/Linux select the target, verify all selected ZIPs, and
+install the CLI and desktop (where supported), licenses, and managed Chromium.
+The scripts do not remove quarantine attributes, bypass execution policies, or
+guarantee suppression of unsigned application warnings. In-app updates remain
+Windows-only. Refer to [installation details](../docs/desktop.md#windows-installation-and-updates).
 
 ## Open Items
 
-- Set the production origin; the placeholder is `https://regressify.example.com`.
-- Add a LICENSE to the repository before describing Regressify as open source on the site.
-- Confirm the Tuyen Drive app slug. On 2026-10-22 the `regressify` feed returned HTTP 404, so the site shows the fallback.
-- Add a CI workflow for `bun run check` and `bun run build` (needs maintainer approval); until then run them by hand.
+- Third-party notice packaging remains tracked in [outstanding issues](../OUTSTANDING_ISSUES.md).
+- Until the first tagged release is deployed, local builds show the unpublished fallback.
+- Pull requests do not run `bun run check` and `bun run build` yet; release deployment runs them, so run them by hand before merging site changes.

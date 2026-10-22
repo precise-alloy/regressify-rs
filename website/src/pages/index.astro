@@ -44,7 +44,7 @@ const features: { icon: IconName; title: string; body: string }[] = [
 ];
 
 const steps = [
-  { title: 'Install', body: 'Run the Windows installer, which adds both the desktop app and the CLI, or build from source with Cargo.' },
+  { title: 'Install', body: 'Install from the terminal or download the installer/archives for Windows, macOS, and Linux.' },
   { title: 'Describe', body: 'Run regressify init, then list the pages to check in visual_tests/<name>.tests.yaml.' },
   { title: 'Capture', body: 'Take baseline screenshots with regressify ref. Only successful captures become references.' },
   { title: 'Compare', body: 'After each deployment, run regressify test, review the report, and approve intended changes.' },
@@ -104,6 +104,10 @@ regressify approve --test-suite alloy`;
         builds an interactive report with side-by-side, wipe, overlay, and diff views. Use the CLI in scripts and CI, or
         give QA staff the desktop app to edit suites, run them with live progress, and approve changes per scenario.
       </p>
+      <h2 id="terminal-install">Install from the terminal</h2>
+      <CodeBlock title="Windows (PowerShell)" lang="powershell" code="irm https://regressify.eshn.dev/install.ps1 | iex" />
+      <CodeBlock title="macOS and Linux" lang="sh" code="curl -fsSL https://regressify.eshn.dev/install.sh | sh" />
+      <p class="small"><a href="/download/">All platforms, checksums, and installation details</a></p>
     </div>
   </section>
 

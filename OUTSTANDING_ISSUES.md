@@ -3,6 +3,132 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## GitHub Draft Asset URLs (2026-10-23)
+
+- Resolved locally: [v2.0.6 publication](https://github.com/precise-alloy/regressify-rs/actions/runs/39873111082/job/120161484370)
+  created the draft and uploaded all 34 assets, then rejected `latest.txt`.
+  GitHub reports draft download URLs under `releases/download/untagged-.../`,
+  but the validator required the final versioned path before publication.
+- Read-only verification confirmed the uploaded manifest's bytes, size, and
+  SHA-256 agree with its metadata and the other assets' recorded sizes/hashes.
+  All 34 assets used the exact temporary path named by the draft's `html_url`.
+- The [publisher](ci/release_feed.py) now validates that draft URL's HTTPS host,
+  repository, and path before accepting its exact asset path. Names, uploaded
+  state, sizes, hashes, and completeness remain mandatory. Published-release
+  verification still rejects temporary URLs and requires the final tagged paths.
+- [Regressions](ci/test-release.py) reproduce the failure and cover new/resumed
+  drafts, malformed URLs, wrong draft identities, corrupt/incomplete assets, and
+  rejection of temporary URLs after publication. All 51 offline tests pass.
+  The live draft was left untouched; hosted publication/deployment remains pending.
+
+## GitHub Draft Release Lookup (2026-10-23)
+
+- Resolved locally: [v2.0.4 publication](https://github.com/precise-alloy/regressify-rs/actions/runs/39861369859/job/120126638235)
+  staged all 34 files and created a draft, then failed with
+  `GitHub returned an unexpected release`. The tag endpoint returns published
+  releases only, so querying it again could not find the new draft. A read-only
+  authenticated listing confirmed the draft existed with zero uploaded assets.
+- [v2.0.5 publication](https://github.com/precise-alloy/regressify-rs/actions/runs/39868674393/job/120145137557)
+  still failed the immediate follow-up lookup after creation. A later read found
+  the correct tag and draft/prerelease flags, with no uploaded assets. The log does
+  not establish whether caching or delayed visibility caused that lookup failure.
+- The [publisher](ci/release_feed.py) now finds drafts through authenticated release
+  listings before creation, matching the exact tag. Pages contain at most
+  10 releases, with a 1000-release lookup limit; malformed, ambiguous, or incomplete
+  listings fail closed. New drafts use the JSON create API's returned metadata
+  directly after verifying the exact tag already exists. API reads request fresh
+  responses, and failed writes never become missing-release results. Existing
+  matching assets are preserved during resume.
+  Complete asset verification before publication and strict published-release
+  verification afterward remain mandatory.
+- The corrected [fixture](ci/test-release.py) reproduces the original failure and
+  covers new drafts hidden from listings, resumed drafts, missing uploads,
+  published releases, pagination, tag guards, and JSON API failures. All 50
+  offline release tests pass locally, including
+  isolated native installer fixtures. The real draft was left untouched; a release
+  containing this fix still needs hosted publication/deployment verification.
+
+## Release Matrix Timeout Assertions (2026-10-23)
+
+- Resolved locally: the [v2.0.3 Ubuntu offline checks](https://github.com/precise-alloy/regressify-rs/actions/runs/39856579256/job/120096235355)
+  reported 32 `KeyError: 'timeout'` errors. The workflow intentionally removed
+  custom job and matrix timeouts, but the desktop matrix test still required one.
+- [Matrix tests](ci/test-release.py) now assert that the build job and generated
+  rows omit custom timeouts, preserving GitHub Actions' default timeout behavior.
+  All 48 application/platform selections pass, and the full offline suite passes
+  all 45 tests locally with native installer fixtures enabled. No workflow changes
+  or live publication were performed for this fix.
+- A release containing the corrected tests is required; rerunning the unchanged
+  v2.0.3 tag will still execute the stale assertion.
+
+## Windows Release Uninstall Verification (2026-10-23)
+
+- Resolved locally: the [v2.0.2 packaging job](https://github.com/precise-alloy/regressify-rs/actions/runs/39827230980/job/120003049237)
+  passed its installer tests, compiled setup, and completed the installation smoke
+  checks, then failed with `Cannot bind argument to parameter 'Path' because it is null.`
+  A malformed `Join-Path` expression in the
+  [uninstall license check](ci/build-installer.ps1) referenced nonexistent variables
+  instead of the installation directory. PowerShell parsing alone did not catch it.
+- The [regression](ci/test-release.py) executes the actual cleanup loop in temporary
+  directories with spaces and literal brackets. It failed before the fix and now
+  accepts removed licenses, rejects either leftover license, and preserves unrelated
+  user files. All seven `InstallerTests` pass, including isolated native fixtures.
+- Hosted end-to-end packaging/publication still needs a release containing this fix;
+  rerunning the unchanged v2.0.2 tag will use the broken script. No real application
+  installation or publication was performed locally.
+
+## Musl Release Targets (2026-10-23)
+
+- Confirmed in [v2.0.0 ARM64 Musl job](https://github.com/precise-alloy/regressify-rs/actions/runs/39821561437/job/119973968352)
+  and its x64 Musl sibling: `openssl-sys` cannot find target OpenSSL and pkg-config
+  is not configured for cross-compilation. `cargo tree --locked --no-default-features
+  --target aarch64-unknown-linux-musl -i openssl-sys -e features` confirms the CLI's
+  default reqwest TLS backend brings in native OpenSSL. The ARM64 build also used
+  a glibc C compiler instead of a proper Musl toolchain.
+- Musl compilation is technically possible with additional TLS/sysroot work, but
+  that alone is not end-to-end support: [managed Chromium](src/test/browsers.rs)
+  explicitly rejects Linux ARM64, and Musl needs a compatible browser runtime.
+  Both Musl prebuilt targets are removed from CI, required assets, and website
+  downloads. Terminal installation rejects unsupported Linux targets before
+  downloading or modifying existing binaries.
+- Retained: Windows x64, macOS Intel/Apple silicon, and Linux x64 glibc, for CLI
+  and desktop. Eight parallel builds produce 16 archives and 16 sidecars; setup
+  and `latest.txt` complete the 34-asset release. Full publication/deployment
+  verification gates remain mandatory. A new tag containing the fix is required;
+  rerunning v2.0.0 uses its unchanged workflow.
+
+## GitHub Releases And Cloudflare Deployment (2026-10-22)
+
+- Open: no hosted tag release or live Cloudflare deployment has verified the
+  [new pipeline](docs/desktop.md#release-pipeline). Configure the repository's
+  built-in release-token permissions and Cloudflare secrets/domain in
+  `precise-alloy/regressify-rs`. Azure release publishing is removed.
+- Resolved offline: partial inventories previously passed staging, and publication
+  could overwrite assets. All required archives, sidecars, setup, and the manifest
+  must match before a draft is published; a second public inventory gate blocks
+  website builds/deploys until GitHub metadata matches every local file.
+- The website hosts only metadata/install scripts/pages/MCP. GitHub retains
+  versioned binaries, so Cloudflare's 25 MiB asset limit no longer constrains them.
+  Windows uses a bootstrapper with baked payload hashes and background prepare-only
+  mode. Local receipts cannot override feed hashes. Native regressions cover
+  preparation while the app runs, stale receipts, and descendant cancellation.
+- Offline evidence: all release/installer/script fixtures, updater model tests,
+  website type checks/unit tests, and a production site build using a synthetic
+  complete feed. Browser checks cover all archive links, OS-specific homepage
+  buttons, and desktop/narrow layouts. Real Linux/macOS packaging and native
+  application execution remain hosted-run gates, not claims from simulated targets.
+  Real Windows application installation, directory migration, and uninstall smoke
+  also remain release-CI checks; local tests used isolated synthetic fixtures only.
+- Open: the final Tuyen Drive bridge is intentionally deferred until the maintainer
+  confirms the new site. Start from `d066dc81a2befb9cb622762cbf3c7a21e8c198fc`,
+  backport new updater support, retain old-feed-compatible naming, and require
+  old < bridge < site versions. Old clients first install that bridge, then the
+  website-selected version. See [Bridge Rollout](docs/desktop.md#bridge-rollout).
+- The previously hosted `regressify-mcp` workers.dev Worker is no longer deployed
+  by CI. `regressify init` migrates workspaces to `https://regressify.eshn.dev/mcp`;
+  retire the old Worker once clients have moved. The root `bun run deploy` still
+  targets that standalone Worker.
+
 ## Third-Party Notices In Distributions (2026-10-22)
 
 - Open: release archives, the Windows installer, and published reports ship
@@ -1132,10 +1258,9 @@ it was risk-focused, not an exhaustive security certification.
   compatibility date, and exclusions. Uploads honor single-asset/concurrency hints,
   invalidate MIME changes, bound raw memory, and distinguish rejected publications
   from uncertain outcomes without retrying publication.
-- [Azure release preparation](.ado/workflows/tuyen-release.yaml) waits for `vswhere`
-  to finish before selecting MSBuild, avoiding a stale exit code that rejected a
-  valid installation. Native Windows reproduction and [offline release tests](ci/test-release.py)
-  cover successful, empty, and failed lookups without PATH updates on failure.
+- Historical: Azure release preparation waited for `vswhere` before selecting
+  MSBuild to avoid a stale native exit code. The Azure publishing pipeline and
+  its provider-specific checks were retired in the 2026-10-22 GitHub migration.
 - Source now supports selected-line comments, indentation, duplication, movement,
   and deletion through focused shortcuts and an Edit menu. GUI regressions cover
   undo/redo, JSON comment rejection, read-only and busy guards, Unicode/CRLF, and
