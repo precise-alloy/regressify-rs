@@ -1,15 +1,15 @@
 ---
 // Version/size line for the download call to action. Only validated release
 // fields are rendered; manifest text never reaches the page.
-import { formatSize, getRelease } from '../lib/release';
+import { getRelease } from '../lib/release';
 
 const release = await getRelease();
 const text =
   release.status === 'available'
-    ? `Version ${release.version} · ${formatSize(release.size)} · Windows x64`
+    ? `Version ${release.version} · Windows, macOS & Linux`
     : release.status === 'unpublished'
-      ? 'Windows installer coming soon. Build from source today.'
-      : 'Installer details unavailable. See the download page.';
+      ? 'Prebuilt binaries coming soon. Build from source today.'
+      : 'Release details unavailable. See the download page.';
 ---
 
 <p class="release-meta">{text}</p>
