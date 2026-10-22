@@ -131,12 +131,22 @@ through the [snapshot assets workflow](.github/workflows/snapshot-assets.yml).
 
 ## Release Script Permissions
 
-Release definitions are available for [GitHub Actions](.github/workflows/tuyen-release.yml)
-and [Azure Pipelines](.ado/workflows/tuyen-release.yaml). Desktop selections also
-build the CLI in parallel. The Windows installer installs both executables in
-the same folder and adds that folder to the current user's PATH. See the
-[release guide](docs/desktop.md#release-pipeline) for setup, Library variables,
-supported targets, and publishing safeguards.
+The [GitHub release workflow](.github/workflows/tuyen-release.yml) runs from
+`precise-alloy/regressify-rs`. Version tags build all supported targets in parallel.
+Only after all binaries, archives, checksums, and the Windows bootstrapper are ready
+does it create a draft release, upload and verify every asset, and publish it.
+The website builds and deploys only after a second GitHub inventory check.
+GitHub retains versioned binaries; Cloudflare serves the website, install commands,
+`/downloads/latest.txt`, and `/mcp`. Azure release publishing is retired.
+
+Install from <https://regressify.eshn.dev/download/> or use
+`irm https://regressify.eshn.dev/install.ps1 | iex` on Windows, or
+`curl -fsSL https://regressify.eshn.dev/install.sh | sh` on macOS/Linux.
+These commands execute a script from the site. Downloads are SHA-256 checked;
+unsigned application warnings may still apply. Windows setup installs the desktop
+app and CLI into `%LOCALAPPDATA%\Programs\Regressify` and adds that directory
+to the user PATH. See the [release guide](docs/desktop.md#release-pipeline)
+for supported targets, secrets, and publishing safeguards.
 
 ```bash
 git update-index --chmod=+x ./ci/install-rust.sh

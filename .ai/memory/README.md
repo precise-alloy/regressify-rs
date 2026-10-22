@@ -62,8 +62,8 @@ assistant's private memory store. Keep this directory out of ignore rules.
   schema boundaries, and production-fixture browser checks.
 - [Desktop publishing](desktop-publishing.md): managed landing apps, named tokens,
   client-side status, and native publishing verification.
-- [Release pipelines](release-pipelines.md): GitHub/Azure release selection, Library
-  scope, stage locking, and Windows tool compatibility.
+- [Release pipelines](release-pipelines.md): complete GitHub asset publication,
+  bootstrapper preparation, multi-OS scripts, and the deferred bridge rollout.
 - [Licensing](licensing.md): verbatim AGPL text hash, output-exception upkeep,
   and cargo-deny license-gate checks.
 

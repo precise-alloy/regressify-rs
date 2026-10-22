@@ -56,19 +56,27 @@ fn desktop_version() -> (String, [u16; 4]) {
 
 fn emit_desktop_release() {
     println!("cargo:rerun-if-env-changed=REGRESSIFY_DESKTOP_VERSION");
-    println!("cargo:rerun-if-env-changed=TUYEN_DRIVE_APP");
+    println!("cargo:rerun-if-env-changed=REGRESSIFY_UPDATE_ORIGIN");
     let (version, _) = desktop_version();
-    let slug = std::env::var("TUYEN_DRIVE_APP").unwrap_or_default();
+    // Official release builds name the website origin whose /downloads/ hosts the
+    // update feed; other builds leave it empty, which disables update checks.
+    let origin = std::env::var("REGRESSIFY_UPDATE_ORIGIN").unwrap_or_default();
     assert!(
-        slug.len() <= 64
-            && slug.bytes().all(|byte| byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || byte == b'-'
-                || byte == b'_'),
-        "TUYEN_DRIVE_APP must be a Tuyen Drive app slug"
+        origin.is_empty()
+            || origin.strip_prefix("https://").is_some_and(|host| {
+                !host.is_empty()
+                    && host.len() <= 253
+                    && host.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || byte == b'-'
+                            || byte == b'.'
+                    })
+            }),
+        "REGRESSIFY_UPDATE_ORIGIN must be an https://host origin without a path"
     );
     println!("cargo:rustc-env=REGRESSIFY_DESKTOP_VERSION={version}");
-    println!("cargo:rustc-env=TUYEN_DRIVE_APP={slug}");
+    println!("cargo:rustc-env=REGRESSIFY_UPDATE_ORIGIN={origin}");
 }
 
 fn emit_git_hash() {
