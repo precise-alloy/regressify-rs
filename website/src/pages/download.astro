@@ -1,20 +1,28 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
 import Button from '../components/Button.astro';
-import Card from '../components/Card.astro';
 import CodeBlock from '../components/CodeBlock.astro';
 import Icon from '../components/Icon.astro';
 import { SITE } from '../config/site';
-import { downloadHref, formatSize, getRelease } from '../lib/release';
+import { downloadHref, formatSize, getRelease, getReleaseArchives } from '../lib/release';
 
 // Facts on this page come from docs/desktop.md (Windows Installation and Updates,
-// Build and Launch) and README.md. Only Windows x64 has a public installer.
+// Build and Launch) and README.md. Only Windows x64 has an installer; release
+// deployments also publish CLI and desktop archives for every built platform.
 const release = await getRelease();
 const latestHref = downloadHref(release);
+const archives = await getReleaseArchives();
+const platforms = [
+  { id: 'windows-archives', title: 'Windows archives', items: archives.filter((archive) => archive.target.endsWith('-msvc')) },
+  { id: 'macos', title: 'macOS', items: archives.filter((archive) => archive.target.endsWith('-darwin')) },
+  { id: 'linux', title: 'Linux', items: archives.filter((archive) => archive.target.includes('-linux-')) },
+];
 const repoUrl = SITE.repoUrl;
 const cloneUrl = repoUrl ? `${repoUrl}.git` : null;
 
 const verify = release.status === 'available' ? `Get-FileHash .\\${release.fileName} -Algorithm SHA256` : '';
+const windowsCliInstall = 'irm https://regressify.eshn.dev/install.ps1 | iex';
+const unixCliInstall = 'curl -fsSL https://regressify.eshn.dev/install.sh | sh';
 
 const fromSource = [
   cloneUrl ? `git clone ${cloneUrl}\ncd regressify-rs` : '# From a checkout of the Regressify repository',
@@ -29,23 +37,46 @@ const fromSource = [
 const desktopFromSource = `cargo build --release --features gui --bin regressify-desktop`;
 ---
 
-<BaseLayout title="Download" description="Download the Regressify desktop app and CLI for Windows, or build them from source.">
+<BaseLayout title="Download" description="Download the Regressify desktop app and CLI for Windows, macOS, and Linux, or build them from source.">
   <div class="container page">
     <header class="heading">
       <h1>Download Regressify</h1>
-      <p class="muted">Get the desktop app and CLI together on Windows, or build them from source on any supported platform.</p>
+      <p class="muted">Install the desktop app and CLI from the terminal or direct downloads on Windows, macOS, and Linux.</p>
+      <nav class="links" aria-label="Download platforms">
+        <a href="#windows">Windows</a><a href="#macos">macOS</a><a href="#linux">Linux</a>
+      </nav>
     </header>
 
-    <Card as="section" class="option">
+    <section class="option" aria-labelledby="cli-install-heading">
+      <div class="option-head">
+        <span class="badge">Windows, macOS, Linux</span>
+        <h2 id="cli-install-heading">Install from the command line</h2>
+      </div>
+      <p class="muted">
+        Downloads are checked against the release SHA-256. These commands execute a script from this site;
+        review the <a href="/install.ps1">PowerShell script</a> or <a href="/install.sh">shell script</a> first.
+      </p>
+      <CodeBlock title="Windows (PowerShell)" code={windowsCliInstall} lang="powershell" />
+      <CodeBlock title="macOS and Linux" code={unixCliInstall} lang="sh" />
+      <p class="muted small">
+        On Windows, the verified setup downloads its matching application files. On macOS and Linux,
+        the command installs <code>regressify</code> and{' '}
+        <code>regressify-desktop</code> (where supported) into <code>~/.local/bin</code> and prepares the managed Chromium
+        build.
+      </p>
+      <p class="muted small">Terminal downloads may not receive browser-added origin metadata. Unsigned applications can still trigger operating-system or organization security warnings.</p>
+    </section>
+
+    <section id="windows" class="option">
       <div class="option-head">
         <span class="badge">Windows x64</span>
         <h2>Desktop app and CLI installer</h2>
       </div>
       <ul class="facts">
-        <li>Per-user setup with no administrator rights.</li>
+        <li>Per-user setup in <code>%LOCALAPPDATA%\Programs\Regressify</code> with no administrator rights.</li>
         <li>Installs Regressify Desktop and the <code>regressify</code> CLI and adds them to your user PATH.</li>
         <li>Prepares the managed Chromium build used for captures.</li>
-        <li>Checks for updates in the background and verifies each download by SHA-256.</li>
+        <li>Checks for updates in the background and verifies each download by SHA-256 before notifying you.</li>
       </ul>
 
       {
@@ -55,8 +86,7 @@ const desktopFromSource = `cargo build --release --features gui --bin regressify
               <Icon name="download" />
               Download for Windows
             </Button>
-            {/* Details describe the release current when the site was built; the
-                button always fetches the newest one. */}
+            {/* Release deployments rebuild this page, so details match the published file. */}
             <dl class="details">
               <div>
                 <dt>Version</dt>
@@ -80,12 +110,11 @@ const desktopFromSource = `cargo build --release --features gui --bin regressify
               </div>
             </dl>
             <p class="muted small">
-              The checksum is for version {release.version}, the latest when this page was built. If the installer you
-              receive has a newer version, this page has not been rebuilt yet; download{' '}
+              Verify the downloaded{' '}
               <a href={release.url} rel="noopener">
                 {release.fileName}
               </a>{' '}
-              directly to match the hash. Verify it in PowerShell:
+              in PowerShell:
             </p>
             <CodeBlock code={verify} lang="powershell" />
           </div>
@@ -98,20 +127,12 @@ const desktopFromSource = `cargo build --release --features gui --bin regressify
           </div>
         ) : (
           // A failed or invalid feed check says nothing about whether a release
-          // exists, so do not claim it is unpublished; the stable redirect still works.
-          <div class="release">
-            {latestHref && (
-              <Button variant="primary" size="lg" href={latestHref} rel="noopener">
-                <Icon name="download" />
-                Download for Windows
-              </Button>
-            )}
-            <div class="notice" role="status">
-              <p>
-                <strong>Version and checksum details could not be verified when this page was built.</strong> The button
-                still downloads the latest installer, or you can <a href="#source-heading">build from source</a> below.
-              </p>
-            </div>
+          // exists, so do not claim it is unpublished.
+          <div class="notice" role="status">
+            <p>
+              <strong>Installer details could not be verified when this page was built.</strong> Try again later, or{' '}
+              <a href="#source-heading">build from source</a> below.
+            </p>
           </div>
         )
       }
@@ -119,9 +140,53 @@ const desktopFromSource = `cargo build --release --features gui --bin regressify
         Installers are currently unsigned, so Windows may show a SmartScreen warning. Open a new terminal after setup to
         use <code>regressify</code>.
       </p>
-    </Card>
+    </section>
 
-    <Card as="section" class="option" aria-labelledby="source-heading">
+    {platforms.map(({ id, title, items }) => (
+        <section id={id} class="option" aria-labelledby={`${id}-heading`}>
+          <h2 id={`${id}-heading`}>{title}</h2>
+          {id === 'linux' && <p class="muted small">CLI and desktop: x64 glibc systems. The desktop app also requires compatible GUI libraries. Musl and Linux ARM64 releases are not available.</p>}
+          {id === 'macos' && <p class="muted small">Choose Apple silicon or Intel to match your Mac. The terminal command selects the architecture automatically.</p>}
+          {items.length > 0 ? (
+                <div class="table-wrap">
+                  <table>
+                    <caption class="visually-hidden">{title} release assets</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Platform</th>
+                        <th scope="col">Application</th>
+                        <th scope="col">File</th>
+                        <th scope="col">Size</th>
+                        <th scope="col">SHA-256</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((archive) => (
+                        <tr>
+                          <td>{archive.platform}</td>
+                          <td>{archive.application === 'cli' ? 'CLI' : 'Desktop'}</td>
+                          <td>
+                            <a href={archive.url} title={archive.fileName}>{archive.format.toUpperCase()}</a>
+                          </td>
+                          <td>{formatSize(archive.size)}</td>
+                          <td>
+                            <a class="checksum" href={`${archive.url}.sha256`} title={archive.sha256}>
+                              {archive.sha256.slice(0, 12)}…
+                            </a>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                ) : <p class="muted">Release files are unavailable. Use the source build below.</p>}
+          <p class="muted small">
+            Binaries are unsigned; macOS may require allowing them in System Settings &gt; Privacy &amp; Security.
+          </p>
+        </section>
+    ))}
+
+    <section class="option" aria-labelledby="source-heading">
       <div class="option-head">
         <span class="badge">Windows, macOS, Linux</span>
         <h2 id="source-heading">Build from source</h2>
@@ -150,7 +215,7 @@ const desktopFromSource = `cargo build --release --features gui --bin regressify
           )
         }
       </div>
-    </Card>
+    </section>
   </div>
 </BaseLayout>
 
@@ -176,6 +241,9 @@ const desktopFromSource = `cargo build --release --features gui --bin regressify
     display: grid;
     gap: var(--space-lg);
     min-width: 0;
+    padding-block: var(--space-lg);
+    border-top: var(--border-width) solid var(--border);
+    scroll-margin-top: 80px;
   }
 
   .option-head {
@@ -267,6 +335,36 @@ const desktopFromSource = `cargo build --release --features gui --bin regressify
     padding: 1px 4px;
     border-radius: var(--radius-sm);
     background: var(--muted);
+  }
+
+  .table-wrap {
+    overflow-x: auto;
+    width: 100%;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+  }
+
+  caption {
+    padding-bottom: var(--space-xs);
+    font-weight: var(--weight-medium);
+    text-align: left;
+  }
+
+  th,
+  td {
+    padding: var(--space-xs) var(--space-sm);
+    border-bottom: var(--border-width) solid var(--border);
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  th {
+    color: var(--muted-foreground);
+    font-weight: var(--weight-medium);
   }
 
   .links {

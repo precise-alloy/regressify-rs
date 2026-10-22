@@ -18,7 +18,9 @@ const OVERRIDE_CSS: &str = "/* Add project-specific CSS overrides here. */\n";
 const ON_READY_JS: &str = "// Add project-specific JavaScript that runs before capture.\n";
 const REPLACEMENT_PROFILES: &str = "profiles:\n  default: []\n";
 const SAMPLE_SUITE: &str = "scenarios:\n  - url: https://example.com\n    label: example-home\n";
-const REGRESSIFY_MCP_URL: &str = "https://regressify-mcp.tuyen-at-work.workers.dev/mcp";
+// Served by the website Worker (website/wrangler.jsonc). Init rewrites any older
+// `regressify-mcp` URL, including the retired workers.dev endpoint, to this value.
+const REGRESSIFY_MCP_URL: &str = "https://regressify.eshn.dev/mcp";
 const REGRESSIFY_AGENT_HEADING: &str = "Regressify CMP";
 
 pub fn init() -> Result<()> {
@@ -785,6 +787,27 @@ mod tests {
         assert_eq!(
             fs::read_to_string(path).unwrap(),
             original.replace("https://example.com/custom-mcp", REGRESSIFY_MCP_URL)
+        );
+    }
+
+    #[test]
+    fn init_migrates_the_retired_workers_dev_mcp_url() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        fs::create_dir(root.join(".vscode")).unwrap();
+        let path = root.join(".vscode/mcp.json");
+        let retired = "https://regressify-mcp.tuyen-at-work.workers.dev/mcp";
+        let original = format!(
+            "{{\n    \"servers\": {{\n        \"regressify-mcp\": {{\"type\": \"http\", \"url\": \"{retired}\"}}\n    }}\n}}\n"
+        );
+        fs::write(&path, &original).unwrap();
+
+        init_workspace(root).unwrap();
+
+        assert_eq!(REGRESSIFY_MCP_URL, "https://regressify.eshn.dev/mcp");
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            original.replace(retired, REGRESSIFY_MCP_URL)
         );
     }
 

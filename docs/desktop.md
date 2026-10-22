@@ -82,10 +82,10 @@ window icons and rendered title-bar/taskbar pixels with:
 
 ## Windows Installation and Updates
 
-Windows x86_64 releases include `Regressify-Desktop-Setup-N.N.N.N-x64.exe`.
+Windows x86_64 releases include `Regressify-Setup-N.N.N.N-x64.exe`.
 Run the installer normally, without administrator elevation. It installs
 `regressify-desktop.exe` and `regressify.exe` together in the per-user folder
-`%LOCALAPPDATA%\Programs\Regressify Desktop` with the `LICENSE` and
+`%LOCALAPPDATA%\Programs\Regressify` with the `LICENSE` and
 `LICENSING.md` license files, creates desktop and Start-menu shortcuts, and adds
 **Open with Regressify Desktop** to folder and folder-background
 context menus. On Windows 11, the command is under **Show more options**.
@@ -97,6 +97,20 @@ context-menu entries, and only the PATH entry owned by setup; pre-existing entri
 and later PATH edits are
 preserved. Workspaces and desktop preferences survive updates and uninstall.
 Both release executables link the MSVC runtime statically.
+
+Setup is a bootstrapper, not an embedded copy of the binaries. It downloads the
+exact tagged Windows ZIP archives from GitHub Releases and verifies hashes baked
+into setup at build time before extracting them. Upgrades keep the same AppId,
+migrate the registered old install directory and owned PATH entry, and remove only
+known installer-owned files from the old directory. Other user files remain.
+GUI shortcuts and the Explorer command retain the name Regressify Desktop.
+
+For terminal installation on Windows use
+`irm https://regressify.eshn.dev/install.ps1 | iex`. The script verifies the
+bootstrapper's size and SHA-256, then launches normal setup. Terminal downloads
+may not receive browser-added origin metadata, but unsigned application and
+organization security warnings may still apply. Scripts do not disable security
+policies. Review the script before executing it.
 
 Setup also prepares the pinned Chromium build in
 `%LOCALAPPDATA%\regressify\chromium` before launching the app. It checks the same
@@ -133,7 +147,11 @@ refreshes the shared check timestamp even if another instance checked recently;
 scheduled checks in long-running instances use that timestamp and eight-hour interval.
 After sleep, an overdue check runs on the next local poll. No upgrade banner,
 highlighted update button, or installation prompt appears until the entire
-installer is saved locally and matches the manifest's size and SHA-256. Network
+installer and both application archives are saved locally and match the manifest's
+sizes and SHA-256s. After verifying setup, the updater runs it with
+`/PREPARE=<cache-directory>` in the background; it downloads and verifies the
+archives without touching the installation, PATH, shortcuts, or running windows.
+Network
 outages and failed preparation do not interrupt editing or announce an upgrade.
 
 Only one instance per user update cache owns checking and downloading at a time.
@@ -149,8 +167,10 @@ download. Abnormal process termination also releases ownership automatically.
 Once preparation succeeds, a banner stays visible below the title bar in every
 view with an Install update button, and the header's Software updates button is
 highlighted. Select Install update, then Install and restart. Installation uses
-the verified local installer without contacting the update service; its size and
-SHA-256 are checked again immediately before execution. Closing the dialog does
+the verified local installer with `/SOURCE=<cache-directory>`; setup rechecks
+its baked-in archive hashes and does not fetch missing application files in this
+mode. The updater rechecks setup and both archives immediately before launch.
+Optional Chromium preparation can still need a download. Closing the dialog does
 not dismiss the ready banner or remove the installer. Only newer numeric versions
 and this app's immutable HTTPS installer URLs are accepted. A missing manifest
 (404) means no release is published.
@@ -166,7 +186,9 @@ Discovering a newer release discards older partial and complete cached
 installers before preparing the replacement. Unrelated cache files are left alone.
 Closing the app or losing
 power does not intentionally discard download progress: the next launch resumes
-from the saved bytes using HTTP range requests. If the server ignores ranges, the
+the bootstrapper from the saved bytes using HTTP range requests. Verified complete
+application archives are reused; an interrupted archive transfer may restart.
+If the server ignores ranges, the
 transfer restarts from byte zero. An interrupted verification rechecks the retained
 file, and an already downloaded installer can be verified and offered even while
 the update service is unavailable. Cached release URLs are validated again before
@@ -192,8 +214,8 @@ when an installer is already ready, so a newer release can replace it. Automatic
 startup checks and scheduled retries never reset the budget for the same version.
 
 The Software updates dialog supports manual checks and shows preparation status:
-connecting, receiving data, SHA-256 verification,
-and saving the verified installer to disk. During transfer it shows received and
+connecting, receiving data, SHA-256 verification, saving the verified installer,
+and preparing application files. During the bootstrapper transfer it shows received and
 total MiB, percentage, average speed, and elapsed seconds. After five seconds
 without data it also shows the inactivity time. Connecting or receiving no data
 for 30 seconds pauses the attempt; each download attempt has a separate 15-minute
@@ -205,7 +227,10 @@ Closing the owner without pausing allows another instance or the next launch to
 resume instead. Closing only the dialog lets
 preparation continue. Diagnostics are shown only in the dialog, where Copy details
 copies the message for troubleshooting. A ready installer still requires an
-explicit Install and restart; there is no automatic installation.
+explicit Install and restart; there is no automatic installation. Background payload
+preparation has its own 15-minute deadline. Pause, shutdown handoff, and timeout
+terminate and reap the entire preparation process group, including Inno's second
+phase. The app stays usable while preparation runs.
 
 Installation requires active runs to finish and uses the usual Save/Discard/Cancel
 guard for a draft. No open workspace or document is required. After the initiating
@@ -220,9 +245,28 @@ from installation, but disk errors, security software, or running app instances
 can still prevent setup from completing. Unconfigured development builds and non-Windows
 builds do not contact the update service.
 
-The public feed is `https://drive.tuyen.blog/downloads/<app-slug>/latest.txt`.
-Only the public app slug is embedded in the application, never the upload token.
-Installers are currently unsigned, so Windows may show SmartScreen warnings.
+The public feed is `https://regressify.eshn.dev/downloads/latest.txt`. It selects
+the site's supported version; binaries remain on GitHub Releases. Official builds
+embed `REGRESSIFY_UPDATE_ORIGIN`, never credentials. Manifest redirects are refused.
+Installer URLs must be exactly
+`https://github.com/precise-alloy/regressify-rs/releases/download/<tag>/Regressify-Setup-<version>-x64.exe`,
+with a tag matching the numeric version. Downloads allow bounded HTTPS GitHub
+asset redirects and remain size/SHA-256 checked. Installers are unsigned.
+Existing Tuyen Drive installs use the separately published bridge described
+under [Bridge Rollout](#bridge-rollout); the old feed is not redirected.
+
+macOS and Linux provide terminal installation via
+`curl -fsSL https://regressify.eshn.dev/install.sh | sh`, plus ZIP/7z downloads.
+The script installs into `~/.local/bin`, stores licenses under
+`~/.local/share/regressify`, and attempts Chromium preparation. Set
+`REGRESSIFY_INSTALL_DIR`, `REGRESSIFY_SHARE_DIR`, `REGRESSIFY_CLI_ONLY=1`, or
+`REGRESSIFY_SKIP_CHROMIUM=1` before invoking it to customize those choices.
+Both macOS architectures and Linux x64 glibc have CLI and desktop binaries.
+Musl distributions and Linux ARM64 are not supported by prebuilt releases; the
+installer rejects them before downloading or changing files. Linux desktop still requires compatible
+system GUI libraries. The script requires curl, unzip, and a SHA-256 tool; it
+verifies every selected archive before replacing binaries and does not edit shell
+profiles. Non-Windows in-app updates remain unavailable; rerun the terminal command.
 
 ## Git
 
@@ -909,55 +953,66 @@ jobs have separate caches and artifact names, and one failed job does not cancel
 the others. Desktop builds enable `gui`, which includes the bundled local engine;
 CLI feature flags remain unchanged. Desktop jobs have a 90-minute timeout.
 
-Desktop targets are Linux GNU x86_64 (Ubuntu 24.04 build host), macOS x86_64 and
-ARM64 (native macOS 15 runners), and Windows x86_64. Musl targets remain CLI-only;
-selecting only Musl with `desktop` fails early with an actionable error. With
-`both`, Musl jobs build the CLI and desktop jobs run for selected supported targets.
+Release targets for both CLI and desktop are Linux GNU x86_64 (desktop builds use
+Ubuntu 24.04; CLI builds use Ubuntu 22.04), macOS x86_64 and ARM64 (native macOS 15
+runners), and Windows x86_64. Musl release targets have been removed: they require
+additional native TLS/toolchain work and a compatible managed Chromium runtime.
+The current managed-browser implementation explicitly rejects Linux ARM64.
 
-Untagged/manual archive builds produce `regressify-cli-<target>` or
-`regressify-desktop-<target>` in ZIP and 7z formats with SHA-256 sidecars. Each
-archive contains the executable with `LICENSE` and `LICENSING.md`. Their
-destination repository and `linux`/`macos`/`windows` release tags are unchanged.
-Every build now checks out the triggering ref, not a hard-coded release branch.
+Every build produces `regressify-cli-<target>` or `regressify-desktop-<target>`
+archives in ZIP and 7z formats with SHA-256 sidecars. Each archive contains the
+executable with `LICENSE` and `LICENSING.md`. Manual runs keep them as workflow
+artifacts (`release-<application>-<target>`) and never publish.
+Every build checks out the triggering ref, not a hard-coded release branch.
 
-Push a version tag to publish the Windows desktop installer:
+Push a version tag in `precise-alloy/regressify-rs` to publish a release:
 
 ```sh
 git tag v0.2.1
 git push origin v0.2.1
 ```
 
-Tag pushes build Windows desktop and CLI in parallel. A separate Windows packaging
-job waits for the build jobs to succeed, downloads their exact executable artifacts,
-and creates one installer containing both. Missing or failed payload builds prevent
-packaging and publication. Tags must be `vN.N.N` or `vN.N.N.N`, with
+Automatic tag pushes build the CLI and desktop app for every supported platform
+in parallel. A separate Windows packaging job waits for every build job,
+downloads the exact Windows executable artifacts and archives, and creates a
+bootstrapper with their archive hashes baked in. Tagged Windows payloads are archived without UPX after their uncompressed
+executables are retained for the installer. Tags must be `vN.N.N` or `vN.N.N.N`, with
 each numeric component between 0 and 9999. The tag supplies the desktop version,
-Windows executable metadata, installer name/version and Tuyen Drive version;
-three components normalize to four (for example `v0.2.1` becomes `0.2.1.0`).
-The Cargo/CLI package version is not changed. A manually dispatched workflow can
-also publish when run on a valid version tag with Windows desktop selected.
-Branch builds cannot publish to Tuyen Drive.
+Windows executable metadata, and installer name/version; three components
+normalize to four (for example `v0.2.1` becomes `0.2.1.0`). The Cargo/CLI package
+version is not changed. Manual runs, including manual runs on a tag, only build.
 
-Configure the repository secrets `TUYEN_DRIVE_APP` (app slug) and
-`TUYEN_DRIVE_TOKEN` (that app's upload token). Only the publish step receives the
-token. Tagged Windows jobs do not require the legacy GitHub archive-upload
-credentials. The version must be higher than the latest published version.
-Releases are serialized without cancelling an active publish. CI installs Tuyen
-CLI with `tuyen-at-work/tuyen-cli-action@master` and checks that
-`tuyen drive upload-app` is available before packaging. The publish step passes the
-app, token, tagged version, installer file, and `<filename>=installer` role to
-that command. Tuyen CLI owns checksums, upload-size selection, and retries; there
-is no custom Python uploader. The setup action must provide a CLI release that
-includes `drive upload-app`.
+Publication is a strict chain. Eight application/target jobs build independently,
+while Linux/macOS offline checks run in parallel. Any failed check, build, or
+Windows packaging job prevents publication.
 
-After a successful CLI upload, a separate credential-free check requires the
-public manifest to match the exact version, immutable URL, size, and SHA-256 of
-the local installer. It retries transient errors and propagation delays within
-a bound, and uses an explicit client User-Agent rather than Python's default.
-Tuyen Drive generates the manifest; it is never uploaded separately. Published
-versions cannot be overwritten, including with a different rebuild of the same
-tag. CI retains the installer as an Actions artifact before publishing.
+1. `publish` stages the complete expected inventory: 16 ZIP/7z archives (four CLI
+   targets and four desktop targets), 16 named SHA-256 sidecars, and one Windows
+   bootstrapper. Unknown, duplicate, missing, symlinked, empty, oversized, or
+   checksum-mismatched assets fail before release creation. The generated
+   `latest.txt` adds version, tag, installer metadata, and
+   `archive.<filename>=<size>:<sha256>` for every archive. The client limit is 1 GiB
+   per binary and 16 KiB for the manifest; binary assets do not go to Cloudflare.
+1. Only the `publish` job has `contents: write` and uses the repository's built-in
+   `GITHUB_TOKEN`. It creates a draft, uploads all 34 files, then checks GitHub's
+   exact asset names, uploaded state, sizes, SHA-256 digests, and URLs before
+   publishing. Reruns may fill missing draft assets but never overwrite bytes.
+   A published release must already match completely; failed lookups are not
+   treated as permission to create a new release.
+1. `deploy` depends on successful publication. It downloads the verified inputs
+   and checks the published GitHub inventory again **before building the site**.
+   It extracts the released Linux CLI, builds the website from the same manifest,
+   exports and tests the MCP Worker, and deploys one `regressify` Cloudflare Worker.
+   Only `latest.txt`, installation scripts, website assets, and `/mcp` are hosted
+   there. The final credential-free feed check verifies the installer metadata.
 
+Previous release binaries remain downloadable from GitHub. The website/feed
+selects the version associated with its deployment, not GitHub's mutable latest
+redirect. Configure `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` repository
+secrets in `precise-alloy/regressify-rs`; only the deploy step receives them.
+The `eshn.dev` zone must belong to that account. Workflows serialize releases
+without cancelling an active deployment. Publishing from other repositories and
+manual runs is blocked. Azure release publishing has been removed.
 The installer is compiled with Inno Setup 6. Release CI requires both executable
 payloads, verifies both binaries' static-runtime dependencies, and runs isolated
 native PATH tests before packaging. Its installation smoke checks also exercise
@@ -974,7 +1029,7 @@ matching `-Version`. For an isolated machine authorized for installation testing
 $env:REGRESSIFY_DESKTOP_VERSION = '0.2.0.0'
 cargo build --locked --no-default-features --features gui --bin regressify-desktop
 cargo build --locked --no-default-features --bin regressify
-./ci/build-desktop-installer.ps1 -Version 0.2.0.0 -BinaryDirectory target/debug -Compiler 'C:/Tools/Inno Setup 6/ISCC.exe' -SmokeTest
+./ci/build-installer.ps1 -Version 0.2.0.0 -ReleaseTag v0.2.0 -BinaryDirectory target/debug -Compiler 'C:/Tools/Inno Setup 6/ISCC.exe' -SmokeTest
 ./ci/desktop-smoke.ps1 -SkipBuild -UpdateFlows
 ```
 
@@ -1003,10 +1058,10 @@ history and automatic cleanup without modifying the installed app's Jump List:
 cargo test --features gui-tests --lib desktop::jump_list::tests -- --include-ignored --test-threads=1
 ```
 
-Release tests run before generating the matrix. To run them locally, install
+Release tests run alongside the build matrix. To run them locally, install
 `PyYAML==6.0.3` for Python 3.11+ and run `python ci/test-release.py`. Bash and
 PowerShell 7.4+ (`pwsh`) are also required; set `BASH_PATH` to Git Bash on Windows.
-The tests execute all 192 application/target selections, stub Cargo and Tuyen CLI
+The tests execute all 48 application/target selections, stub Cargo
 to check the real workflow arguments and failure handling, and verify manifests
 against offline fixtures without publishing.
 
@@ -1017,60 +1072,29 @@ temporary registry keys. A synthetic setup/uninstall cycle exercises the actual
 uninstall callback and smoke process helper inside a temporary directory, without
 changing the real user PATH or app registration. Process fixtures also verify
 exit codes, argument/proxy preservation and timeout cleanup, including a surviving
-second phase after its launcher exits. Both Windows packaging jobs run these
+second phase after its launcher exits. The Windows packaging job runs these
 checks with `ISCC_PATH` set before the full installation smoke test.
 
-### Azure Pipelines
+### Bridge Rollout
 
-Create an Azure DevOps Services pipeline using the existing YAML file
-[.ado/workflows/tuyen-release.yaml](../.ado/workflows/tuyen-release.yaml).
-It preserves the GitHub build choices, tag-only Windows installer publishing,
-manual tagged releases, companion CLI builds, Linux GNU fallback, and CLI-only Musl targets.
-The Azure version omits macOS ARM64 because Microsoft's hosted ARM64 preview is
-not generally available; macOS x86_64 uses `macos-15`. GitHub retains its ARM64 option.
+Do not publish the final Tuyen Drive bridge until the new GitHub release and site
+have deployed successfully and the maintainer confirms the site is working.
+The bridge will be prepared separately from commit
+`d066dc81a2befb9cb622762cbf3c7a21e8c198fc`; no bridge branch, tag, or upload is
+created by this change. That commit alone still reads Tuyen Drive and must receive
+the new updater/feed, GitHub redirect, payload preparation, and cache-migration
+support before it can bridge clients.
 
-Authorize the pipeline under **Pipelines > Library > Pipeline permissions** for
-both existing variable groups, using these case-sensitive names:
-
-- `GitHub`: `TUYEN_GITHUB_ACTION_DEV_TOOLS_REPO` and
-  `TUYEN_GITHUB_ACTION_PAT_TOKEN` for the existing archive-upload destination.
-- `Regressify`: `TUYEN_DRIVE_APP` and `TUYEN_DRIVE_TOKEN` for installer publishing.
-
-Keep the credentials marked secret. The `Plan` stage has no Library groups;
-it runs the offline release tests and validates the complete source tag before
-emitting the version, dynamic matrix and installer-selection flag. The `Release` stage loads the groups,
-maps secrets only to the steps that need them, and refuses pull-request runs.
-Tagged Windows desktop builds receive the app slug but not the upload token.
-
-The release stage uses `lockBehavior: sequential`. Azure DevOps Services creates
-a [stage-level lock](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/approvals#exclusive-lock),
-so releases queue without cancelling an active release; no additional Library
-lock is required. GitHub and Azure locks are independent. Both definitions retain
-tag triggers: enable only one publisher for a release stream, because Tuyen Drive
-versions are immutable and a second upload of the same tag will fail.
-
-Windows uses Tuyen's native `https://cli.tuyen.blog/install.ps1` installer in the
-agent temporary directory and checks `drive upload-app` before packaging. Existing
-shell build scripts run through Git Bash on Windows, not WSL. The Rust installer
-step forwards its Musl cross-compilation environment settings to later Azure tasks.
-The `Installer` job depends on all parallel `Build` jobs and downloads the desktop
-and CLI payloads from the same pipeline run. Inno Setup smoke tests and both
-static-runtime checks remain mandatory, and the exact
-installer is retained as an Azure Pipeline Artifact before upload and verification.
-
-MSBuild discovery waits for `vswhere` to finish before selecting its first result.
-Piping it directly to `Select-Object -First 1` can leave `$LASTEXITCODE` unset or
-stale and falsely report `MSBuild was not found`. A nonzero discovery exit is
-reported separately from an empty result.
-
-Azure build jobs allow 90 minutes; the packaging job allows 30 minutes. Actual build
-parallelism depends on the account's available parallel-job capacity.
-An Azure private project's free hosted-job
-limit is 60 minutes; longer builds require paid hosted parallel-job capacity.
-The offline suite also exercises all 96 supported Azure application/target
-selections, PowerShell syntax, MSBuild discovery, environment forwarding, and both
-CI upload paths.
-Run only the Azure checks with `python ci/test-release.py AzureReleaseTests`.
+Keep the bridge download on the old feed with its old accepted
+`Regressify-Desktop-Setup-<bridge-version>-x64.exe` filename and stable AppId.
+Old clients cannot follow a redirect or accept a new-host installer URL. The
+bridge's installed app then reads the website feed and prepares the new
+`Regressify-Setup-<site-version>-x64.exe`. Preserve preferences and update caches;
+discard already-installed legacy feed entries before validating newer URLs.
+Choose versions so `old version < bridge version < site version`; publication
+chronology alone is insufficient for numeric update checks. Do not publish the
+bridge as the website's newest release. Retain the old bridge feed and payload
+for clients that return later. A manual current install remains an alternative.
 
 ## Workspace and Files
 

@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn installer_shortcuts_use_matching_app_id() {
-        let installer = include_str!("../../installer/regressify-desktop.iss");
+        let installer = include_str!("../../installer/regressify.iss");
         for location in ["{group}", "{autodesktop}"] {
             let shortcut = format!("Name: \"{location}\\Regressify Desktop\";");
             assert!(installer.lines().any(|line| {

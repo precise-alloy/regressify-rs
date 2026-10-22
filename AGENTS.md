@@ -73,7 +73,7 @@ Regressify is a Rust visual regression CLI and native desktop app. Read this gui
 | Desktop models and UI       | [src/desktop](src/desktop), [docs/desktop.md](docs/desktop.md), [native UI skill](.github/skills/desktop-native-ui/SKILL.md), [GPUI upgrade skill](.github/skills/update-gpui/SKILL.md)                                   |
 | Report deployment           | [src/desktop/deployment.rs](src/desktop/deployment.rs), [Cloudflare skill](.github/skills/deployment-cloudflare/SKILL.md)                                                                                                 |
 | Landing apps and tokens     | [Landing skill](.github/skills/desktop-landing-apps/SKILL.md), [Token skill](.github/skills/deployment-targets/SKILL.md)                                                                                                  |
-| Build and release           | [Cargo.toml](Cargo.toml), [ci](ci), [GitHub](.github/workflows), [Azure](.ado/workflows)                                                                                                                                  |
+| Build and release           | [Cargo.toml](Cargo.toml), [ci](ci), [GitHub](.github/workflows), [release skill](.github/skills/release-pipeline/SKILL.md)                                                                                                |
 | AI guidance                 | [Maintenance skill](.github/skills/maintain-agent-guidance/SKILL.md)                                                                                                                                                      |
 
 ## Skills and Checks

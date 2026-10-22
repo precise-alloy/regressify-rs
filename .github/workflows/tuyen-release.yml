@@ -34,22 +34,40 @@ on:
         description: Build for Windows x86_64
         required: true
         default: false
-      linuxMuslX86_64:
-        type: boolean
-        description: ⚠️ Build CLI for Linux Musl x86_64 (CLI only)
-        required: true
-        default: false
-      linuxMuslAarch64:
-        type: boolean
-        description: ⚠️ Build CLI for Linux Musl aarch64 (CLI only)
-        required: true
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
+env:
+  # Only metadata is hosted here; release binaries live on GitHub.
+  RELEASE_ORIGIN: https://regressify.eshn.dev
+
 jobs:
+  checks:
+    name: Offline release checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test release selection, publication, and install scripts
+        shell: bash
+        run: |
+          python -m pip install PyYAML==6.0.3
+          python ci/test-release.py
+
   release:
     needs: set-matrix
     timeout-minutes: ${{ matrix.timeout }}
@@ -104,9 +122,8 @@ jobs:
           CARGO_FEATURES: ${{ matrix.features }}
           OS: ${{ matrix.os }}
           TARGET: ${{ matrix.target }}
-          REPO: ${{ secrets.TUYEN_GITHUB_ACTION_DEV_TOOLS_REPO }}
-          TOKEN: ${{ secrets.TUYEN_GITHUB_ACTION_PAT_TOKEN }}
           NO_DEFAULT_FEATURES: 1
+          REGRESSIFY_DESKTOP_VERSION: ${{ needs.set-matrix.outputs.version }}
         shell: bash
 
       - name: Build Windows desktop release
@@ -114,7 +131,7 @@ jobs:
         shell: pwsh
         env:
           REGRESSIFY_DESKTOP_VERSION: ${{ needs.set-matrix.outputs.version }}
-          TUYEN_DRIVE_APP: ${{ secrets.TUYEN_DRIVE_APP }}
+          REGRESSIFY_UPDATE_ORIGIN: ${{ env.RELEASE_ORIGIN }}
           BINARY_GIT_HASH: ${{ github.sha }}
           RUSTFLAGS: -C target-feature=+crt-static
         run: |
@@ -139,6 +156,26 @@ jobs:
           path: target/x86_64-pc-windows-msvc/release/${{ matrix.application == 'desktop' && 'regressify-desktop' || 'regressify' }}.exe
           if-no-files-found: error
 
+      # Preserve the exact uncompressed Windows payloads used by installer verification.
+      - name: Archive installer payload
+        if: ${{ matrix.installer }}
+        run: ci/make-release.sh
+        env:
+          FILE_NAME: ${{ matrix.application == 'desktop' && 'regressify-desktop' || 'regressify' }}
+          PACKAGE_NAME: ${{ matrix.application == 'desktop' && 'regressify-desktop' || 'regressify-cli' }}
+          OS: ${{ matrix.os }}
+          TARGET: ${{ matrix.target }}
+          BINARY_GIT_HASH: ${{ github.sha }}
+          SKIP_BUILD: 1
+        shell: bash
+
+      - name: Retain release archives
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.application }}-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.application == 'desktop' && 'regressify-desktop' || 'regressify-cli' }}-${{ matrix.target }}.*
+          if-no-files-found: error
+
   installer:
     needs: [set-matrix, release]
     if: ${{ needs.set-matrix.outputs.installer == 'true' }}
@@ -147,15 +184,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-
-      - name: Setup Tuyen CLI
-        uses: tuyen-at-work/tuyen-cli-action@master
-
-      - name: Check Tuyen Drive upload support
-        shell: pwsh
-        run: |
-          tuyen drive upload-app --help
-          if ($LASTEXITCODE -ne 0) { throw "Tuyen CLI must support 'drive upload-app'; update the CLI release used by the setup action." }
 
       - uses: actions/setup-python@v7
         with:
@@ -171,6 +199,18 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: regressify-installer-cli
+          path: target/x86_64-pc-windows-msvc/release
+
+      - name: Download Windows desktop archive
+        uses: actions/download-artifact@v8
+        with:
+          name: release-desktop-x86_64-pc-windows-msvc
+          path: target/x86_64-pc-windows-msvc/release
+
+      - name: Download Windows CLI archive
+        uses: actions/download-artifact@v8
+        with:
+          name: release-cli-x86_64-pc-windows-msvc
           path: target/x86_64-pc-windows-msvc/release
 
       - name: Build Windows installer
@@ -189,48 +229,112 @@ jobs:
           $env:ISCC_PATH = $compiler
           python ci/test-release.py InstallerTests
           if ($LASTEXITCODE -ne 0) { throw "Installer checks failed ($LASTEXITCODE)." }
-          ./ci/build-desktop-installer.ps1 -Version $env:INSTALLER_VERSION -Compiler $compiler -RequireStaticRuntime -SmokeTest
+          ./ci/build-installer.ps1 -Version $env:INSTALLER_VERSION -ReleaseTag $env:GITHUB_REF_NAME -Compiler $compiler -RequireStaticRuntime -SmokeTest
 
       - name: Retain Windows installer
         uses: actions/upload-artifact@v7
         with:
-          name: regressify-desktop-windows-${{ needs.set-matrix.outputs.version }}
+          name: regressify-windows-${{ needs.set-matrix.outputs.version }}
           path: ${{ steps.installer.outputs.installer }}
           if-no-files-found: error
 
-      - name: Publish Windows installer to Tuyen Drive
-        shell: pwsh
-        env:
-          TUYEN_DRIVE_APP: ${{ secrets.TUYEN_DRIVE_APP }}
-          TUYEN_DRIVE_TOKEN: ${{ secrets.TUYEN_DRIVE_TOKEN }}
-          INSTALLER: ${{ steps.installer.outputs.installer }}
-          INSTALLER_VERSION: ${{ needs.set-matrix.outputs.version }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:TUYEN_DRIVE_APP) -or
-              [string]::IsNullOrWhiteSpace($env:TUYEN_DRIVE_TOKEN)) {
-            throw "Set repo secrets TUYEN_DRIVE_APP and TUYEN_DRIVE_TOKEN to publish."
-          }
-          $installer = Get-Item -LiteralPath $env:INSTALLER -ErrorAction Stop
-          $expectedName = "Regressify-Desktop-Setup-$env:INSTALLER_VERSION-x64.exe"
-          if ($installer.PSIsContainer -or $installer.Name -cne $expectedName) {
-            throw "Installer filename must match the tagged release version."
-          }
-          tuyen drive upload-app `
-            --name "$env:TUYEN_DRIVE_APP" `
-            --token "$env:TUYEN_DRIVE_TOKEN" `
-            --version "$env:INSTALLER_VERSION" `
-            --file "$($installer.FullName)" `
-            --role "$($installer.Name)=installer"
-          if ($LASTEXITCODE -ne 0) { throw "Tuyen Drive upload failed ($LASTEXITCODE)." }
+  publish:
+    needs: [set-matrix, checks, release, installer]
+    if: ${{ needs.set-matrix.outputs.publish == 'true' && github.repository == 'precise-alloy/regressify-rs' }}
+    name: Verify all assets and publish GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
-      - name: Verify Windows installer publish
-        shell: pwsh
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Download release archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/artifacts
+          merge-multiple: false
+
+      - name: Download Windows installer
+        uses: actions/download-artifact@v8
+        with:
+          name: regressify-windows-${{ needs.set-matrix.outputs.version }}
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Stage downloads and update manifest
+        run: python ci/release_feed.py stage --source "$RUNNER_TEMP/artifacts" --output "$RUNNER_TEMP/downloads"
+
+      - name: Publish GitHub Release
+        shell: bash
         env:
-          TUYEN_DRIVE_APP: ${{ secrets.TUYEN_DRIVE_APP }}
-          INSTALLER: ${{ steps.installer.outputs.installer }}
+          GH_TOKEN: ${{ github.token }}
+        run: python ci/release_feed.py publish --source "$RUNNER_TEMP/downloads"
+
+      - name: Retain verified release inputs
+        uses: actions/upload-artifact@v7
+        with:
+          name: verified-release-inputs
+          path: ${{ runner.temp }}/downloads/*
+          if-no-files-found: error
+
+  deploy:
+    needs: [set-matrix, publish]
+    name: Deploy website and MCP after release verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Download verified release inputs
+        uses: actions/download-artifact@v8
+        with:
+          name: verified-release-inputs
+          path: ${{ runner.temp }}/downloads
+
+      - name: Verify GitHub release before building website
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python ci/release_feed.py verify-github --source "$RUNNER_TEMP/downloads"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: website/.bun-version
+
+      - name: Extract released Linux CLI
         run: |
-          python ci/drive_release.py verify --installer $env:INSTALLER
-          if ($LASTEXITCODE -ne 0) { throw "Tuyen Drive publish verification failed ($LASTEXITCODE)." }
+          unzip -o -j "$RUNNER_TEMP/downloads/regressify-cli-x86_64-unknown-linux-gnu.zip" regressify -d "$RUNNER_TEMP/cli"
+          chmod +x "$RUNNER_TEMP/cli/regressify"
+
+      - name: Deploy Cloudflare Worker
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          REGRESSIFY_BIN: ${{ runner.temp }}/cli/regressify
+          DOWNLOADS_DIR: ${{ runner.temp }}/downloads
+          REGRESSIFY_DISABLE_DIAGNOSTIC_ARCHIVE: 'true'
+        run: bash ci/deploy-cloudflare.sh
+
+      - name: Verify published update feed
+        env:
+          INSTALLER_VERSION: ${{ needs.set-matrix.outputs.version }}
+        run: python ci/release_feed.py verify --installer "$RUNNER_TEMP/downloads/Regressify-Setup-$INSTALLER_VERSION-x64.exe"
 
   set-matrix:
     runs-on: ubuntu-22.04
@@ -239,6 +343,7 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       version: ${{ steps.version.outputs.version }}
       installer: ${{ steps.matrix.outputs.installer }}
+      publish: ${{ steps.matrix.outputs.publish }}
     steps:
       - uses: actions/checkout@v6
 
@@ -248,12 +353,7 @@ jobs:
 
       - name: Resolve tagged installer version
         id: version
-        run: python ci/drive_release.py prepare
-
-      - name: Test release selection and build arguments
-        run: |
-          python -m pip install PyYAML==6.0.3
-          python ci/test-release.py
+        run: python ci/release_feed.py prepare
 
       - id: matrix
         shell: python
@@ -262,15 +362,13 @@ jobs:
           MACOS_X86_64: ${{ inputs.macosX86_64 }}
           MACOS_AARCH64: ${{ inputs.macosAarch64 }}
           WINDOWS_X86_64: ${{ inputs.windowsX86_64 }}
-          LINUX_MUSL_X86_64: ${{ inputs.linuxMuslX86_64 }}
-          LINUX_MUSL_AARCH64: ${{ inputs.linuxMuslAarch64 }}
           LINUX_GNU_X86_64: ${{ inputs.linuxGnuX86_64 }}
         run: |
           import json
           import os
 
           tag_push = os.environ.get("GITHUB_EVENT_NAME") == "push" and os.environ.get("GITHUB_REF_TYPE") == "tag"
-          build = "desktop" if tag_push else os.environ.get("BUILD") or "both"
+          build = "both" if tag_push else os.environ.get("BUILD") or "both"
           if build not in ("cli", "desktop", "both"):
               raise SystemExit("Build must be cli, desktop, or both")
           applications = ("cli",) if build == "cli" else ("cli", "desktop")
@@ -278,24 +376,17 @@ jobs:
               ("MACOS_X86_64", "macos-15-intel", "x86_64-apple-darwin", 15),
               ("MACOS_AARCH64", "macos-15", "aarch64-apple-darwin", 15),
               ("WINDOWS_X86_64", "windows-latest", "x86_64-pc-windows-msvc", 20),
-              ("LINUX_MUSL_X86_64", "ubuntu-22.04", "x86_64-unknown-linux-musl", 10),
-              ("LINUX_MUSL_AARCH64", "ubuntu-22.04", "aarch64-unknown-linux-musl", 10),
               ("LINUX_GNU_X86_64", "ubuntu-22.04", "x86_64-unknown-linux-gnu", 10),
           ]
           selected = [platform for platform in platforms if os.environ.get(platform[0]) == "true"]
+          # Automatic tag releases build and publish every platform to the website.
           if tag_push:
-              selected = [platforms[2]]
+              selected = list(platforms)
           selected = selected or [platforms[-1]]
           include = []
           for _, runner, target, timeout in selected:
-              if build == "desktop" and target.endswith("-musl"):
-                  print(f"::notice::Skipping desktop for {target}; Musl releases are CLI-only.")
-                  continue
               for application in applications:
                   desktop = application == "desktop"
-                  if desktop and target.endswith("-musl"):
-                      print(f"::notice::Skipping desktop for {target}; Musl releases are CLI-only.")
-                      continue
                   include.append({
                       "application": application,
                       "os": "ubuntu-24.04" if desktop and runner.startswith("ubuntu") else runner,
@@ -304,10 +395,9 @@ jobs:
                       "features": "gui" if desktop else "",
                       "installer": os.environ.get("GITHUB_REF_TYPE") == "tag" and build != "cli" and target == "x86_64-pc-windows-msvc",
                   })
-          if not include:
-              raise SystemExit("Desktop releases require a Linux GNU, macOS, or Windows target; Musl is CLI-only.")
           matrix = {"include": include}
           print(json.dumps(matrix, indent=2))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
               output.write(f"installer={str(any(row['installer'] for row in include)).lower()}\n")
+              output.write(f"publish={str(tag_push).lower()}\n")
