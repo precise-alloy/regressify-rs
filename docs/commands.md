@@ -273,7 +273,7 @@ with the hosted Regressify authoring server:
   "servers": {
     "regressify-mcp": {
       "type": "http",
-      "url": "https://regressify-mcp.tuyen-at-work.workers.dev/mcp"
+      "url": "https://regressify.eshn.dev/mcp"
     }
   }
 }
@@ -284,7 +284,10 @@ bundled endpoint. Other server settings, including headers, other servers,
 top-level settings such as `inputs`, comments, and trailing commas are preserved.
 A matching URL leaves the file unchanged. The endpoint is defined by
 `REGRESSIFY_MCP_URL` in [initialization code](../src/init.rs), so rerunning `init`
-or reopening the workspace with an updated desktop build refreshes the endpoint.
+or reopening the workspace with an updated desktop build refreshes the endpoint;
+the retired `https://regressify-mcp.tuyen-at-work.workers.dev/mcp` URL is migrated
+this way. The hosted endpoint is deployed with the website after each tagged
+release (see [Release Pipeline](desktop.md#release-pipeline)).
 
 Malformed JSON-with-comments, non-object configuration/server entries, and files
 that cannot be read or updated fail initialization without replacing the MCP

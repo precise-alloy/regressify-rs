@@ -1,5 +1,6 @@
 param(
     [Parameter(Mandatory)][string]$Version,
+    [string]$ReleaseTag,
     [string]$Target = 'x86_64-pc-windows-msvc',
     [string]$BinaryDirectory,
     [string]$OutputDirectory,
@@ -13,6 +14,11 @@ if ($Version -cnotmatch '^[0-9]{1,4}(\.[0-9]{1,4}){3}$') {
     throw 'Version must be canonical N.N.N.N, with each component 0-9999.'
 }
 if (([version]$Version).ToString() -cne $Version) { throw 'Version must not contain leading zeros.' }
+$releaseTagValue = if ($ReleaseTag) { $ReleaseTag } else { "v$Version" }
+if ($releaseTagValue -cnotmatch '^v[0-9]{1,4}(\.[0-9]{1,4}){2,3}$') { throw 'ReleaseTag must be vN.N.N or vN.N.N.N.' }
+$tagParts = @($releaseTagValue.Substring(1).Split('.') | ForEach-Object { [int]$_ })
+if ($tagParts.Count -eq 3) { $tagParts += 0 }
+if (($tagParts -join '.') -cne $Version) { throw 'ReleaseTag must match the installer version.' }
 $root = Split-Path $PSScriptRoot -Parent
 if (-not $BinaryDirectory) { $BinaryDirectory = Join-Path $root "target/$Target/release" }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $root 'target/installer' }
@@ -43,22 +49,53 @@ if (-not $Compiler) {
 if (-not (Test-Path -LiteralPath $Compiler)) { throw 'Install Inno Setup 6 or pass -Compiler with the ISCC.exe path.' }
 $source = $binary.Directory.FullName
 $output = [System.IO.Path]::GetFullPath($OutputDirectory)
-& $Compiler (Join-Path $root 'installer/regressify-desktop.iss') "/DAppVersion=$Version" "/DSourceDir=$source" "/DInstallerOutput=$output"
+$licenseInputs = @((Join-Path $root 'LICENSE'), (Join-Path $root 'LICENSING.md'))
+foreach ($spec in @(
+    @{ Archive = 'regressify-desktop-x86_64-pc-windows-msvc.zip'; Payload = $binary },
+    @{ Archive = 'regressify-cli-x86_64-pc-windows-msvc.zip'; Payload = $cliBinary }
+)) {
+    $archivePath = Join-Path $source $spec.Archive
+    if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
+        if ($RequireStaticRuntime) { throw "Release archive is missing: $($spec.Archive)" }
+        Compress-Archive -LiteralPath (@($spec.Payload.FullName) + $licenseInputs) -DestinationPath $archivePath -Force
+    }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
+    try {
+        $inputs = @($spec.Payload.FullName) + $licenseInputs
+        if ($archive.Entries.Count -ne $inputs.Count) { throw "Unexpected files in $($spec.Archive)." }
+        foreach ($inputPath in $inputs) {
+            $inputFile = Get-Item -LiteralPath $inputPath
+            $entries = @($archive.Entries | Where-Object { $_.FullName -ceq $inputFile.Name })
+            if ($entries.Count -ne 1 -or $entries[0].Length -ne $inputFile.Length) { throw "Invalid archive entry: $($inputFile.Name)" }
+            $stream = $entries[0].Open()
+            $hash = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $actual = [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '')
+                if ($actual -cne (Get-FileHash -LiteralPath $inputPath -Algorithm SHA256).Hash) {
+                    throw "Archive payload does not match verified build: $($inputFile.Name)"
+                }
+            } finally { $stream.Dispose(); $hash.Dispose() }
+        }
+    } finally { $archive.Dispose() }
+}
+& $Compiler (Join-Path $root 'installer/regressify.iss') "/DAppVersion=$Version" "/DReleaseTag=$releaseTagValue" "/DSourceDir=$source" "/DInstallerOutput=$output"
 if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed ($LASTEXITCODE)." }
-$installer = Join-Path $output "Regressify-Desktop-Setup-$Version-x64.exe"
+$installer = Join-Path $output "Regressify-Setup-$Version-x64.exe"
 if (-not (Test-Path -LiteralPath $installer)) { throw 'The compiler did not create the expected installer.' }
 if ($SmokeTest) {
     $registration = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{ED6F0908-7E11-4608-A532-E43482AA117B}_is1'
-    if (Test-Path -LiteralPath $registration) { throw 'Installer smoke tests will not modify an existing Regressify Desktop installation.' }
+    if (Test-Path -LiteralPath $registration) { throw 'Installer smoke tests will not modify an existing Regressify installation.' }
     $pathOwner = 'HKCU:\Software\Regressify\DesktopInstaller'
     $desktopShortcut = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'Regressify Desktop.lnk'
-    $programGroup = Join-Path ([Environment]::GetFolderPath('Programs')) 'Regressify Desktop'
+    $programGroup = Join-Path ([Environment]::GetFolderPath('Programs')) 'Regressify'
+    $legacyProgramGroup = Join-Path ([Environment]::GetFolderPath('Programs')) 'Regressify Desktop'
     $startShortcut = Join-Path $programGroup 'Regressify Desktop.lnk'
     $contextMenus = @(
         @{ Path = 'HKCU:\Software\Classes\Directory\shell\RegressifyDesktop'; Argument = '%1' },
         @{ Path = 'HKCU:\Software\Classes\Directory\Background\shell\RegressifyDesktop'; Argument = '%V' }
     )
-    foreach ($path in @($desktopShortcut, $programGroup, $pathOwner) + @($contextMenus.Path)) {
+    foreach ($path in @($desktopShortcut, $programGroup, $legacyProgramGroup, $pathOwner) + @($contextMenus.Path)) {
         if (Test-Path -LiteralPath $path) { throw "Installer smoke tests will not modify existing shell integration: $path" }
     }
     function Get-UserPathState {
@@ -75,10 +112,11 @@ if ($SmokeTest) {
     $originalMachinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     $fixture = Join-Path $root ('target/installer-smoke-' + [guid]::NewGuid().ToString('N'))
     $destination = Join-Path $fixture 'app'
+    $prepareDir = Join-Path $fixture 'prepared'
     $expectedUserPath = if ([string]::IsNullOrEmpty($originalUserPath.Value)) { $destination } else { $originalUserPath.Value + ';' + $destination }
     $expectedPathKind = if ($null -eq $originalUserPath.Kind) { [Microsoft.Win32.RegistryValueKind]::ExpandString } else { $originalUserPath.Kind }
     [System.IO.Directory]::CreateDirectory($fixture) | Out-Null
-    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-', '/NORESTART', '/NORELAUNCH=1', ('/DIR="' + $destination + '"'))
+    $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-', '/NORESTART', '/NORELAUNCH=1', ('/DIR="' + $destination + '"'), ('/SOURCE="' + $prepareDir + '"'))
     $uninstaller = Join-Path $destination 'unins000.exe'
     $installed = Join-Path $destination 'regressify-desktop.exe'
     $installedCli = Join-Path $destination 'regressify.exe'
@@ -200,6 +238,14 @@ if ($SmokeTest) {
         }
     }
     try {
+        $prepareLog = Join-Path $fixture 'prepare.log'
+        $runningForPrepare = [System.Threading.Mutex]::new($false, 'Local\Regressify.Desktop.Running.ED6F0908-7E11-4608-A532-E43482AA117B')
+        try {
+            $null = Invoke-InstallerFixture $installer @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/SP-', '/NORESTART', ('/PREPARE="' + $prepareDir + '"'), ('/SOURCE="' + $source + '"'), ('/LOG="' + $prepareLog + '"'))
+        } finally { $runningForPrepare.Dispose() }
+        if (-not (Test-Path -LiteralPath (Join-Path $prepareDir 'prepared.txt') -PathType Leaf)) {
+            throw "Background payload preparation failed. See $prepareLog."
+        }
         $installLog = Join-Path $fixture 'install.log'
         $foregroundPattern = 'Installer brought to foreground after running-app checks\.|Windows denied installer foreground activation\.'
         $result = Invoke-InstallerFixture $installer ($arguments + ('/LOG="' + $installLog + '"'))
@@ -239,9 +285,20 @@ if ($SmokeTest) {
         try {
             if ((Invoke-InstallerFixture $installer $arguments) -eq 0) { throw 'Installer ignored the running application mutex.' }
         } finally { $running.Dispose() }
+        $legacyDir = Join-Path $fixture 'Regressify Desktop'
+        [System.IO.Directory]::CreateDirectory($legacyDir) | Out-Null
+        foreach ($legacyFile in @('regressify-desktop.exe', 'regressify.exe', 'LICENSE', 'LICENSING.md', 'unins000.exe', 'unins000.dat', 'unins000.msg')) {
+            [System.IO.File]::WriteAllText((Join-Path $legacyDir $legacyFile), 'legacy')
+        }
+        [System.IO.Directory]::CreateDirectory($legacyProgramGroup) | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $legacyProgramGroup 'Regressify Desktop.lnk'), 'legacy')
+        Set-ItemProperty -LiteralPath $registration -Name 'Inno Setup: App Path' -Value $legacyDir
+        Set-ItemProperty -LiteralPath $registration -Name 'Inno Setup: Icon Group' -Value 'Regressify Desktop'
         $foregroundLog = Join-Path $fixture 'foreground.log'
         $updateArguments = @($arguments | Where-Object { $_ -ne '/VERYSILENT' }) + @('/SILENT', ('/LOG="' + $foregroundLog + '"'))
         if ((Invoke-InstallerFixture $installer $updateArguments) -ne 0) { throw 'Visible update reinstallation failed.' }
+        if (Test-Path -LiteralPath $legacyDir) { throw 'Upgrade did not clean up the legacy Regressify Desktop install directory.' }
+        if (Test-Path -LiteralPath $legacyProgramGroup) { throw 'Upgrade did not clean up the legacy Regressify Desktop program group.' }
         Assert-ChromiumPreparation $foregroundLog $true
         $foregroundResult = Get-Content -LiteralPath $foregroundLog -Raw
         if ($foregroundResult -notmatch $foregroundPattern) { throw 'Visible update did not request foreground activation after the app closed.' }
@@ -264,9 +321,9 @@ if ($SmokeTest) {
             if ($parts[$index] -gt 0) {
                 $parts[$index]--
                 $older = $parts -join '.'
-                & $Compiler /Qp (Join-Path $root 'installer/regressify-desktop.iss') "/DAppVersion=$older" "/DSourceDir=$source" "/DInstallerOutput=$fixture"
+                & $Compiler /Qp (Join-Path $root 'installer/regressify.iss') "/DAppVersion=$older" "/DSourceDir=$source" "/DInstallerOutput=$fixture"
                 if ($LASTEXITCODE -ne 0) { throw 'Cannot compile downgrade fixture.' }
-                $olderInstaller = Join-Path $fixture "Regressify-Desktop-Setup-$older-x64.exe"
+                $olderInstaller = Join-Path $fixture "Regressify-Setup-$older-x64.exe"
                 $result = Invoke-InstallerFixture $olderInstaller ($arguments + ('/LOG="' + (Join-Path $fixture 'downgrade.log') + '"'))
                 if ($result -ne 7) { throw "Downgrade must fail before copying files (got $result)." }
                 break
