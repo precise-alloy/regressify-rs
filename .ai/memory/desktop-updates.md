@@ -1,7 +1,11 @@
 # Shared Desktop Updates
 
-Verified: 2026-09-24
+Verified: 2026-10-22
 
+- The feed is `https://regressify.eshn.dev/downloads/latest.txt`; binaries are
+  versioned GitHub assets. Manifest redirects are refused; bounded GitHub HTTPS
+  binary redirects are allowed. Release builds embed `REGRESSIFY_UPDATE_ORIGIN`.
+  See the deferred [Tuyen Drive bridge](../../docs/desktop.md#bridge-rollout).
 - [UpdateFeed::check_on_startup](../../src/desktop/updates.rs) requests fresh
   metadata for each newly opened instance, regardless of `last_check_at`, without
   resetting pauses or checksum retry limits. Subsequent `check_shared` calls use
@@ -11,6 +15,13 @@ Verified: 2026-09-24
   preparation. Inner `update.lock` operations preserve existing state/hash guards.
   A peer returns Busy without a feed request. Dropping or exiting the owner
   releases the OS lock; another process can reuse metadata and resume partials.
+- Readiness requires the shell installer and both Windows ZIPs. Verified setup
+  runs `/PREPARE`, then the updater checks the receipt against feed-provided
+  sizes/hashes. A forged local receipt cannot authenticate changed archives.
+  `/SOURCE` installation rechecks baked hashes without downloading substitutes.
+- The preparation job owns a Windows PowerShell `Start-Process -Wait` wrapper:
+  command-group 5.0.1 `try_wait` can finish when only the launcher exits. Native
+  regressions verify descendant cleanup for timeout, Pause, and handoff.
 - [UpdatePanel](../../src/desktop/ui/updates.rs) owns a window-scoped cache watcher.
   A pending startup check survives Busy responses and completes once ownership
   becomes available; later five-second polls follow the shared schedule.

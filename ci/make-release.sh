@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds the release and creates an archive and optionally deploys to GitHub.
+# Builds the release and creates archives with SHA-256 files. Publication is a separate
+# step (ci/release_feed.py stage and ci/deploy-cloudflare.sh).
 set -ex
 
 if [ -z "$FILE_NAME" ]
@@ -26,11 +27,6 @@ then
   exit 1
 fi
 
-if [ -z "$REPO" ] && [ -z "$TEST_MODE" ]
-then
-  echo "REPO must be set"
-  exit 1
-fi
 
 if [ -z "$TARGET" ]
 then
@@ -38,11 +34,6 @@ then
   exit 1
 fi
 
-if [ -z "$TOKEN" ] && [ -z "$TEST_MODE" ]
-then
-  echo "TOKEN must be set"
-  exit 1
-fi
 
 # Strip $FILE_NAME-refs/tags/ from the start of the ref.
 TAG=${GITHUB_REF#*/tags/}
@@ -95,17 +86,14 @@ case $OS in
   ubuntu*)
     # asset="$PACKAGE_NAME-$TAG-$TARGET.tar.gz"
     asset=$FILE_NAME
-    tag="linux"
     ;;
   macos*)
     # asset="$PACKAGE_NAME-$TAG-$TARGET.tar.gz"
     asset=$FILE_NAME
-    tag="macos"
     ;;
   windows*)
     # asset="$PACKAGE_NAME-$TAG-$TARGET.zip"
     asset="$FILE_NAME.exe"
-    tag="windows"
     ;;
   *)
     echo "OS must be set"
@@ -113,13 +101,14 @@ case $OS in
     ;;
 esac
 
-# Try to compress with UPX if available
-if command -v upx &> /dev/null
+# Try to compress with UPX if available (skip for installer payloads so PE
+# version resources, static-runtime imports, and payload hashes stay intact).
+if [ -z "$SKIP_BUILD" ] && command -v upx &> /dev/null
 then
   echo "Compressing binary with UPX..."
   upx --best --lzma "$asset"
 else
-  echo "UPX not found, skipping compression."
+  echo "UPX not found or skipped."
 fi
 
 PACKAGE_7Z="$PACKAGE_NAME-$TARGET.7z"
@@ -190,20 +179,3 @@ create_sha256_file() {
 
 create_sha256_file "$PACKAGE_7Z"
 create_sha256_file "$PACKAGE_ZIP"
-
-# Check if $TOKEN is set
-if [ -n "$TOKEN" ]
-then
-  # Log in to GitHub
-  echo $TOKEN | gh auth login --with-token
-
-  ls
-
-  # Upload the release
-  gh release upload $tag $PACKAGE_7Z --repo $REPO --clobber
-  gh release upload $tag $PACKAGE_7Z_SHA256 --repo $REPO --clobber
-  gh release upload $tag $PACKAGE_ZIP --repo $REPO --clobber
-  gh release upload $tag $PACKAGE_ZIP_SHA256 --repo $REPO --clobber
-else
-  echo "TOKEN must be set"
-fi

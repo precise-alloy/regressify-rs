@@ -8,7 +8,7 @@ export async function GET(context: APIContext) {
   return rss({
     title: `${SITE.name} blog`,
     description: 'News and release notes from the Regressify project.',
-    site: context.site ?? 'https://regressify.example.com',
+    site: context.site ?? 'https://regressify.eshn.dev',
     items: posts.map((post) => ({
       title: post.data.title,
       description: post.data.description,

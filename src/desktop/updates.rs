@@ -17,9 +17,16 @@ pub const CURRENT_VERSION: &str = match option_env!("REGRESSIFY_DESKTOP_VERSION"
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
-const BASE_URL: &str = "https://drive.tuyen.blog";
+const DOWNLOADS_PATH: &str = "downloads";
+const RELEASE_DOWNLOAD_PREFIX: &str =
+    "https://github.com/precise-alloy/regressify-rs/releases/download/";
+const DESKTOP_ARCHIVE_NAME: &str = "regressify-desktop-x86_64-pc-windows-msvc.zip";
+const CLI_ARCHIVE_NAME: &str = "regressify-cli-x86_64-pc-windows-msvc.zip";
+const PREPARED_MANIFEST_NAME: &str = "prepared.txt";
+const PREPARE_ERROR_NAME: &str = "prepare-error.txt";
 const MAX_MANIFEST_SIZE: u64 = 16 * 1024;
 const MAX_INSTALLER_SIZE: u64 = 1024 * 1024 * 1024;
+const MAX_REDIRECT_HOPS: usize = 5;
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_HASH_RETRIES: u8 = 3;
@@ -63,12 +70,11 @@ impl fmt::Display for Version {
 }
 
 pub fn installer_name(version: Version) -> String {
-    format!("Regressify-Desktop-Setup-{version}-x64.exe")
+    format!("Regressify-Setup-{version}-x64.exe")
 }
 
 #[derive(Clone, Debug)]
 pub struct UpdateFeed {
-    slug: String,
     manifest_url: Url,
 }
 
@@ -78,6 +84,40 @@ pub struct Release {
     installer: Url,
     sha256: String,
     size: u64,
+    payloads: Box<[PayloadArchive; 2]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PayloadArchive {
+    size: u64,
+    sha256: String,
+}
+
+impl FromStr for PayloadArchive {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let (size, hash) = value
+            .split_once(':')
+            .context("Missing payload size and SHA-256")?;
+        ensure!(
+            size.bytes().all(|byte| byte.is_ascii_digit()),
+            "Invalid payload size"
+        );
+        let size: u64 = size.parse().context("Invalid payload size")?;
+        ensure!(
+            size > 0 && size <= MAX_INSTALLER_SIZE,
+            "Payload size must be 1 byte to 1 GiB"
+        );
+        ensure!(
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "Invalid payload SHA-256"
+        );
+        Ok(Self {
+            size,
+            sha256: hash.to_ascii_lowercase(),
+        })
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -93,6 +133,15 @@ struct ManifestFields {
     installer: String,
     sha256: String,
     size: serde_json::Value,
+    #[serde(
+        default,
+        rename = "archive.regressify-desktop-x86_64-pc-windows-msvc.zip"
+    )]
+    desktop_archive: String,
+    #[serde(default, rename = "archive.regressify-cli-x86_64-pc-windows-msvc.zip")]
+    cli_archive: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
 }
 
 impl From<&Release> for ManifestFields {
@@ -102,6 +151,15 @@ impl From<&Release> for ManifestFields {
             installer: release.installer.to_string(),
             sha256: release.sha256.clone(),
             size: release.size.into(),
+            desktop_archive: format!(
+                "{}:{}",
+                release.payloads[0].size, release.payloads[0].sha256
+            ),
+            cli_archive: format!(
+                "{}:{}",
+                release.payloads[1].size, release.payloads[1].sha256
+            ),
+            tag: None,
         }
     }
 }
@@ -333,35 +391,41 @@ fn unix_timestamp() -> u64 {
 
 impl UpdateFeed {
     #[cfg(test)]
-    pub(crate) fn offline_for_test(slug: &str) -> Result<Self> {
-        let mut feed = Self::new(slug)?;
+    pub(crate) fn offline_for_test(origin: &str) -> Result<Self> {
+        let mut feed = Self::new(origin)?;
         feed.manifest_url = "http://127.0.0.1/latest.txt".parse()?;
         Ok(feed)
     }
 
-    pub fn new(slug: &str) -> Result<Self> {
+    /// Feed served by the website at `<origin>/downloads/latest.txt`, for an `https://host` origin.
+    pub fn new(origin: &str) -> Result<Self> {
+        let host = origin.strip_prefix("https://").unwrap_or_default();
         ensure!(
-            !slug.is_empty()
-                && slug.len() <= 64
-                && slug.bytes().all(|byte| byte.is_ascii_lowercase()
+            !host.is_empty()
+                && host.len() <= 253
+                && !host.starts_with(['.', '-'])
+                && !host.ends_with(['.', '-'])
+                && !host.contains("..")
+                && host.bytes().all(|byte| byte.is_ascii_lowercase()
                     || byte.is_ascii_digit()
                     || byte == b'-'
-                    || byte == b'_'),
-            "Invalid Tuyen Drive app slug"
+                    || byte == b'.'),
+            "Update origin must be an https://host origin without a path"
         );
-        Ok(Self {
-            slug: slug.into(),
-            manifest_url: format!("{BASE_URL}/downloads/{slug}/latest.txt").parse()?,
-        })
+        let manifest_url: Url = format!("{origin}/{DOWNLOADS_PATH}/latest.txt").parse()?;
+        ensure!(
+            manifest_url.host_str() == Some(host),
+            "Update origin must be an https://host origin without a path"
+        );
+        Ok(Self { manifest_url })
     }
 
     pub fn configured() -> Option<Self> {
         if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
             return None;
         }
-        option_env!("TUYEN_DRIVE_APP").and_then(|slug| Self::new(slug).ok())
+        option_env!("REGRESSIFY_UPDATE_ORIGIN").and_then(|origin| Self::new(origin).ok())
     }
-
     pub fn parse_manifest(&self, text: &str) -> Result<Release> {
         ensure!(
             text.len() as u64 <= MAX_MANIFEST_SIZE,
@@ -386,15 +450,29 @@ impl UpdateFeed {
         };
         let version: Version = fields.version.parse()?;
         let installer: Url = fields.installer.parse().context("Invalid installer URL")?;
-        let expected = format!(
-            "{BASE_URL}/downloads/{}/{}",
-            self.slug,
-            installer_name(version)
-        );
+        let suffix = format!("/{}", installer_name(version));
+        let valid_tag = fields
+            .installer
+            .strip_prefix(RELEASE_DOWNLOAD_PREFIX)
+            .and_then(|rest| rest.strip_suffix(&suffix))
+            .and_then(|tag| tag.strip_prefix('v'))
+            .filter(|raw| {
+                !raw.contains('/')
+                    && matches!(raw.split('.').count(), 3 | 4)
+                    && raw.split('.').all(|part| (1..=4).contains(&part.len()))
+            })
+            .and_then(|raw| raw.parse::<Version>().ok())
+            .is_some_and(|tag_version| tag_version == version);
         ensure!(
-            fields.installer == expected && installer.as_str() == expected,
-            "Installer must use this app's immutable HTTPS download URL"
+            valid_tag && installer.as_str() == fields.installer,
+            "Installer must use this repository's versioned HTTPS GitHub Release URL"
         );
+        if let Some(tag) = &fields.tag {
+            ensure!(
+                fields.installer == format!("{RELEASE_DOWNLOAD_PREFIX}{tag}{suffix}"),
+                "Mismatched release tag"
+            );
+        }
         ensure!(
             fields.sha256.len() == 64 && fields.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "Installer SHA-256 must contain 64 hexadecimal characters"
@@ -415,6 +493,7 @@ impl UpdateFeed {
             installer,
             sha256: fields.sha256.to_ascii_lowercase(),
             size,
+            payloads: Box::new([fields.desktop_archive.parse()?, fields.cli_archive.parse()?]),
         })
     }
 
@@ -512,6 +591,9 @@ impl UpdateFeed {
             let Some(saved) = &state.release else {
                 return Ok(SharedUpdateCheck::Unchanged);
             };
+            if saved.version.parse::<Version>()? <= current {
+                return Ok(SharedUpdateCheck::Unchanged);
+            }
             let release = self.parse_manifest(&serde_json::to_string(saved)?)?;
             if release.version <= current || prepared == Some(&release) {
                 return Ok(SharedUpdateCheck::Unchanged);
@@ -537,6 +619,17 @@ impl UpdateFeed {
     ) -> Result<UpdateCheck> {
         let _lock = lock_cache(cache)?;
         let mut state = UpdateState::load(cache)?;
+        // An installed bridge can leave metadata from the retired feed behind.
+        // Discard only already-installed versions before applying the new URL contract.
+        if state.release.as_ref().is_some_and(|saved| {
+            saved
+                .version
+                .parse::<Version>()
+                .is_ok_and(|version| version <= current)
+        }) {
+            state.release = None;
+            state.save(cache)?;
+        }
         let cached = state
             .release
             .as_ref()
@@ -595,12 +688,58 @@ fn client(timeout: Duration) -> Result<Client> {
         .context("Cannot create the update client")
 }
 
+/// GitHub Release asset downloads redirect from `github.com` to `*.githubusercontent.com`.
+fn is_allowed_installer_redirect(url: &Url, hops: usize) -> std::result::Result<(), &'static str> {
+    if hops >= MAX_REDIRECT_HOPS {
+        return Err("Installer download was redirected too many times; update was not installed");
+    }
+    let valid_host = url.host_str().is_some_and(|host| {
+        host == "github.com"
+            || host
+                .strip_suffix(".githubusercontent.com")
+                .is_some_and(|sub| {
+                    !sub.is_empty()
+                        && !sub.starts_with(['.', '-'])
+                        && !sub.ends_with(['.', '-'])
+                        && !sub.contains("..")
+                        && sub.bytes().all(|byte| {
+                            byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit()
+                                || byte == b'-'
+                                || byte == b'.'
+                        })
+                })
+    });
+    if url.scheme() != "https"
+        || !valid_host
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "Installer download was redirected to an untrusted URL; update was not installed",
+        );
+    }
+    Ok(())
+}
+
+fn installer_redirect_policy() -> Policy {
+    Policy::custom(|attempt| {
+        match is_allowed_installer_redirect(attempt.url(), attempt.previous().len()) {
+            Ok(()) => attempt.follow(),
+            Err(message) => attempt.error(std::io::Error::other(message)),
+        }
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DownloadPhase {
     Connecting,
     Downloading,
     Verifying,
     Saving,
+    Preparing,
 }
 
 #[derive(Clone, Debug)]
@@ -645,6 +784,10 @@ impl DownloadProgress {
             }
             DownloadPhase::Saving => format!(
                 "Saving verified installer to disk... {}s elapsed",
+                elapsed.as_secs()
+            ),
+            DownloadPhase::Preparing => format!(
+                "Preparing application files in the background... {}s elapsed",
                 elapsed.as_secs()
             ),
         }
@@ -762,13 +905,288 @@ fn discard_superseded_installers(cache: &Path, latest: Version) -> Result<()> {
 
 fn discard_installer(release: &Release, cache: &Path) -> Result<()> {
     let installer = cached_installer(release, cache);
-    for path in [&installer, &installer.with_extension("exe.part")] {
+    let mut paths = vec![installer.clone(), installer.with_extension("exe.part")];
+    if let Some(dir) = installer.parent() {
+        for name in [
+            PREPARED_MANIFEST_NAME,
+            PREPARE_ERROR_NAME,
+            DESKTOP_ARCHIVE_NAME,
+            CLI_ARCHIVE_NAME,
+        ] {
+            paths.push(dir.join(name));
+        }
+    }
+    for path in &paths {
         match fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error).context("Cannot discard an invalid installer"),
         }
     }
+    Ok(())
+}
+
+#[cfg(test)]
+fn write_prepared_payloads_for_test(cache_dir: &Path, version: Version) -> Result<()> {
+    fs::create_dir_all(cache_dir)?;
+    let desktop_payload = b"desktop-archive";
+    let cli_payload = b"cli-archive";
+    let desktop_hash = format!("{:x}", Sha256::digest(desktop_payload));
+    let cli_hash = format!("{:x}", Sha256::digest(cli_payload));
+    fs::write(cache_dir.join(DESKTOP_ARCHIVE_NAME), desktop_payload)?;
+    fs::write(cache_dir.join(CLI_ARCHIVE_NAME), cli_payload)?;
+    fs::write(
+        cache_dir.join(PREPARED_MANIFEST_NAME),
+        format!("version={version}\ndesktop_sha256={desktop_hash}\ncli_sha256={cli_hash}\n"),
+    )?;
+    Ok(())
+}
+
+fn verify_prepared_payloads(cache_dir: &Path, release: &Release) -> Result<Vec<fs::File>> {
+    let manifest_path = cache_dir.join(PREPARED_MANIFEST_NAME);
+    let mut text = String::new();
+    fs::File::open(&manifest_path)
+        .context("Prepared update manifest is missing")?
+        .take(MAX_MANIFEST_SIZE + 1)
+        .read_to_string(&mut text)
+        .context("Cannot read prepared update manifest")?;
+    ensure!(
+        text.len() as u64 <= MAX_MANIFEST_SIZE,
+        "Prepared update manifest is too large"
+    );
+    let mut fields = BTreeMap::new();
+    for line in text
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let (key, value) = line
+            .split_once('=')
+            .context("Invalid prepared update manifest line")?;
+        ensure!(
+            fields.insert(key.trim(), value.trim()).is_none(),
+            "Duplicate prepared update manifest field: {key}"
+        );
+    }
+    let version: Version = fields
+        .get("version")
+        .context("Prepared update manifest is missing version")?
+        .parse()?;
+    ensure!(
+        version == release.version,
+        "Prepared update version {version} does not match expected {}",
+        release.version
+    );
+    let mut handles = Vec::with_capacity(2);
+    for ((field, file_name), payload) in [
+        ("desktop_sha256", DESKTOP_ARCHIVE_NAME),
+        ("cli_sha256", CLI_ARCHIVE_NAME),
+    ]
+    .into_iter()
+    .zip(release.payloads.iter())
+    {
+        let expected = fields
+            .get(field)
+            .with_context(|| format!("Prepared update manifest is missing {field}"))?
+            .to_ascii_lowercase();
+        ensure!(
+            expected.len() == 64 && expected.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "Prepared update {field} must contain 64 hexadecimal characters"
+        );
+        ensure!(
+            expected == payload.sha256,
+            "Prepared payload SHA-256 does not match the release feed"
+        );
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(1);
+        }
+        let path = cache_dir.join(file_name);
+        let file = options
+            .open(&path)
+            .with_context(|| format!("Prepared payload {file_name} is missing"))?;
+        ensure!(
+            file.metadata()?.len() == payload.size,
+            "Prepared payload {file_name} size or SHA-256 does not match the release feed"
+        );
+        let mut reader = file.try_clone()?;
+        let mut digest = Sha256::new();
+        let mut total = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = reader
+                .read(&mut buffer)
+                .with_context(|| format!("Cannot read prepared payload {file_name}"))?;
+            if count == 0 {
+                break;
+            }
+            total += count as u64;
+            ensure!(
+                total <= MAX_INSTALLER_SIZE,
+                "Prepared payload {file_name} exceeds maximum size"
+            );
+            digest.update(&buffer[..count]);
+        }
+        ensure!(total > 0, "Prepared payload {file_name} is empty");
+        ensure!(
+            format!("{:x}", digest.finalize()) == expected,
+            "Prepared payload {file_name} SHA-256 does not match the installer manifest"
+        );
+        handles.push(file);
+    }
+    Ok(handles)
+}
+
+async fn wait_for_preparation(
+    command: &mut std::process::Command,
+    control: &DownloadControl,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus> {
+    #[cfg(windows)]
+    let mut wrapper = {
+        // Start-Process -Wait tracks descendants even after Inno's launcher exits.
+        // The outer job still owns cancellation; arguments are data, never PS source.
+        let shell = PathBuf::from(
+            std::env::var_os("SystemRoot").context("Windows system directory is unavailable")?,
+        )
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let mut wrapper = std::process::Command::new(shell);
+        let mut arguments = Vec::new();
+        for argument in command.get_args() {
+            let argument = argument.to_str().context("Invalid preparation argument")?;
+            ensure!(
+                !argument.contains(['"', '\r', '\n']),
+                "Invalid preparation argument"
+            );
+            let trailing = argument
+                .chars()
+                .rev()
+                .take_while(|character| *character == '\\')
+                .count();
+            arguments.push(format!("\"{argument}{}\"", "\\".repeat(trailing)));
+        }
+        for (name, value) in command.get_envs() {
+            if let Some(value) = value {
+                wrapper.env(name, value);
+            } else {
+                wrapper.env_remove(name);
+            }
+        }
+        if let Some(directory) = command.get_current_dir() {
+            wrapper.current_dir(directory);
+        }
+        wrapper.args(["-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference = 'Stop'; $child = Start-Process -FilePath $env:REGRESSIFY_PREPARE_PROGRAM -ArgumentList $env:REGRESSIFY_PREPARE_ARGUMENTS -Wait -PassThru; exit $child.ExitCode"])
+            .env("REGRESSIFY_PREPARE_PROGRAM", command.get_program())
+            .env("REGRESSIFY_PREPARE_ARGUMENTS", arguments.join(" "))
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        #[cfg(test)]
+        wrapper.stderr(std::process::Stdio::inherit());
+        wrapper
+    };
+    #[cfg(windows)]
+    let command = &mut wrapper;
+    struct PreparationProcess(command_group::GroupChild);
+    impl Drop for PreparationProcess {
+        fn drop(&mut self) {
+            // Inno uses a launcher and a second phase. Never leave the latter downloading.
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    ensure!(
+        !control.is_cancelled(),
+        "Download cancelled. No update was installed"
+    );
+    let mut child = PreparationProcess(
+        crate::helpers::spawn_background_group(command)
+            .context("Cannot start the update installer to prepare application binaries")?,
+    );
+    let deadline = Instant::now() + timeout;
+    loop {
+        ensure!(
+            !control.is_cancelled(),
+            "Download cancelled. No update was installed"
+        );
+        ensure!(
+            Instant::now() < deadline,
+            "Update binary preparation timed out; retry later"
+        );
+        if let Some(status) = child
+            .0
+            .try_wait()
+            .context("Cannot wait for update preparation")?
+        {
+            return Ok(status);
+        }
+        tokio::select! {
+            _ = control.wait_cancelled() => bail!("Download cancelled. No update was installed"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+        }
+    }
+}
+
+async fn run_installer_prepare(
+    installer: &Path,
+    release: &Release,
+    control: &DownloadControl,
+    timeout: Duration,
+) -> Result<()> {
+    let cache_dir = installer.parent().context("Invalid update cache path")?;
+    ensure!(
+        !control.is_cancelled(),
+        "Download cancelled. No update was installed"
+    );
+    if verify_prepared_payloads(cache_dir, release).is_ok() {
+        return Ok(());
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(1);
+    }
+    let verified_file = options.open(installer)?;
+    verify_payload(verified_file.try_clone()?, std::io::sink(), release)?;
+    for stale in [PREPARED_MANIFEST_NAME, PREPARE_ERROR_NAME] {
+        match fs::remove_file(cache_dir.join(stale)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("Cannot remove stale preparation receipt"),
+        }
+    }
+    control.update(DownloadPhase::Preparing, release.size);
+    let mut command = std::process::Command::new(installer);
+    command
+        .args([
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/SP-",
+            "/NORESTART",
+            &format!("/PREPARE={}", cache_dir.display()),
+            &format!("/LOG={}", cache_dir.join("prepare.log").display()),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let status = wait_for_preparation(&mut command, control, timeout).await?;
+    // Returning false from Inno's InitializeSetup skips installation, cleans up, and exits 1.
+    // Success additionally requires the fresh receipt and both feed-verified archives.
+    ensure!(
+        status.code() == Some(1),
+        "Installer preparation failed ({status}); no update was installed"
+    );
+    ensure!(
+        !control.is_cancelled(),
+        "Download cancelled. No update was installed"
+    );
+    verify_prepared_payloads(cache_dir, release)
+        .context("Installer did not finish preparing verified update files")?;
     Ok(())
 }
 
@@ -779,8 +1197,10 @@ impl PreparedUpdate {
         release.sha256 = format!("{:x}", Sha256::digest(payload));
         release.size = payload.len() as u64;
         let installer = cached_installer(&release, cache);
-        fs::create_dir_all(installer.parent().context("Invalid cache path")?)?;
+        let cache_dir = installer.parent().context("Invalid cache path")?;
+        fs::create_dir_all(cache_dir)?;
         fs::write(installer.with_extension("exe.part"), payload)?;
+        write_prepared_payloads_for_test(cache_dir, release.version)?;
         UpdateState {
             release: Some(ManifestFields::from(&release)),
             ..UpdateState::default()
@@ -814,12 +1234,12 @@ impl PreparedUpdate {
             .block_on(async {
                 let client = reqwest::Client::builder()
                     .https_only(true)
-                    .redirect(Policy::none())
+                    .redirect(installer_redirect_policy())
                     .connect_timeout(Duration::from_secs(10))
                     .user_agent(concat!("Regressify-Desktop/", env!("CARGO_PKG_VERSION")))
                     .build()
                     .context("Cannot create the update client")?;
-                Self::download_with_client(
+                let prepared = Self::download_with_client(
                     release,
                     cache,
                     &control,
@@ -827,7 +1247,16 @@ impl PreparedUpdate {
                     DOWNLOAD_IDLE_TIMEOUT,
                     DOWNLOAD_TIMEOUT,
                 )
-                .await
+                .await?;
+                let _lock = lock_cache(cache)?;
+                run_installer_prepare(
+                    &prepared.installer,
+                    &prepared.release,
+                    &control,
+                    DOWNLOAD_TIMEOUT,
+                )
+                .await?;
+                Ok(prepared)
             })
     }
 
@@ -1057,8 +1486,14 @@ impl PreparedUpdate {
         }
         let verified_file = options.open(&self.installer)?;
         verify_payload(verified_file.try_clone()?, std::io::sink(), &self.release)?;
+        let cache_dir = self
+            .installer
+            .parent()
+            .context("Invalid update cache path")?;
+        let _payload_locks = verify_prepared_payloads(cache_dir, &self.release)?;
         let mut command = std::process::Command::new(&self.installer);
         command.args(["/SP-", "/SILENT", "/NORESTART"]);
+        command.arg(format!("/SOURCE={}", cache_dir.display()));
         if let Some(workspace) = workspace {
             command.arg(format!("/WORKSPACE={}", workspace.display()));
         }
@@ -1206,7 +1641,7 @@ mod tests {
     use super::{
         CheckMode, DownloadControl, DownloadPhase, ManifestFields, PreparedUpdate, SkippedUpdate,
         UpdateCheck, UpdateFeed, UpdateState, Version, cached_installer, installer_name,
-        lock_cache, verify_payload,
+        installer_redirect_policy, is_allowed_installer_redirect, lock_cache, verify_payload,
     };
     use reqwest::StatusCode;
     use sha2::{Digest, Sha256};
@@ -1214,9 +1649,11 @@ mod tests {
 
     fn manifest(payload: &[u8]) -> String {
         format!(
-            "version=1.10.0.0\r\ninstaller=https://drive.tuyen.blog/downloads/regressify/Regressify-Desktop-Setup-1.10.0.0-x64.exe\r\nsha256={:x}\r\nsize={}\r\nnotes=https://example.com/notes\r\n",
+            "version=1.10.0.0\r\ninstaller=https://github.com/precise-alloy/regressify-rs/releases/download/v1.10.0/Regressify-Setup-1.10.0.0-x64.exe\r\nsha256={:x}\r\nsize={}\r\nnotes=https://example.com/notes\r\narchive.regressify-desktop-x86_64-pc-windows-msvc.zip=15:{:x}\narchive.regressify-cli-x86_64-pc-windows-msvc.zip=11:{:x}\n",
             Sha256::digest(payload),
-            payload.len()
+            payload.len(),
+            Sha256::digest(b"desktop-archive"),
+            Sha256::digest(b"cli-archive"),
         )
     }
 
@@ -1226,7 +1663,7 @@ mod tests {
         use std::cell::Cell;
 
         let cache = tempfile::tempdir().unwrap();
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let release = feed.parse_manifest(&manifest(b"installer")).unwrap();
         let current = "1.0".parse().unwrap();
         let now = super::unix_timestamp();
@@ -1307,7 +1744,7 @@ mod tests {
 
         for outcome in 0..4 {
             let cache = tempfile::tempdir().unwrap();
-            let feed = UpdateFeed::new("regressify").unwrap();
+            let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
             let release = feed.parse_manifest(&manifest(b"installer")).unwrap();
             let current = "1.0".parse().unwrap();
             UpdateState {
@@ -1394,7 +1831,7 @@ mod tests {
 
         for restriction in 0..3 {
             let cache = tempfile::tempdir().unwrap();
-            let feed = UpdateFeed::new("regressify").unwrap();
+            let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
             let release = feed.parse_manifest(&manifest(b"installer")).unwrap();
             let now = super::unix_timestamp();
             let mut state = UpdateState {
@@ -1446,7 +1883,7 @@ mod tests {
         use super::{CHECK_INTERVAL, SharedUpdateCheck};
         for outcome in [0, 1, 2] {
             let cache = tempfile::tempdir().unwrap();
-            let feed = UpdateFeed::new("regressify").unwrap();
+            let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
             let current = "1.0".parse().unwrap();
             let check = || match outcome {
                 0 => Ok(UpdateCheck::Current),
@@ -1500,7 +1937,7 @@ mod tests {
         use super::{SharedUpdateCheck, UpdateLease};
 
         let cache = tempfile::tempdir().unwrap();
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let payload = b"installer";
         let release = feed.parse_manifest(&manifest(payload)).unwrap();
         let current = "1.0".parse().unwrap();
@@ -1535,6 +1972,8 @@ mod tests {
         let installer = cached_installer(&release, cache.path());
         fs::create_dir_all(installer.parent().unwrap()).unwrap();
         fs::write(installer.with_extension("exe.part"), payload).unwrap();
+        super::write_prepared_payloads_for_test(installer.parent().unwrap(), release.version)
+            .unwrap();
         let prepared = lease
             .prepare(release.clone(), DownloadControl::new(&release))
             .unwrap();
@@ -1593,10 +2032,14 @@ mod tests {
         use super::{CHECK_INTERVAL, SharedUpdateCheck};
 
         let cache = tempfile::tempdir().unwrap();
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let first = feed.parse_manifest(&manifest(b"installer")).unwrap();
         let next = feed
-            .parse_manifest(&manifest(b"next").replace("1.10.0.0", "1.11.0.0"))
+            .parse_manifest(
+                &manifest(b"next")
+                    .replace("1.10.0.0", "1.11.0.0")
+                    .replace("v1.10.0", "v1.11.0"),
+            )
             .unwrap();
         let current = "1.0".parse().unwrap();
         let now = super::unix_timestamp();
@@ -1712,7 +2155,7 @@ mod tests {
 
         for paused in [false, true] {
             let cache = tempfile::tempdir().unwrap();
-            let feed = UpdateFeed::new("regressify").unwrap();
+            let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
             let release = feed.parse_manifest(&manifest(b"installer")).unwrap();
             let current = "1.0".parse().unwrap();
             let now = super::unix_timestamp();
@@ -1782,25 +2225,32 @@ mod tests {
 
     #[test]
     fn accepts_text_and_json_manifests() {
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let text = manifest(b"installer");
         let release = feed.parse_manifest(&text).unwrap();
         assert_eq!(release.version.to_string(), "1.10.0.0");
         let json = serde_json::json!({
             "version": "1.10.0", "installer": release.installer.as_str(),
             "sha256": release.sha256.to_ascii_uppercase(), "size": release.size,
-            "pub_date": "2026-09-18T00:00:00.000Z"
+            "pub_date": "2026-09-18T00:00:00.000Z",
+            "archive.regressify-desktop-x86_64-pc-windows-msvc.zip": format!("15:{:x}", Sha256::digest(b"desktop-archive")),
+            "archive.regressify-cli-x86_64-pc-windows-msvc.zip": format!("11:{:x}", Sha256::digest(b"cli-archive")),
         });
         assert_eq!(feed.parse_manifest(&json.to_string()).unwrap(), release);
         assert_eq!(
             feed.parse_manifest(&format!("\u{feff}{text}")).unwrap(),
             release
         );
+        let four_part_tag = text.replace("/download/v1.10.0/", "/download/v1.10.0.0/");
+        assert_eq!(
+            feed.parse_manifest(&four_part_tag).unwrap().version,
+            release.version
+        );
     }
 
     #[test]
     fn unpublished_equal_and_older_releases_do_not_update() {
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let text = manifest(b"installer");
         for version in ["1.10", "2.0"] {
             assert_eq!(
@@ -1833,18 +2283,32 @@ mod tests {
 
     #[test]
     fn rejects_untrusted_urls_and_ambiguous_manifests() {
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let text = manifest(b"installer");
         for invalid in [
-            text.replace("https://drive", "http://drive"),
-            text.replace("drive.tuyen.blog/downloads", "evil.example/downloads"),
-            text.replace("/regressify/", "/another-app/"),
+            text.replace("https://github.com", "http://github.com"),
+            text.replace("github.com/", "evil.example/"),
+            text.replace("github.com/", "github.com.evil.example/"),
+            text.replace("github.com/", "github.com:8443/"),
+            text.replace("https://github.com", "https://GITHUB.COM"),
+            text.replace("/precise-alloy/regressify-rs/", "/other/repo/"),
+            text.replace("/releases/download/", "/releases/tag/"),
+            text.replace("/download/v1.10.0/", "/download/../v1.10.0/"),
+            text.replace("/download/v1.10.0/", "/download/nested/v1.10.0/"),
+            text.replace("/download/v1.10.0/", "/download/1.10.0/"),
+            text.replace("/download/v1.10.0/", "/download/v1.10/"),
+            text.replace("/download/v1.10.0/", "/download/v1.11.0/"),
             text.replace("-x64.exe", "-x64.exe?redirect=elsewhere"),
             text.replace("-x64.exe", "-x64.exe#fragment"),
             text.replace(
-                "Regressify-Desktop-Setup-1.10.0.0-x64.exe",
-                "latest/installer",
+                "Regressify-Setup-1.10.0.0-x64.exe",
+                "Regressify-Setup-1.11.0.0-x64.exe",
             ),
+            text.replace(
+                "Regressify-Setup-1.10.0.0-x64.exe",
+                "Regressify-Desktop-Setup-1.10.0.0-x64.exe",
+            ),
+            text.replace("Regressify-Setup-1.10.0.0-x64.exe", "latest/installer"),
             text.replace("size=9", "size=0"),
             text.replace("size=9", "size=1073741825"),
             format!("{text}version=2\n"),
@@ -1853,15 +2317,61 @@ mod tests {
         ] {
             assert!(feed.parse_manifest(&invalid).is_err(), "{invalid}");
         }
-        for slug in ["", "../other", "app/path", "app?x", "app\n"] {
-            assert!(UpdateFeed::new(slug).is_err());
+        for origin in [
+            "",
+            "regressify.eshn.dev",
+            "http://regressify.eshn.dev",
+            "https://regressify.eshn.dev/",
+            "https://regressify.eshn.dev/path",
+            "https://regressify.eshn.dev:8443",
+            "https://user@regressify.eshn.dev",
+            "https://Regressify.eshn.dev",
+            "https://.eshn.dev",
+            "https://regressify..dev",
+            "https://regressify.eshn.dev?x",
+            "https://regressify.eshn.dev\n",
+        ] {
+            assert!(UpdateFeed::new(origin).is_err(), "{origin}");
+        }
+        assert_eq!(
+            feed.manifest_url.as_str(),
+            "https://regressify.eshn.dev/downloads/latest.txt"
+        );
+        for url in [
+            "https://objects.githubusercontent.com/github-production-release-asset-2e65be/installer.exe",
+            "https://release-assets.githubusercontent.com/github-production-release-asset/installer.exe",
+            "https://github.com/precise-alloy/regressify-rs/releases/download/v1.10.0/Regressify-Setup-1.10.0.0-x64.exe",
+        ] {
+            assert!(
+                is_allowed_installer_redirect(&url.parse().unwrap(), 0).is_ok(),
+                "{url}"
+            );
+            assert!(
+                is_allowed_installer_redirect(&url.parse().unwrap(), 5).is_err(),
+                "{url}"
+            );
+        }
+        for invalid in [
+            "http://objects.githubusercontent.com/installer.exe",
+            "https://evil.example/installer.exe",
+            "https://githubusercontent.com/installer.exe",
+            "https://objects.githubusercontent.com.evil.example/installer.exe",
+            "https://.githubusercontent.com/installer.exe",
+            "https://objects..githubusercontent.com/installer.exe",
+            "https://objects.githubusercontent.com:8443/installer.exe",
+            "https://user@objects.githubusercontent.com/installer.exe",
+            "https://objects.githubusercontent.com/installer.exe#fragment",
+        ] {
+            assert!(
+                is_allowed_installer_redirect(&invalid.parse().unwrap(), 0).is_err(),
+                "{invalid}"
+            );
         }
     }
-
     #[test]
     fn payload_must_match_both_size_and_digest() {
         let payload = b"installer";
-        let release = UpdateFeed::new("regressify")
+        let release = UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(&manifest(payload))
             .unwrap();
@@ -1903,7 +2413,7 @@ mod tests {
         }
 
         let payload = b"installer";
-        let release = UpdateFeed::new("regressify")
+        let release = UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(&manifest(payload))
             .unwrap();
@@ -1953,7 +2463,7 @@ mod tests {
 
         let (url, server, request) =
             download_server("HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\ninstaller").await;
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let mut release = feed.parse_manifest(&manifest(b"installer")).unwrap();
         release.installer = url;
         let cache = tempfile::tempdir().unwrap();
@@ -2010,7 +2520,7 @@ mod tests {
             ),
         ] {
             let (url, server, _) = download_server(response).await;
-            let mut release = UpdateFeed::new("regressify")
+            let mut release = UpdateFeed::new("https://regressify.eshn.dev")
                 .unwrap()
                 .parse_manifest(&manifest(b"installer"))
                 .unwrap();
@@ -2043,7 +2553,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_interrupts_waiting_for_the_server_and_keeps_partial_download() {
         let (url, server, started) = download_server("").await;
-        let mut release = UpdateFeed::new("regressify")
+        let mut release = UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(&manifest(b"installer"))
             .unwrap();
@@ -2104,7 +2614,7 @@ mod tests {
             ),
         ] {
             let (url, server, _) = download_server(response).await;
-            let mut release = UpdateFeed::new("regressify")
+            let mut release = UpdateFeed::new("https://regressify.eshn.dev")
                 .unwrap()
                 .parse_manifest(&manifest(b"installer"))
                 .unwrap();
@@ -2113,7 +2623,7 @@ mod tests {
             let cache = tempfile::tempdir().unwrap();
             let installer = cached_installer(&release, cache.path());
             let client = reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
+                .redirect(installer_redirect_policy())
                 .build()
                 .unwrap();
             let result = PreparedUpdate::download_with_client(
@@ -2149,7 +2659,7 @@ mod tests {
         let (url, server, request) = download_server(
             "HTTP/1.1 206 Partial Content\r\nContent-Length: 6\r\nContent-Range: bytes 3-8/9\r\n\r\ntaller",
         ).await;
-        let mut release = UpdateFeed::new("regressify")
+        let mut release = UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(&manifest(b"installer"))
             .unwrap();
@@ -2197,7 +2707,7 @@ mod tests {
             ),
         ] {
             let (url, server, _) = download_server(response).await;
-            let mut release = UpdateFeed::new("regressify")
+            let mut release = UpdateFeed::new("https://regressify.eshn.dev")
                 .unwrap()
                 .parse_manifest(&manifest(b"installer"))
                 .unwrap();
@@ -2264,7 +2774,7 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\ninstaller",
         ])
         .await;
-        let mut release = UpdateFeed::new("regressify")
+        let mut release = UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(&manifest(b"installer"))
             .unwrap();
@@ -2339,7 +2849,7 @@ mod tests {
             wrong,
         ])
         .await;
-        let mut release = UpdateFeed::new("regressify")
+        let mut release = UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(&manifest(b"installer"))
             .unwrap();
@@ -2437,7 +2947,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_verification_resumes_from_saved_manifest_without_network() {
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let release = feed.parse_manifest(&manifest(b"installer")).unwrap();
         let cache = tempfile::tempdir().unwrap();
         let installer = cached_installer(&release, cache.path());
@@ -2478,7 +2988,7 @@ mod tests {
     async fn interruption_after_recording_a_checksum_failure_does_not_count_it_twice() {
         let (url, server) =
             download_sequence(&["HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\ninstaller"]).await;
-        let mut release = UpdateFeed::new("regressify")
+        let mut release = UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(&manifest(b"installer"))
             .unwrap();
@@ -2518,7 +3028,7 @@ mod tests {
         assert!(lock_cache(cache.path()).is_err());
         drop(lock);
         assert!(lock_cache(cache.path()).is_ok());
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let mut fields =
             ManifestFields::from(&feed.parse_manifest(&manifest(b"installer")).unwrap());
         fields.installer = "https://untrusted.example/installer.exe".into();
@@ -2531,22 +3041,22 @@ mod tests {
         let error = feed
             .reconcile_check("1".parse().unwrap(), cache.path(), Ok(UpdateCheck::Current))
             .unwrap_err();
-        assert!(error.to_string().contains("immutable HTTPS"), "{error:#}");
+        assert!(error.to_string().contains("versioned HTTPS"), "{error:#}");
     }
 
     #[test]
     fn newer_release_discards_partial_and_complete_older_installers() {
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let cache = tempfile::tempdir().unwrap();
         let previous = feed.parse_manifest(&manifest(b"installer")).unwrap();
         let latest = feed
-            .parse_manifest(&manifest(b"installer").replace("1.10.0.0", "1.11.0.0"))
+            .parse_manifest(&manifest(b"installer").replace("1.10.0", "1.11.0"))
             .unwrap();
         let older = feed
-            .parse_manifest(&manifest(b"installer").replace("1.10.0.0", "1.9.0.0"))
+            .parse_manifest(&manifest(b"installer").replace("1.10.0", "1.9.0"))
             .unwrap();
         let future = feed
-            .parse_manifest(&manifest(b"installer").replace("1.10.0.0", "1.12.0.0"))
+            .parse_manifest(&manifest(b"installer").replace("1.10.0", "1.12.0"))
             .unwrap();
         for release in [&older, &previous, &latest, &future] {
             let installer = cached_installer(release, cache.path());
@@ -2598,7 +3108,7 @@ mod tests {
 
     #[test]
     fn manual_check_resets_backoff_and_exhausted_retry_budgets_even_offline() {
-        let feed = UpdateFeed::offline_for_test("regressify").unwrap();
+        let feed = UpdateFeed::offline_for_test("https://regressify.eshn.dev").unwrap();
         let release = feed.parse_manifest(&manifest(b"installer")).unwrap();
         let cache = tempfile::tempdir().unwrap();
         for failures in [1, 4] {
@@ -2644,10 +3154,10 @@ mod tests {
 
     #[test]
     fn unavailable_or_stale_feed_does_not_discard_the_newest_cached_release() {
-        let feed = UpdateFeed::new("regressify").unwrap();
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
         let release = feed.parse_manifest(&manifest(b"installer")).unwrap();
         let older = feed
-            .parse_manifest(&manifest(b"installer").replace("1.10.0.0", "1.9.0.0"))
+            .parse_manifest(&manifest(b"installer").replace("1.10.0", "1.9.0"))
             .unwrap();
         let cache = tempfile::tempdir().unwrap();
         let installer = cached_installer(&release, cache.path());
@@ -2677,7 +3187,7 @@ mod tests {
     #[tokio::test]
     async fn total_deadline_is_independent_of_the_inactivity_limit() {
         let (url, server, _) = download_server("").await;
-        let mut release = UpdateFeed::new("regressify")
+        let mut release = UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(&manifest(b"installer"))
             .unwrap();
@@ -2706,7 +3216,7 @@ mod tests {
 
     #[test]
     fn progress_distinguishes_network_inactivity_verification_and_disk_saving() {
-        let release = UpdateFeed::new("regressify")
+        let release = UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(&manifest(b"installer"))
             .unwrap();
@@ -2735,7 +3245,7 @@ mod tests {
     #[test]
     fn prepared_installer_is_retained_and_tampering_blocks_launch() {
         let payload = b"installer";
-        let release = UpdateFeed::new("regressify")
+        let release = UpdateFeed::new("https://regressify.eshn.dev")
             .unwrap()
             .parse_manifest(&manifest(payload))
             .unwrap();
@@ -2747,5 +3257,158 @@ mod tests {
         assert!(update.launch(None).is_err());
         drop(update);
         assert!(path.exists());
+    }
+
+    #[test]
+    fn prepared_payload_archives_require_matching_version_and_sha256() {
+        let payload = b"installer";
+        let release = UpdateFeed::new("https://regressify.eshn.dev")
+            .unwrap()
+            .parse_manifest(&manifest(payload))
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        super::write_prepared_payloads_for_test(directory.path(), release.version).unwrap();
+        assert_eq!(
+            super::verify_prepared_payloads(directory.path(), &release)
+                .unwrap()
+                .len(),
+            2
+        );
+        fs::write(
+            directory.path().join(super::DESKTOP_ARCHIVE_NAME),
+            b"tampered",
+        )
+        .unwrap();
+        assert!(
+            super::verify_prepared_payloads(directory.path(), &release)
+                .unwrap_err()
+                .to_string()
+                .contains("SHA-256")
+        );
+        let receipt = directory.path().join(super::PREPARED_MANIFEST_NAME);
+        let forged = fs::read_to_string(&receipt).unwrap().replace(
+            &format!("{:x}", Sha256::digest(b"desktop-archive")),
+            &format!("{:x}", Sha256::digest(b"tampered")),
+        );
+        fs::write(receipt, forged).unwrap();
+        assert!(super::verify_prepared_payloads(directory.path(), &release).is_err());
+        super::write_prepared_payloads_for_test(directory.path(), "2.0.0.0".parse().unwrap())
+            .unwrap();
+        assert!(
+            super::verify_prepared_payloads(directory.path(), &release)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match expected")
+        );
+    }
+
+    #[test]
+    fn bridge_discards_already_installed_legacy_feed_metadata() {
+        let feed = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let mut legacy =
+            ManifestFields::from(&feed.parse_manifest(&manifest(b"installer")).unwrap());
+        legacy.installer = "https://drive.tuyen.blog/downloads/regressify/Regressify-Desktop-Setup-1.10.0.0-x64.exe".into();
+        UpdateState {
+            release: Some(legacy),
+            ..UpdateState::default()
+        }
+        .save(cache.path())
+        .unwrap();
+        let next = feed
+            .parse_manifest(&manifest(b"next").replace("1.10.0", "1.11.0"))
+            .unwrap();
+        assert_eq!(
+            feed.reconcile_check(
+                "1.10".parse().unwrap(),
+                cache.path(),
+                Ok(UpdateCheck::Available(next.clone()))
+            )
+            .unwrap(),
+            UpdateCheck::Available(next)
+        );
+    }
+
+    #[test]
+    fn preparation_group_fixture() {
+        let Some(directory) = std::env::var_os("REGRESSIFY_PREPARE_TEST_DIR") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        if std::env::var_os("REGRESSIFY_PREPARE_TEST_CHILD").is_some() {
+            use std::io::Write;
+            let mut hold = fs::File::create(directory.join("hold.lock")).unwrap();
+            hold.lock().unwrap();
+            hold.write_all(b"ready").unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+        let _child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "desktop::updates::tests::preparation_group_fixture",
+            ])
+            .env("REGRESSIFY_PREPARE_TEST_CHILD", "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !fs::metadata(directory.join("hold.lock")).is_ok_and(|metadata| metadata.len() > 0) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::process::exit(0);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn preparation_cancellation_and_timeout_reap_launcher_descendants() {
+        for mode in ["timeout", "pause", "handoff"] {
+            let directory = tempfile::tempdir().unwrap();
+            let release = UpdateFeed::new("https://regressify.eshn.dev")
+                .unwrap()
+                .parse_manifest(&manifest(b"installer"))
+                .unwrap();
+            let control = DownloadControl::new(&release);
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "desktop::updates::tests::preparation_group_fixture",
+                ])
+                .env("REGRESSIFY_PREPARE_TEST_DIR", directory.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let stop = async {
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    while !fs::metadata(directory.path().join("hold.lock"))
+                        .is_ok_and(|metadata| metadata.len() > 0)
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                match mode {
+                    "pause" => control.cancel(),
+                    "handoff" => control.cancel_for_handoff(),
+                    _ => {}
+                }
+            };
+            let (result, ()) = tokio::join!(
+                super::wait_for_preparation(&mut command, &control, Duration::from_secs(10)),
+                stop
+            );
+            assert!(
+                result.is_err(),
+                "{mode} completed while a child was still running"
+            );
+            let hold = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(directory.path().join("hold.lock"))
+                .unwrap();
+            hold.try_lock().expect("Preparation child survived cleanup");
+        }
     }
 }

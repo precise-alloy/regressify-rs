@@ -13,13 +13,12 @@ New to Regressify? Start with [Getting started](/docs/getting-started/). On macO
 
 ## Install
 
-The installer and in-app updates are Windows-only. On macOS and Linux, [build from source](/download/#source-heading);
-Chromium downloads on your first run.
+You can install Regressify on Windows, macOS, and Linux from the [download page](/download/):
 
-1. Download `Regressify-Desktop-Setup-N.N.N.N-x64.exe` from the [download page](/download/).
-2. Run it. No administrator rights are needed. The installer isn't signed yet, so SmartScreen may warn you.
+- **Windows (PowerShell)**: `irm https://regressify.eshn.dev/install.ps1 | iex` or download `Regressify-Setup-N.N.N.N-x64.exe`
+- **macOS and Linux**: `curl -fsSL https://regressify.eshn.dev/install.sh | sh`
 
-Setup installs to `%LOCALAPPDATA%\Programs\Regressify Desktop` and:
+On Windows, setup installs to `%LOCALAPPDATA%\Programs\Regressify` without administrator rights and:
 
 - adds desktop and Start-menu shortcuts;
 - installs the `regressify` CLI and adds it to your user PATH (open a new terminal, and restart Windows Terminal or VS
@@ -43,10 +42,10 @@ Official Windows builds check at startup and every eight hours. You're only noti
 and its checksum matches. Updates never install on their own.
 
 1. Click **Software updates** in the title bar. When an update is ready, a banner also offers **Install update**.
-2. Click **Check for updates** to check now.
-3. Click **Install and restart** (disabled during a run). If you have unsaved edits, choose **Save**, **Discard**, or
+1. Click **Check for updates** to check now.
+1. Click **Install and restart** (disabled during a run). If you have unsaved edits, choose **Save**, **Discard**, or
    **Cancel**.
-4. The installer runs and your workspace reopens. It may ask you to close other windows but never force-closes them.
+1. The installer runs and your workspace reopens. It may ask you to close other windows but never force-closes them.
 
 **Pause download** postpones retries for eight hours. **Copy details** appears after a failure. Closing the dialog
 doesn't stop the download.
@@ -56,7 +55,7 @@ doesn't stop the download.
 A workspace is the folder with your `regressify.yaml` and suites.
 
 1. Start the app and click **Open workspace** ①.
-2. Pick the folder.
+1. Pick the folder.
 
 ![The No workspace open screen with Open workspace numbered.](../../assets/docs/desktop/open-workspace.png)
 
@@ -92,15 +91,15 @@ menu also has **Duplicate suite**, **Create viewport file**, and **Open in VS Co
 
 `Ctrl+B` hides the navigator. Drag the divider to resize the panes.
 
-| Action | Mouse | Keyboard |
-| --- | --- | --- |
-| Select one row | Click | `Up`, `Down`, `Home`, `End` |
-| Add or remove a row | `Ctrl`+click | `Space` |
-| Select a range | `Shift`+click | `Shift`+arrows |
-| Select all, including rows hidden by search | **All** | |
-| Select all visible rows | | `Ctrl+A` |
-| Clear selection | Empty space or **None** | `Ctrl+Shift+A`, `Escape` |
-| Open the focused row | Click | `Enter` |
+| Action                                      | Mouse                   | Keyboard                    |
+| ------------------------------------------- | ----------------------- | --------------------------- |
+| Select one row                              | Click                   | `Up`, `Down`, `Home`, `End` |
+| Add or remove a row                         | `Ctrl`+click            | `Space`                     |
+| Select a range                              | `Shift`+click           | `Shift`+arrows              |
+| Select all, including rows hidden by search | **All**                 |                             |
+| Select all visible rows                     |                         | `Ctrl+A`                    |
+| Clear selection                             | Empty space or **None** | `Ctrl+Shift+A`, `Escape`    |
+| Open the focused row                        | Click                   | `Enter`                     |
 
 With a search filter on, **All** also selects hidden rows, so check before you run. Clearing the selection keeps
 unsaved edits.
@@ -123,8 +122,8 @@ it in runs.
 ### Create a suite
 
 1. Click **New suite** or press `Ctrl+N`.
-2. Type a **Filename** ①. `.tests.yaml` is added for you.
-3. Click **Create** ②.
+1. Type a **Filename** ①. `.tests.yaml` is added for you.
+1. Click **Create** ②.
 
 ![The New suite dialog with Filename and Create numbered.](../../assets/docs/desktop/new-suite.png)
 
@@ -152,10 +151,10 @@ Right-click a suite and choose **Rename suite** or **Delete suite** (`F2` or `De
 resolves them. Script and CSS files only have Source.
 
 1. Open **Source** ①.
-2. Press `Ctrl+Space` or click **Suggest** ② for suggestions (`Ctrl+Space` on macOS too).
-3. Use **Find in source** ③ (`Ctrl+F`).
-4. Toggle **Wrap** ④ and **Line numbers** ⑤.
-5. Click **Save document** ⑥ or press `Ctrl+S`.
+1. Press `Ctrl+Space` or click **Suggest** ② for suggestions (`Ctrl+Space` on macOS too).
+1. Use **Find in source** ③ (`Ctrl+F`).
+1. Toggle **Wrap** ④ and **Line numbers** ⑤.
+1. Click **Save document** ⑥ or press `Ctrl+S`.
 
 ![The Checkout suite on the Source tab with Source, Suggest, Find in source, Wrap, Line numbers, and Save document numbered.](../../assets/docs/desktop/source-editor.png)
 
@@ -170,10 +169,10 @@ before launching Regressify.
 ### Fields form
 
 1. Select a scenario. **Fields** ① opens.
-2. Search with **Find a setting** ② (`Ctrl+Shift+F`).
-3. Turn on **Advanced** ③ for more options, or **Overrides only** ④ for values you set.
-4. Open **Effective** ⑤ to see the final values.
-5. Click **Run Scenario Test** ⑥ or **Run Scenario Reference** ⑦ to run this scenario on all its viewports.
+1. Search with **Find a setting** ② (`Ctrl+Shift+F`).
+1. Turn on **Advanced** ③ for more options, or **Overrides only** ④ for values you set.
+1. Open **Effective** ⑤ to see the final values.
+1. Click **Run Scenario Test** ⑥ or **Run Scenario Reference** ⑦ to run this scenario on all its viewports.
 
 ![The Checkout page scenario on the Fields tab with Fields, Find a setting, Advanced, Overrides only, Effective, Run Scenario Test, and Run Scenario Reference numbered.](../../assets/docs/desktop/scenario-fields.png)
 
@@ -194,8 +193,8 @@ capture fails.
 ### Add actions
 
 1. Click **Add action**.
-2. Pick an action from a group ①.
-3. Use **Move action earlier**, **Move action later**, **Duplicate action**, or **Remove action** on each step.
+1. Pick an action from a group ①.
+1. Use **Move action earlier**, **Move action later**, **Duplicate action**, or **Remove action** on each step.
 
 ![The Add action menu open, with the grouped action list numbered 1.](../../assets/docs/desktop/add-action.png)
 
@@ -223,21 +222,21 @@ keeps them and shows **Reload from disk** (`Ctrl+R`):
 
 Press `Ctrl+2` for **Runs**.
 
-| Button | Does |
-| --- | --- |
-| **Run Reference** | Captures baselines |
-| **Run Test** | Captures and compares with baselines |
+| Button              | Does                                 |
+| ------------------- | ------------------------------------ |
+| **Run Reference**   | Captures baselines                   |
+| **Run Test**        | Captures and compares with baselines |
 | **Approve Results** | Makes test results the new baselines |
-| **Compare Results** | Compares an earlier run again |
+| **Compare Results** | Compares an earlier run again        |
 
 **More actions** has **Build Report**, **Optimize Images**, **Install Chromium**, and **Initialize Workspace**.
 
 ### First run
 
 1. Select suites on the **Suites** tab ① or in the navigator.
-2. Click **Run Reference** ②.
-3. Confirm "Replace reference images with new captures?" ③, or click **Cancel** ④.
-4. When it finishes, click **Run Test**.
+1. Click **Run Reference** ②.
+1. Confirm "Replace reference images with new captures?" ③, or click **Cancel** ④.
+1. When it finishes, click **Run Test**.
 
 ![The Runs view with Suites, Run Reference, the confirmation message, and Cancel numbered.](../../assets/docs/desktop/run-reference-confirm.png)
 
@@ -252,10 +251,10 @@ continue**, **Run saved version**, or **Cancel**.
 ### Run settings
 
 1. Open **Run settings** ①.
-2. **Compare after test** ② compares captures right away.
-3. **Run name (optional)** ③ targets a run for Approve and Compare. Empty means the last run, only if the same suites,
+1. **Compare after test** ② compares captures right away.
+1. **Run name (optional)** ③ targets a run for Approve and Compare. Empty means the last run, only if the same suites,
    scenarios, and output folder are selected. Type it to be sure what you approve.
-4. **Browser download** ④: **Auto**, **Always**, or **Never**. With Never, run **Install Chromium** once.
+1. **Browser download** ④: **Auto**, **Always**, or **Never**. With Never, run **Install Chromium** once.
 
 ![The Run settings tab with Run settings, Compare after test, Run name (optional), and Browser download numbered.](../../assets/docs/desktop/run-settings.png)
 
@@ -264,8 +263,8 @@ Use the same Regressify version on every QA machine, and recheck baselines when 
 ### Watch progress
 
 1. Open **Activity** ① to see progress and the result for each scenario and viewport.
-2. Turn on **Failures only** ② to hide passing rows.
-3. Click a row ③ to open its log.
+1. Turn on **Failures only** ② to hide passing rows.
+1. Click a row ③ to open its log.
 
 ![Runs Activity showing 4 failed, with Activity, Failures only, and a failed row numbered.](../../assets/docs/desktop/runs-activity.png)
 
@@ -278,8 +277,8 @@ again once the run has stopped.
 ### Logs
 
 1. Open **Log** ①, or click a row in Activity.
-2. **Follow** ② keeps the newest entries visible. `Ctrl+F` searches.
-3. **Copy displayed page** ③ copies the current page (500 entries). **Download complete filtered log** ④ saves every
+1. **Follow** ② keeps the newest entries visible. `Ctrl+F` searches.
+1. **Copy displayed page** ③ copies the current page (500 entries). **Download complete filtered log** ④ saves every
    matching entry.
 
 ![The Log tab with Log, Follow, Copy displayed page, and Download complete filtered log numbered.](../../assets/docs/desktop/runs-log.png)
@@ -296,9 +295,9 @@ completed full-suite run. Partial, stopped, or failed runs don't replace it; ope
 **Run name**.
 
 1. Filter with **Failed** ①, **All**, or **Passed**.
-2. Pick a capture ②.
-3. Choose a view ③: **Reference**, **Test**, **Diff**, **Side by side**, **Wipe**, or **Overlay**.
-4. Use **Fit to window (0)** ④ or the zoom controls.
+1. Pick a capture ②.
+1. Choose a view ③: **Reference**, **Test**, **Diff**, **Side by side**, **Wipe**, or **Overlay**.
+1. Use **Fit to window (0)** ④ or the zoom controls.
 
 ![Results with the Failed filter, the capture list, the Diff tab, and Fit to window numbered.](../../assets/docs/desktop/results-diff.png)
 
@@ -307,13 +306,13 @@ together. `Ctrl+B` widens the preview.
 
 ![Results on the Wipe tab at 4.90% mismatch, with the Wipe tab and the Wipe slider numbered.](../../assets/docs/desktop/results-wipe.png)
 
-| Zoom | Button | Key |
-| --- | --- | --- |
-| Fit to window | **Fit to window (0)** | `0` |
-| Fit width | **Fit width (W)** | `W` |
-| Actual size | **Actual size (100%)** | `1` |
+| Zoom             | Button                                  | Key      |
+| ---------------- | --------------------------------------- | -------- |
+| Fit to window    | **Fit to window (0)**                   | `0`      |
+| Fit width        | **Fit width (W)**                       | `W`      |
+| Actual size      | **Actual size (100%)**                  | `1`      |
 | Zoom 25% to 800% | **Zoom in**, **Zoom out**, `Ctrl`+wheel | `+`, `-` |
-| Pan | Drag | Arrows |
+| Pan              | Drag                                    | Arrows   |
 
 Double-click an image to toggle actual size.
 
@@ -332,8 +331,8 @@ is never saved as a reference; existing references stay.
 ### Approve a change
 
 1. Select the capture and click **Approve This Scenario** ①.
-2. Check the viewport and run ②.
-3. Click **Cancel** ③ or **Approve This Scenario** ④.
+1. Check the viewport and run ②.
+1. Click **Cancel** ③ or **Approve This Scenario** ④.
 
 ![The approval confirmation with Approve This Scenario, Viewport and Run, Cancel, and the confirm button numbered.](../../assets/docs/desktop/approve-scenario.png)
 
@@ -343,10 +342,10 @@ run.
 ### Clean up old test runs
 
 1. Click **Clean up old test runs** in Overview, Results, or workspace settings.
-2. Set **Completed runs to keep** ① (default 1).
-3. Pick suites ②.
-4. Click **Preview** ③ to see what stays and the space saved.
-5. Click **Delete old runs** ④, or **Close** ⑤ to delete nothing.
+1. Set **Completed runs to keep** ① (default 1).
+1. Pick suites ②.
+1. Click **Preview** ③ to see what stays and the space saved.
+1. Click **Delete old runs** ④, or **Close** ⑤ to delete nothing.
 
 ![The Clean up test runs dialog with Completed runs to keep, suites, Preview, Delete old runs, and Close numbered.](../../assets/docs/desktop/clean-up-runs.png)
 
@@ -362,10 +361,10 @@ Git must be installed. The app never asks for passwords, so set up credentials o
 never pull, merge, or change files.
 
 1. Click the Git badge ① or press `Ctrl+Shift+G`.
-2. Click a changed file ② to compare **Last Commit** with **Saved File** ③. Save drafts first.
-3. Tick files to commit.
-4. Type a **Commit message** ④.
-5. Click **Commit selected files** ⑤ and confirm.
+1. Click a changed file ② to compare **Last Commit** with **Saved File** ③. Save drafts first.
+1. Tick files to commit.
+1. Type a **Commit message** ④.
+1. Click **Commit selected files** ⑤ and confirm.
 
 ![The Git view with the Git badge, a changed file, Last Commit and Saved File, Commit message, Commit selected files, and Comparison Changes numbered.](../../assets/docs/desktop/git-changes.png)
 
@@ -385,11 +384,11 @@ Every write asks first and can be stopped, but stopping can't undo what the remo
 Publish to Azure Static Web Apps, Netlify, or Cloudflare Workers without extra tools.
 
 1. Select suites, then click **Deploy selected suite reports** ①.
-2. Click **Add target** ②, enter a **Target name** ③, and pick a **Provider** ④.
-3. Paste a **Deployment token** ⑤ (for Netlify or Cloudflare you can pick a saved token under **Token source**), then
+1. Click **Add target** ②, enter a **Target name** ③, and pick a **Provider** ④.
+1. Paste a **Deployment token** ⑤ (for Netlify or Cloudflare you can pick a saved token under **Token source**), then
    click **Save target** ⑥.
-4. Click **Deploy**. For a partial selection, tick "Yes, deploy only these N of M suites".
-5. Watch **Activity**, then click **Open Site**.
+1. Click **Deploy**. For a partial selection, tick "Yes, deploy only these N of M suites".
+1. Watch **Activity**, then click **Open Site**.
 
 ![The Deploy reports dialog with the title-bar Deploy button, Add target, Target name, Provider, Deployment token, and Save target numbered.](../../assets/docs/desktop/deploy-dialog.png)
 
@@ -398,11 +397,11 @@ Publish to Azure Static Web Apps, Netlify, or Cloudflare Workers without extra t
 - **Stop** can't undo what the provider already accepted.
 - **Deployment targets** (gear) has **Copy deployed URL**. Report titles are in Run settings > Report.
 
-| Provider | You need |
-| --- | --- |
-| Azure Static Web Apps | Deployment token. **Azure environment** blank means production. |
-| Netlify | An existing site's **Netlify Site ID** (shown as Project ID in Netlify) and a personal access token. Deploying replaces production. |
-| Cloudflare Workers | **Cloudflare Account ID**, **Worker name**, and a token with Workers Scripts Write. |
+| Provider              | You need                                                                                                                            |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Azure Static Web Apps | Deployment token. **Azure environment** blank means production.                                                                     |
+| Netlify               | An existing site's **Netlify Site ID** (shown as Project ID in Netlify) and a personal access token. Deploying replaces production. |
+| Cloudflare Workers    | **Cloudflare Account ID**, **Worker name**, and a token with Workers Scripts Write.                                                 |
 
 For Cloudflare, **workers.dev** can be **Public (production)** (the default, which makes the report reachable at a
 public workers.dev address and needs a workers.dev subdomain), **Private**, or **Preserve existing routing**.
@@ -420,10 +419,10 @@ field blank to keep a token. Removing a target or token never deletes a website.
 A landing app lists several report sites with live pass rates.
 
 1. Open **Publish** > **Landing apps** (no workspace needed).
-2. Click **New landing app** ①, then fill in **Heading** ② and **Subheading (Markdown)** ③.
-3. Click **Add site**, then enter a **Site heading** ④ and an absolute `http://` or `https://` **URL** (up to 100).
-4. Click **Preview** ⑤.
-5. Click **Save** ⑥, then **Deploy** ⑦.
+1. Click **New landing app** ①, then fill in **Heading** ② and **Subheading (Markdown)** ③.
+1. Click **Add site**, then enter a **Site heading** ④ and an absolute `http://` or `https://` **URL** (up to 100).
+1. Click **Preview** ⑤.
+1. Click **Save** ⑥, then **Deploy** ⑦.
 
 ![The Landing apps dialog with New landing app, Heading, Subheading (Markdown), Site heading, Preview, Save, and Deploy numbered.](../../assets/docs/desktop/landing-apps.png)
 
@@ -441,15 +440,15 @@ deployment sends one anonymous event; set `DO_NOT_TRACK=1` to disable it.
 ### Change the theme
 
 1. Click **Appearance** ①.
-2. Choose **System**, **Light**, or **Dark** ②.
+1. Choose **System**, **Light**, or **Dark** ②.
 
 ![The Appearance menu with the Appearance button and System, Light, and Dark numbered.](../../assets/docs/desktop/appearance-menu.png)
 
 ### Search commands
 
 1. Click **Commands** ① or press `Ctrl+Shift+P`.
-2. Type part of a name ②. "dark th" finds "Dark theme"; "theme dark" doesn't.
-3. Press `Enter` to run the highlighted command ③.
+1. Type part of a name ②. "dark th" finds "Dark theme"; "theme dark" doesn't.
+1. Press `Enter` to run the highlighted command ③.
 
 ![The Commands box filtered by "run", with Commands, the search text, and the Run Test result numbered.](../../assets/docs/desktop/command-search.png)
 
@@ -459,33 +458,33 @@ Unavailable commands are disabled. **Help** > **About** shows the version.
 
 On macOS, use `Cmd` for `Ctrl` (not for `Ctrl+Space`) and `Option` for `Alt`.
 
-| Shortcut | Action |
-| --- | --- |
-| `Ctrl+Shift+P` | Command search |
-| `Ctrl+O` | Open or switch workspace |
-| `Ctrl+P` | Find suite |
-| `Ctrl+Shift+F` | Find setting |
-| `Ctrl+B` | Show or hide the navigator |
-| `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | Editor / Runs / Results |
-| `Ctrl+N` | New suite |
-| `Ctrl+S` / `Ctrl+Shift+S` | Save / Save As |
-| `Ctrl+R` | Reload from disk |
-| `F5` | Refresh files |
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / Redo |
-| `Ctrl+F` | Find in Source or Log |
-| `Ctrl+Space` | Suggestions in Source |
-| `Ctrl+Shift+G` | Git |
-| `F2` / `Delete` | Rename or delete suite |
+| Shortcut                       | Action                     |
+| ------------------------------ | -------------------------- |
+| `Ctrl+Shift+P`                 | Command search             |
+| `Ctrl+O`                       | Open or switch workspace   |
+| `Ctrl+P`                       | Find suite                 |
+| `Ctrl+Shift+F`                 | Find setting               |
+| `Ctrl+B`                       | Show or hide the navigator |
+| `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | Editor / Runs / Results    |
+| `Ctrl+N`                       | New suite                  |
+| `Ctrl+S` / `Ctrl+Shift+S`      | Save / Save As             |
+| `Ctrl+R`                       | Reload from disk           |
+| `F5`                           | Refresh files              |
+| `Ctrl+Z` / `Ctrl+Shift+Z`      | Undo / Redo                |
+| `Ctrl+F`                       | Find in Source or Log      |
+| `Ctrl+Space`                   | Suggestions in Source      |
+| `Ctrl+Shift+G`                 | Git                        |
+| `F2` / `Delete`                | Rename or delete suite     |
 
 In the Source editor:
 
-| Shortcut | Action |
-| --- | --- |
-| `Ctrl+/` | Toggle YAML comment |
-| `Ctrl+]` / `Ctrl+[` | Indent / Outdent |
-| `Alt+Up` / `Alt+Down` | Move lines |
-| `Shift+Alt+Up` / `Shift+Alt+Down` | Duplicate lines |
-| `Ctrl+Shift+K` | Delete lines |
+| Shortcut                          | Action              |
+| --------------------------------- | ------------------- |
+| `Ctrl+/`                          | Toggle YAML comment |
+| `Ctrl+]` / `Ctrl+[`               | Indent / Outdent    |
+| `Alt+Up` / `Alt+Down`             | Move lines          |
+| `Shift+Alt+Up` / `Shift+Alt+Down` | Duplicate lines     |
+| `Ctrl+Shift+K`                    | Delete lines        |
 
 ## Troubleshooting
 
