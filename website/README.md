@@ -75,7 +75,7 @@ The getting-started doc, the landing page quickstart, and the download page's bu
 
 Screenshots in the desktop guide live in [src/assets/docs/desktop](src/assets/docs/desktop) and are referenced from Markdown with relative paths, so Astro converts them to WebP with fixed dimensions. Readers can click any image to open it full screen ([ImageZoom](src/components/ImageZoom.astro)). They are dark-theme window captures (1440x900 before cropping) of a release build (`cargo build --release --features gui --bin regressify-desktop`) opened on a throwaway fictional workspace ("northwind-qa", served from `127.0.0.1`).
 
-Annotations are baked into the PNGs: an amber ring around each control the text mentions and a numbered badge matching the step's circled number (①, ②, …). Amber keeps them distinct from the app's magenta diff pixels and red failure states. Ring positions came from each control's Windows UI Automation bounding box, looked up by accessible name, so they line up with the real controls. When you change a step's numbering, recapture or re-annotate the image so the badges still match.
+Annotations are baked into the PNGs: a brand-violet (`#7a7efa`) ring around each control the text mentions and a numbered badge, filled with the brand gradient, matching the step's circled number (①, ②, …). Rings stay violet rather than gradient because the gradient's magenta would blend into the app's magenta diff pixels. Ring positions came from each control's Windows UI Automation bounding box, looked up by accessible name, so they line up with the real controls. When you change a step's numbering, recapture or re-annotate the image so the badges still match.
 
 To recapture:
 

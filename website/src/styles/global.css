@@ -147,6 +147,14 @@ html:not(.js) .requires-js {
   line-height: 1.7;
 }
 
+/* On tablets and phones the column is already narrow; drop the measure cap so
+   text and screenshots use the full container width. */
+@media (max-width: 768px) {
+  .prose {
+    max-width: none;
+  }
+}
+
 .prose > * + * {
   margin-top: var(--space-lg);
 }

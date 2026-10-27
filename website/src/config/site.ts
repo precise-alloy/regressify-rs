@@ -21,7 +21,7 @@ export const SITE = {
 export const DOWNLOAD_PAGE_PATH = '/download/';
 
 export const NAV_LINKS = [
-  // { href: '/docs/', label: 'Docs' },
+  { href: '/docs/', label: 'Docs' },
   // { href: '/blog/', label: 'Blog' },
   { href: '/download/', label: 'Download' },
 ] as const;
