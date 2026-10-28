@@ -22,6 +22,11 @@ description: 'Use when interpolating selectors or page data into JavaScript, CSS
 1. Audit action-level hide/remove and config-level hideSelectors/removeSelectors
    separately. Serializing an entire stylesheet safely into JS does not constrain
    a selector's ability to introduce extra CSS rules.
+1. `imageSimplificationExcludeSelectors` reach the page only inside one JSON
+   options literal and are used through `matches`/`closest`, never CSS text; the
+   filter rule is built from generated IDs. Keep
+   [the escaping regression](../../../src/test/image_simplification.rs) asserting
+   the script prefix is the fixed wrapper plus that literal.
 1. Prefer text content and DOM APIs for display data; explicitly validate link
    schemes and HTML/Markdown policy in generated reports.
 

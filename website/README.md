@@ -70,7 +70,7 @@ draft: false
 
 The schemas live in [src/content.config.ts](src/content.config.ts); a build fails on invalid front matter. When migrating files from [docs](../docs), replace Zola shortcodes such as `{% spoiler() %}` with plain Markdown or `<details>`, and replace `@/...` links with site paths. Do not hard-code repository URLs in content; `SITE.repoUrl` controls every repository link.
 
-The getting-started doc, the landing page quickstart, and the download page's build-from-source steps are copies of [docs/get-started.md](../docs/get-started.md), [docs/commands.md](../docs/commands.md), and [docs/desktop.md](../docs/desktop.md). Update them when those sources change. The desktop app guide (`src/content/docs/desktop-app.md`) is a user-facing adaptation of [docs/desktop.md](../docs/desktop.md); update it when desktop workflows, labels, or shortcuts change.
+The getting-started doc, the landing page quickstart, and the download page's build-from-source steps are copies of [docs/get-started.md](../docs/get-started.md), [docs/commands.md](../docs/commands.md), and [docs/desktop.md](../docs/desktop.md). Update them when those sources change. The desktop app guide (`src/content/docs/desktop-app.md`) is a user-facing adaptation of [docs/desktop.md](../docs/desktop.md); update it when desktop workflows, labels, or shortcuts change. Its **Simplify images** section adapts the image simplification sections of [docs/commands.md](../docs/commands.md), [docs/create-test-suite.md](../docs/create-test-suite.md), and [docs/create-scenario.md](../docs/create-scenario.md); update it when those settings or their behavior change.
 
 ### Desktop Screenshots
 

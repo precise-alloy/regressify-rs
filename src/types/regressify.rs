@@ -78,6 +78,23 @@ pub struct TestSuite {
     /// Ignore HTTPS certificate errors for this suite. Inherits the workspace setting (default: false).
     pub ignore_ssl_errors: Option<bool>,
 
+    /// Opt-in image simplification before each screenshot: none (default) keeps images unchanged; pixelate turns large images in the main document into uniform blocks of their average color. Enabling it or changing any image simplification setting changes pixels, so re-capture references; keep pixelMatchThreshold above 0. Inherits the workspace setting; scenarios can override it.
+    #[schemars(example = &"pixelate")]
+    pub image_simplification: Option<ImageSimplification>,
+
+    /// Image simplification block size in whole CSS pixels: an even number from 2 to 16 (default: 4). Larger blocks remove more detail. Inherits the workspace setting; scenarios can override it.
+    #[schemars(range(min = 2, max = 16), extend("multipleOf" = 2), example = 4)]
+    pub image_simplification_block_size: Option<u32>,
+
+    /// Image simplification minimum size in whole CSS pixels (default: 64; at least 1). Images rendered narrower or shorter stay sharp. Inherits the workspace setting; scenarios can override it.
+    #[schemars(range(min = 1), example = 64)]
+    pub image_simplification_min_size: Option<u32>,
+
+    /// Standard CSS selectors for images, or elements containing images, that image simplification keeps sharp; invalid selectors match nothing. A list is required, entries must not be blank, and it replaces inherited selectors.
+    #[schemars(example = vec![".product-photo", "#hero img"])]
+    #[schemars(extend("items" = serde_json::json!({"type": "string", "minLength": 1, "pattern": r"\S"})))]
+    pub image_simplification_exclude_selectors: Option<Vec<String>>,
+
     /// Standard browser JavaScript injected once per active page document after readiness and before onReadyScript and actions. Returned promises are awaited. No Node.js or Playwright is required; inherits the workspace setting.
     #[schemars(example = "common/_on-ready.js")]
     pub js_on_ready_path: Option<String>,
@@ -216,6 +233,23 @@ pub struct TestScenario {
     /// Unique ID (case-insensitive) used by needs, --scenario filters, and screenshot filenames; a portable path component of at most 80 bytes. Omit to use a slug of label, or a URL hash when label is also omitted.
     #[schemars(example = "sign-in")]
     pub id: Option<String>,
+
+    /// Opt-in image simplification before each screenshot: none keeps images unchanged; pixelate turns large images in the main document into uniform blocks of their average color. Enabling it or changing any image simplification setting changes pixels, so re-capture references; keep pixelMatchThreshold above 0. Inherits the suite or workspace setting (default: none).
+    #[schemars(example = &"pixelate")]
+    pub image_simplification: Option<ImageSimplification>,
+
+    /// Image simplification block size in whole CSS pixels: an even number from 2 to 16. Larger blocks remove more detail. Inherits the suite or workspace setting (default: 4).
+    #[schemars(range(min = 2, max = 16), extend("multipleOf" = 2), example = 4)]
+    pub image_simplification_block_size: Option<u32>,
+
+    /// Image simplification minimum size in whole CSS pixels (at least 1). Images rendered narrower or shorter stay sharp. Inherits the suite or workspace setting (default: 64).
+    #[schemars(range(min = 1), example = 64)]
+    pub image_simplification_min_size: Option<u32>,
+
+    /// Standard CSS selectors for images, or elements containing images, that image simplification keeps sharp; invalid selectors match nothing. A list is required, entries must not be blank, and it replaces inherited selectors.
+    #[schemars(example = vec![".product-photo", "#hero img"])]
+    #[schemars(extend("items" = serde_json::json!({"type": "string", "minLength": 1, "pattern": r"\S"})))]
+    pub image_simplification_exclude_selectors: Option<Vec<String>>,
 
     /// Standard browser JavaScript injected once per active page document after readiness and before onReadyScript and actions. Returned promises are awaited. No Node.js or Playwright is required; inherits the suite or workspace setting.
     #[schemars(example = "common/_on-ready.js")]
@@ -361,6 +395,19 @@ pub enum NavigationWait {
     #[default]
     Load,
     NetworkIdle,
+}
+
+/// Image simplification mode: none or pixelate.
+// Variants intentionally have no doc comments so the schema stays a plain string
+// enum for desktop choices. "none" rather than "off": YAML 1.1 tools read an
+// unquoted `off` as the boolean false.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+#[derive(schemars::JsonSchema)]
+pub enum ImageSimplification {
+    #[default]
+    None,
+    Pixelate,
 }
 
 /// A name or a list of names, processed in the given order.

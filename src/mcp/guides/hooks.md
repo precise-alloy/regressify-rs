@@ -31,11 +31,15 @@ injected directly into Chromium.
    `readySelector` exists and is visible.
 1. Apply the CSS override, `hideSelectors`/`removeSelectors`, and the browser
    `jsOnReadyPath` script, then `onReadyScript`; freeze animations and scroll
-   once for lazy content. Both ready scripts finish before actions.
+   once for lazy content. Both ready scripts finish before actions. With
+   `imageSimplification: pixelate`, the image filter (a hidden zero-size `<svg>`
+   under `<html>` and one adopted stylesheet) is installed before the ready
+   scripts; capture preparation re-installs it if a script removes it.
 1. Run inherited `needs` actions, then scenario `actions`, or legacy shortcuts
    when `actions` is omitted. Each applicable `save` captures at its position.
 1. If final captures remain, wait `postInteractionWait`
-   and `delay`, settle, and capture them.
+   and `delay`, settle, and capture them. With `pixelate`, qualifying images
+   carry a `data-regressify-simplify` attribute only during each screenshot.
 
 `readySelector` is checked before browser ready scripts and actions. Do not point
 it at content that those later steps create. Use `onReadyScript` or

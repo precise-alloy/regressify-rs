@@ -1289,3 +1289,1141 @@ async fn url_waits_follow_delayed_redirects_and_same_document_navigation() -> Re
     let _ = std::fs::remove_dir_all(directory);
     result
 }
+
+const SIMPLIFICATION_BLOCK: usize = 8;
+
+/// Deterministic opaque noise: no block of it is uniform, so every pixelated
+/// block is distinguishable from the source.
+fn noise_pixels(seed: u32, width: usize, height: usize) -> Vec<rgb::RGBA8> {
+    let mut state = seed.wrapping_mul(0x9E37_79B9) ^ 0x5EED;
+    (0..width * height)
+        .map(|_| {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let [low, red, green, blue] = state.to_le_bytes();
+            rgb::RGBA8::new(red, green, blue ^ low, 255)
+        })
+        .collect()
+}
+
+fn stripe_svg() -> String {
+    let mut svg =
+        String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96">"#);
+    for column in 0..96 {
+        svg.push_str(&format!(
+            r#"<rect x="{column}" y="0" width="1" height="96" fill="rgb({},{},{})"/>"#,
+            column * 37 % 256,
+            column * 91 % 256,
+            column * 53 % 256
+        ));
+    }
+    for row in (0..96).step_by(3) {
+        svg.push_str(&format!(
+            r#"<rect x="0" y="{row}" width="96" height="1" fill="rgb({},0,{})"/>"#,
+            row * 7 % 256,
+            255 - row * 5 % 256
+        ));
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
+const SIMPLIFICATION_SCENES: &str = r#"<!doctype html>
+<html><head><style>
+body { margin: 0; background: rgb(255, 255, 255); font: 20px/24px sans-serif; color: rgb(0, 0, 0); }
+.scene { position: absolute; }
+.scene > img { display: block; }
+.badge { position: absolute; left: 8px; top: 8px; width: 30px; height: 20px; }
+.pseudo-badge::before { content: ''; position: absolute; left: 8px; top: 8px; width: 30px; height: 20px; background: rgb(255, 0, 255); }
+</style></head><body>
+<img id="plain" class="scene" src="/noise/1/96/96.png" width="96" height="96" style="left:10px;top:10px">
+<img id="svgimg" class="scene" src="/pattern.svg" width="96" height="96" style="left:120px;top:10px">
+<video id="video" class="scene" poster="/noise/2/96/96.png" width="96" height="96" style="left:230px;top:10px"></video>
+<img id="partial" class="scene" src="/noise/3/67/67.png" width="67" height="67" style="left:340px;top:10px">
+<img id="small" class="scene" src="/noise/4/40/40.png" width="40" height="40" style="left:430px;top:10px">
+<img id="excluded" class="scene keep" src="/noise/5/96/96.png" width="96" height="96" style="left:480px;top:10px">
+<div class="scene keep-zone" style="left:590px;top:10px"><img id="zone" src="/noise/6/96/96.png" width="96" height="96"></div>
+<img id="hidden" src="/noise/7/96/96.png" width="96" height="96" style="display:none">
+<img id="filtered" class="scene" src="/noise/8/96/96.png" width="96" height="96" style="left:10px;top:130px;filter:grayscale(1)">
+<img id="scaled" class="scene" src="/noise/9/96/96.png" width="96" height="96" style="left:120px;top:130px;transform:scale(0.75);transform-origin:0 0">
+<div class="scene" style="left:230px;top:130px;display:grid"><img id="grid-img" src="/noise/10/96/96.png" width="96" height="96" style="grid-area:1/1"><span style="grid-area:1/1;align-self:center;justify-self:center;color:rgb(255,0,0);background:rgb(255,255,0)">GRID</span></div>
+<div class="scene" style="left:340px;top:130px;width:220px"><img id="negative-img" src="/noise/11/96/96.png" width="96" height="96" style="display:inline"><span style="display:inline-block;margin-left:-60px;background:rgb(255,200,0)">NEW</span></div>
+<svg class="scene" width="96" height="96" style="left:590px;top:130px"><image id="svgimage" href="/noise/12/96/96.png" width="96" height="96"/></svg>
+<svg class="scene" width="96" height="96" viewBox="0 0 48 48" style="left:700px;top:130px"><image id="svgscaled" href="/noise/13/48/48.png" width="48" height="48"/></svg>
+<div class="scene" style="left:10px;top:250px"><span id="earlier-badge" class="badge" style="background:rgb(0,0,255)"></span><img id="earlier-img" src="/noise/14/96/96.png" width="96" height="96"></div>
+<div class="scene" style="left:120px;top:250px"><img id="later-img" src="/noise/15/96/96.png" width="96" height="96"><span id="later-badge" class="badge" style="background:rgb(0,160,0)"></span></div>
+<div class="scene" style="left:230px;top:250px"><span id="earlier-z-badge" class="badge" style="z-index:1;background:rgb(0,0,255)"></span><img id="earlier-z-img" src="/noise/16/96/96.png" width="96" height="96"></div>
+<div class="scene pseudo-badge" style="left:340px;top:250px"><img id="pseudo-img" src="/noise/17/96/96.png" width="96" height="96"></div>
+<div class="scene" style="left:450px;top:250px;width:96px"><div id="hero-clip" style="height:64px;overflow:hidden"><img id="hero-img" src="/noise/18/96/128.png" width="96" height="128" style="display:block"></div><p style="margin:0">Caption</p></div>
+<div class="scene" style="left:560px;top:250px;width:96px"><img id="caption-over-img" src="/noise/19/96/96.png" width="96" height="96"><div style="margin-top:-30px;color:rgb(255,255,255)">Over</div></div>
+<div class="scene" style="left:670px;top:250px;width:96px"><img id="bg-under-img" src="/noise/20/96/96.png" width="96" height="96"><div style="margin-top:-30px;height:20px;background:rgb(0,0,0)"></div></div>
+</body></html>"#;
+
+const SIMPLIFICATION_GALLERY: &str = r#"<!doctype html>
+<html><head><style>
+body { margin: 0; background: rgb(255, 255, 255); font: 16px/20px sans-serif; }
+img { display: block; }
+#header { position: sticky; top: 0; height: 40px; background: rgb(200, 0, 120); }
+#intro { height: 280px; }
+#gallery { width: 400px; }
+#spacer { height: 600px; }
+#status { position: absolute; left: 600px; top: 50px; width: 30px; height: 30px; background: rgb(128, 128, 128); }
+#toggle { position: absolute; left: 540px; top: 100px; appearance: none; border: 0; padding: 0; background: rgb(0, 0, 0); color: rgb(255, 255, 255); font: 16px/20px sans-serif; }
+#open, #open:visited { position: absolute; left: 540px; top: 150px; color: rgb(0, 0, 0); text-decoration: none; }
+:focus { outline: none; }
+</style></head><body>
+<div id="header"></div>
+<div id="intro"><img id="hero" src="/noise/31/128/128.png" width="128" height="128"><div class="keep-zone"><img id="kept" src="/noise/32/96/96.png" width="96" height="96"></div></div>
+<div id="gallery"><img id="g1" src="/noise/33/400/300.png" width="400" height="300"><img id="g2" src="/noise/34/400/300.png" width="400" height="300"><img id="g3" src="/noise/35/400/300.png" width="400" height="300"></div>
+<div id="spacer"></div>
+<div id="status"></div>
+<button id="toggle">Toggle</button>
+<a id="open" href="/popup" target="_blank">Open popup</a>
+<script>
+document.getElementById('toggle').addEventListener('click', () => {
+  const flags = document.querySelectorAll('[data-regressify-simplify]').length;
+  const filtered = [...document.images].some(image => getComputedStyle(image).filter !== 'none');
+  document.getElementById('status').style.background = flags === 0 && !filtered ? 'rgb(0, 160, 0)' : 'rgb(220, 0, 0)';
+});
+</script>
+</body></html>"#;
+
+const SIMPLIFICATION_POPUP: &str = r#"<!doctype html>
+<html><head><style>body { margin: 0; background: rgb(255, 255, 255); } img { display: block; }</style></head>
+<body><img id="popup-image" src="/noise/36/160/120.png" width="160" height="120"></body></html>"#;
+
+fn simplification_page(request: Request) {
+    let path = request
+        .url()
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    let respond = |request: Request, body: Vec<u8>, content_type: &str, csp: Option<&str>| {
+        let mut response = Response::from_data(body)
+            .with_header(Header::from_bytes("Content-Type", content_type).unwrap());
+        if let Some(csp) = csp {
+            response =
+                response.with_header(Header::from_bytes("Content-Security-Policy", csp).unwrap());
+        }
+        let _ = request.respond(response);
+    };
+    if let Some(spec) = path
+        .strip_prefix("/noise/")
+        .and_then(|spec| spec.strip_suffix(".png"))
+    {
+        let parts: Vec<usize> = spec
+            .split('/')
+            .filter_map(|part| part.parse().ok())
+            .collect();
+        if let [seed, width, height] = parts[..] {
+            let png = lodepng::encode32(&noise_pixels(seed as u32, width, height), width, height)
+                .unwrap();
+            return respond(request, png, "image/png", None);
+        }
+    }
+    match path.as_str() {
+        "/pattern.svg" => respond(request, stripe_svg().into_bytes(), "image/svg+xml", None),
+        "/scenes" => respond(request, SIMPLIFICATION_SCENES.into(), "text/html", None),
+        "/gallery" => respond(request, SIMPLIFICATION_GALLERY.into(), "text/html", None),
+        "/popup" => respond(request, SIMPLIFICATION_POPUP.into(), "text/html", None),
+        // Inline <style> elements and style attributes are blocked; only
+        // same-origin resources and CSSOM changes remain.
+        "/csp" => respond(
+            request,
+            br#"<!doctype html><html><head></head><body><p id="csp-hidden">Visible</p><img id="csp" src="/noise/21/96/96.png" width="96" height="96"></body></html>"#.to_vec(),
+            "text/html",
+            Some("default-src 'self'; style-src 'self'"),
+        ),
+        "/base" => {
+            use base64::Engine as _;
+            let png = lodepng::encode32(&noise_pixels(22, 96, 96), 96, 96).unwrap();
+            let html = format!(
+                r#"<!doctype html><html><head><base href="https://example.invalid/elsewhere/"></head><body style="margin:0"><img id="based" src="data:image/png;base64,{}" width="96" height="96" style="display:block"></body></html>"#,
+                base64::engine::general_purpose::STANDARD.encode(png)
+            );
+            respond(request, html.into_bytes(), "text/html", None)
+        }
+        _ => {
+            let _ = request.respond(Response::empty(404));
+        }
+    }
+}
+
+type Capture = lodepng::Bitmap<rgb::RGBA8>;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Area {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+impl Area {
+    fn contains(&self, x: usize, y: usize) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+
+    fn intersects(&self, other: &Area) -> bool {
+        self.x < other.x + other.width
+            && other.x < self.x + self.width
+            && self.y < other.y + other.height
+            && other.y < self.y + self.height
+    }
+}
+
+fn capture_pixel(image: &Capture, x: usize, y: usize) -> rgb::RGBA8 {
+    image.buffer[y * image.width + x]
+}
+
+/// Pixels inside `area` that differ between two captures.
+fn changed_pixels(first: &Capture, second: &Capture, area: Area) -> usize {
+    (area.y..area.y + area.height)
+        .flat_map(|y| (area.x..area.x + area.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| capture_pixel(first, x, y) != capture_pixel(second, x, y))
+        .count()
+}
+
+/// Pixels breaking uniform blocks aligned to the area origin. Blocks touching
+/// `skip` (an overlay drawn on top) are ignored.
+fn nonuniform_block_pixels(image: &Capture, area: Area, block: usize, skip: Option<Area>) -> usize {
+    let mut broken = 0;
+    for top in (0..area.height).step_by(block) {
+        for left in (0..area.width).step_by(block) {
+            let cell = Area {
+                x: area.x + left,
+                y: area.y + top,
+                width: block.min(area.width - left),
+                height: block.min(area.height - top),
+            };
+            if skip.is_some_and(|skip| skip.intersects(&cell)) {
+                continue;
+            }
+            let first = capture_pixel(image, cell.x, cell.y);
+            broken += (cell.y..cell.y + cell.height)
+                .flat_map(|y| (cell.x..cell.x + cell.width).map(move |x| (x, y)))
+                .filter(|&(x, y)| capture_pixel(image, x, y) != first)
+                .count();
+        }
+    }
+    broken
+}
+
+/// Blocks whose colour is not the block average of the source image (edge
+/// pixels duplicated for partial blocks), allowing one level of rounding.
+/// `rows` limits the check to visible source rows.
+fn block_mean_errors(
+    image: &Capture,
+    origin: (usize, usize),
+    source: &[rgb::RGBA8],
+    (width, height): (usize, usize),
+    block: usize,
+    rows: std::ops::Range<usize>,
+) -> usize {
+    let mut errors = 0;
+    for top in (0..height).step_by(block) {
+        for left in (0..width).step_by(block) {
+            let mut sum = [0u32; 3];
+            for y in top..top + block {
+                for x in left..left + block {
+                    let pixel = source[y.min(height - 1) * width + x.min(width - 1)];
+                    sum[0] += u32::from(pixel.r);
+                    sum[1] += u32::from(pixel.g);
+                    sum[2] += u32::from(pixel.b);
+                }
+            }
+            let count = (block * block) as f64;
+            let mean = sum.map(|channel| f64::from(channel) / count);
+            for y in top..(top + block).min(height) {
+                if !rows.contains(&y) {
+                    continue;
+                }
+                for x in left..(left + block).min(width) {
+                    let pixel = capture_pixel(image, origin.0 + x, origin.1 + y);
+                    let actual = [pixel.r, pixel.g, pixel.b].map(f64::from);
+                    if actual
+                        .iter()
+                        .zip(mean)
+                        .any(|(actual, expected)| (actual - expected).abs() > 1.0)
+                    {
+                        errors += 1;
+                    }
+                }
+            }
+        }
+    }
+    errors
+}
+
+/// Full-page capture matching the product's capture parameters.
+async fn full_page_capture(page: &chromiumoxide::Page) -> Result<Capture> {
+    use chromiumoxide::{
+        cdp::browser_protocol::page::{CaptureScreenshotFormat, Viewport},
+        page::ScreenshotParams,
+    };
+    let metrics = page.layout_metrics().await?;
+    let png = page
+        .screenshot(
+            ScreenshotParams::builder()
+                .format(CaptureScreenshotFormat::Png)
+                .clip(Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: metrics.css_content_size.width,
+                    height: metrics.css_content_size.height,
+                    scale: 1.0,
+                })
+                .capture_beyond_viewport(true)
+                .from_surface(true)
+                .omit_background(false)
+                .build(),
+        )
+        .await?;
+    Ok(lodepng::decode32(png)?)
+}
+
+async fn content_size(page: &chromiumoxide::Page) -> Result<(f64, f64)> {
+    let size = page.layout_metrics().await?.css_content_size;
+    Ok((size.width, size.height))
+}
+
+/// Wait for images, then for video posters, which document.images omits.
+async fn settle_simplification_page(page: &chromiumoxide::Page) -> Result<()> {
+    let settled = super::page_stability::wait_for_page_settle(page, Duration::from_secs(5)).await?;
+    anyhow::ensure!(settled.settled, "fixture page did not settle");
+    super::runtime::evaluate_main_document(
+        page,
+        "Promise.all([...document.querySelectorAll('video[poster]')].map(video => new Promise(resolve => { \
+           const image = new Image(); image.onload = image.onerror = resolve; image.src = video.poster; }))) \
+         .then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn element_areas(
+    page: &chromiumoxide::Page,
+    ids: &[&str],
+) -> Result<std::collections::BTreeMap<String, Area>> {
+    let rects: std::collections::BTreeMap<String, [f64; 4]> =
+        super::runtime::evaluate_main_document(
+            page,
+            format!(
+                "Object.fromEntries({}.map(id => {{ const rect = document.getElementById(id).getBoundingClientRect(); \
+                 return [id, [rect.left + scrollX, rect.top + scrollY, rect.width, rect.height]]; }}))",
+                serde_json::to_string(ids)?
+            ),
+        )
+        .await?
+        .into_value()?;
+    rects
+        .into_iter()
+        .map(|(id, [x, y, width, height])| {
+            anyhow::ensure!(
+                [x, y, width, height]
+                    .iter()
+                    .all(|value| value.fract() == 0.0 && *value >= 0.0),
+                "{id} is not on whole pixels: {x},{y} {width}x{height}"
+            );
+            Ok((
+                id,
+                Area {
+                    x: x as usize,
+                    y: y as usize,
+                    width: width as usize,
+                    height: height as usize,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Regressify-owned page state; every value must stay zero in mode `none`.
+const SIMPLIFICATION_DOM_STATE: &str = "({ \
+    hosts: document.querySelectorAll('svg[id^=\"regressify-simplify-host-\"]').length, \
+    sheets: document.adoptedStyleSheets.length, \
+    flags: document.querySelectorAll('[data-regressify-simplify]').length, \
+    filters: [...document.querySelectorAll('img, video, svg image')].map(element => getComputedStyle(element).filter).filter(filter => filter !== 'none') })";
+
+#[tokio::test]
+#[ignore = "requires managed Chromium; run regressify install"]
+async fn image_simplification_pixelates_only_unobscured_images_in_chromium() -> Result<()> {
+    use super::{
+        hooks::DocumentHooks,
+        image_simplification::{ImageSimplifier, MarkCounts},
+        page_stability::prepare_screenshot,
+        runtime::evaluate_main_document,
+    };
+    use crate::{
+        config::ResolvedConfig,
+        types::{ImageSimplification, TestScenario},
+    };
+    use serde_json::{Value, json};
+
+    const PIXELATED: [&str; 9] = [
+        "plain",
+        "svgimg",
+        "video",
+        "partial",
+        "later-img",
+        "earlier-z-img",
+        "hero-img",
+        "bg-under-img",
+        "svgimage",
+    ];
+    // Promotion would paint these over grid text, an inline badge, an earlier
+    // positioned badge, a generated badge, or later caption text.
+    const GUARDED: [&str; 5] = [
+        "grid-img",
+        "negative-img",
+        "earlier-img",
+        "pseudo-img",
+        "caption-over-img",
+    ];
+    const UNFLAGGED: [&str; 6] = [
+        "small",
+        "excluded",
+        "zone",
+        "filtered",
+        "scaled",
+        "svgscaled",
+    ];
+    let block = SIMPLIFICATION_BLOCK;
+    let site = Site::new(simplification_page)?;
+    let workspace = tempfile::tempdir()?;
+    let pixelate = ResolvedConfig {
+        image_simplification: ImageSimplification::Pixelate,
+        image_simplification_block_size: block as u32,
+        image_simplification_min_size: 64,
+        image_simplification_exclude_selectors: vec![
+            ".keep".into(),
+            ".keep-zone".into(),
+            "img[".into(),
+        ],
+        delay: Some(0.0),
+        settle_timeout_ms: 2_000,
+        ..Default::default()
+    };
+    let none = ResolvedConfig {
+        image_simplification: ImageSimplification::None,
+        ..pixelate.clone()
+    };
+    let simplifier = ImageSimplifier::from_config(&pixelate)?
+        .ok_or_else(|| anyhow!("pixelate must build a simplifier"))?;
+    let (mut browser, handler, directory) = launch_browser(
+        "image-simplification",
+        LaunchOptions {
+            viewport: Some((800, 600)),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let result: Result<()> = async {
+        let scenes = format!("{}/scenes", site.origin);
+        let dom_state = |page: &chromiumoxide::Page| {
+            let page = page.clone();
+            async move {
+                Ok::<Value, anyhow::Error>(
+                    evaluate_main_document(&page, SIMPLIFICATION_DOM_STATE)
+                        .await?
+                        .into_value()?,
+                )
+            }
+        };
+
+        // Mode none performs no page work: same DOM and pixels as an untouched capture.
+        let page = browser.new_page(scenes.as_str()).await?;
+        settle_simplification_page(&page).await?;
+        let untouched = full_page_capture(&page).await?;
+        let untouched_size = content_size(&page).await?;
+        DocumentHooks::load(workspace.path(), &TestScenario::default(), &none)?
+            .apply(&page)
+            .await?;
+        prepare_screenshot(&page, &none, "image-simplification-none").await?;
+        let state = dom_state(&page).await?;
+        anyhow::ensure!(
+            state == json!({"hosts": 0, "sheets": 0, "flags": 0, "filters": ["grayscale(1)"]}),
+            "mode none changed the document: {state}"
+        );
+        let baseline = full_page_capture(&page).await?;
+        anyhow::ensure!(
+            (baseline.width, baseline.height) == (untouched.width, untouched.height)
+                && baseline.buffer == untouched.buffer,
+            "mode none changed captured pixels"
+        );
+        page.close().await?;
+
+        let page = browser.new_page(scenes.as_str()).await?;
+        settle_simplification_page(&page).await?;
+        let hooks = DocumentHooks::load(workspace.path(), &TestScenario::default(), &pixelate)?;
+        hooks.apply(&page).await?;
+        let state = dom_state(&page).await?;
+        anyhow::ensure!(
+            state["hosts"] == 1 && state["sheets"] == 1 && state["flags"] == 0,
+            "document setup did not install exactly one filter host and sheet: {state}"
+        );
+        anyhow::ensure!(
+            content_size(&page).await? == untouched_size,
+            "the filter host changed page dimensions"
+        );
+        prepare_screenshot(&page, &pixelate, "image-simplification").await?;
+        let flags: std::collections::BTreeMap<String, Option<String>> = evaluate_main_document(
+            &page,
+            "Object.fromEntries([...document.querySelectorAll('img, video, svg image')]\
+             .map(element => [element.id, element.getAttribute('data-regressify-simplify')]))",
+        )
+        .await?
+        .into_value()?;
+        let mut expected = std::collections::BTreeMap::new();
+        for id in PIXELATED {
+            expected.insert(id.to_owned(), Some("pixelate".to_owned()));
+        }
+        for id in GUARDED {
+            expected.insert(id.to_owned(), Some("sharp".to_owned()));
+        }
+        for id in UNFLAGGED.into_iter().chain(["hidden"]) {
+            expected.insert(id.to_owned(), None);
+        }
+        anyhow::ensure!(flags == expected, "unexpected image flags: {flags:?}");
+        let first = full_page_capture(&page).await?;
+        anyhow::ensure!(
+            (first.width, first.height) == (baseline.width, baseline.height)
+                && content_size(&page).await? == untouched_size,
+            "pixelation changed page dimensions"
+        );
+
+        let ids: Vec<&str> = PIXELATED
+            .iter()
+            .chain(GUARDED.iter())
+            .chain(UNFLAGGED.iter())
+            .chain(["later-badge", "earlier-z-badge", "hero-clip"].iter())
+            .copied()
+            .collect();
+        let areas = element_areas(&page, &ids).await?;
+        let visible = |id: &str| {
+            if id == "hero-img" {
+                // Only the part inside the overflow clip is painted.
+                Area {
+                    height: areas["hero-clip"].height,
+                    ..areas[id]
+                }
+            } else {
+                areas[id]
+            }
+        };
+        let overlays = [areas["later-badge"], areas["earlier-z-badge"]];
+        for id in PIXELATED {
+            let area = visible(id);
+            let skip = overlays.iter().copied().find(|overlay| overlay.intersects(&area));
+            let broken = nonuniform_block_pixels(&first, area, block, skip);
+            anyhow::ensure!(broken == 0, "{id}: {broken} pixels break {block}px blocks");
+            anyhow::ensure!(
+                changed_pixels(&first, &baseline, area) > 0,
+                "{id} was not pixelated"
+            );
+        }
+        // Partial edge blocks are filled, never left transparent over the page.
+        let partial = visible("partial");
+        anyhow::ensure!(
+            (partial.y..partial.y + partial.height)
+                .flat_map(|y| (partial.x..partial.x + partial.width).map(move |x| (x, y)))
+                .all(|(x, y)| capture_pixel(&first, x, y) != rgb::RGBA8::new(255, 255, 255, 255)),
+            "partial edge blocks show the page background"
+        );
+        for id in GUARDED.iter().chain(UNFLAGGED.iter()) {
+            let changed = changed_pixels(&first, &baseline, visible(id));
+            anyhow::ensure!(changed == 0, "{id} should stay sharp; {changed} pixels changed");
+        }
+        for overlay in overlays {
+            anyhow::ensure!(
+                changed_pixels(&first, &baseline, overlay) == 0,
+                "an overlay above a pixelated image changed"
+            );
+        }
+        // Nothing outside pixelated images changes, including the hidden host.
+        let pixelated_areas: Vec<Area> = PIXELATED.iter().map(|id| visible(id)).collect();
+        let outside = (0..first.height)
+            .flat_map(|y| (0..first.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| !pixelated_areas.iter().any(|area| area.contains(x, y)))
+            .filter(|&(x, y)| capture_pixel(&first, x, y) != capture_pixel(&baseline, x, y))
+            .count();
+        anyhow::ensure!(outside == 0, "{outside} pixels changed outside pixelated images");
+
+        // Restoring removes every flag and returns the exact original pixels.
+        simplifier.restore(&page).await?;
+        let state = dom_state(&page).await?;
+        anyhow::ensure!(
+            state["flags"] == 0 && state["filters"] == json!(["grayscale(1)"]),
+            "flags or filters remained after restore: {state}"
+        );
+        anyhow::ensure!(
+            full_page_capture(&page).await?.buffer == baseline.buffer,
+            "restored page differs from the original"
+        );
+
+        // A single-page app removed the host and replaced adopted sheets.
+        evaluate_main_document(
+            &page,
+            "document.querySelector('svg[id^=\"regressify-simplify-host-\"]').remove(); document.adoptedStyleSheets = [];",
+        )
+        .await?;
+        anyhow::ensure!(dom_state(&page).await?["hosts"] == 0);
+        prepare_screenshot(&page, &pixelate, "image-simplification-spa").await?;
+        let state = dom_state(&page).await?;
+        anyhow::ensure!(
+            state["hosts"] == 1 && state["sheets"] == 1,
+            "the filter was not re-installed: {state}"
+        );
+        let second = full_page_capture(&page).await?;
+        anyhow::ensure!(
+            second.buffer == first.buffer,
+            "repeated pixelation of the same page changed pixels"
+        );
+        simplifier.restore(&page).await?;
+        let counts = simplifier.prepare(&page).await?;
+        anyhow::ensure!(
+            counts
+                == MarkCounts {
+                    simplified: 9,
+                    small: 1,
+                    excluded: 2,
+                    filtered: 1,
+                    transformed: 2,
+                    overlapped: 5,
+                    invalid_selectors: 1,
+                },
+            "unexpected counts: {counts:?}"
+        );
+        simplifier.restore(&page).await?;
+        page.close().await?;
+
+        // A fresh document produces identical pixels.
+        let page = browser.new_page(scenes.as_str()).await?;
+        settle_simplification_page(&page).await?;
+        hooks.apply(&page).await?;
+        prepare_screenshot(&page, &pixelate, "image-simplification-fresh").await?;
+        anyhow::ensure!(
+            full_page_capture(&page).await?.buffer == first.buffer,
+            "a second run produced different pixels"
+        );
+        page.close().await?;
+
+        // Strict style-src CSP: injected <style> elements are ignored, the
+        // constructed sheet and CSSOM-styled host still work.
+        let csp = ResolvedConfig {
+            hide_selectors: vec!["#csp-hidden".into()],
+            ..pixelate.clone()
+        };
+        for (path, id) in [("csp", "csp"), ("base", "based")] {
+            let page = browser.new_page(format!("{}/{path}", site.origin)).await?;
+            settle_simplification_page(&page).await?;
+            let original = full_page_capture(&page).await?;
+            DocumentHooks::load(workspace.path(), &TestScenario::default(), &csp)?
+                .apply(&page)
+                .await?;
+            prepare_screenshot(&page, &csp, "image-simplification-csp").await?;
+            let state: Value = evaluate_main_document(
+                &page,
+                format!(
+                    "({{ hidden: getComputedStyle(document.getElementById('csp-hidden') || document.body).visibility, \
+                       flag: document.getElementById({0}).getAttribute('data-regressify-simplify'), \
+                       filter: getComputedStyle(document.getElementById({0})).filter }})",
+                    serde_json::to_string(id)?
+                ),
+            )
+            .await?
+            .into_value()?;
+            if path == "csp" {
+                anyhow::ensure!(
+                    state["hidden"] == "visible",
+                    "the CSP fixture did not block injected styles: {state}"
+                );
+            }
+            anyhow::ensure!(
+                state["flag"] == "pixelate"
+                    && state["filter"]
+                        .as_str()
+                        .is_some_and(|filter| filter.contains("regressify-simplify-filter-")),
+                "{path}: image was not filtered: {state}"
+            );
+            let image = full_page_capture(&page).await?;
+            let area = element_areas(&page, &[id]).await?[id];
+            anyhow::ensure!(nonuniform_block_pixels(&image, area, block, None) == 0);
+            anyhow::ensure!(changed_pixels(&image, &original, area) > 0, "{path}: not pixelated");
+            page.close().await?;
+        }
+        Ok(())
+    }
+    .await;
+    browser.close().await?;
+    handler.await?;
+    let _ = std::fs::remove_dir_all(directory);
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires managed Chromium; run regressify install"]
+async fn image_simplification_ref_and_test_cover_saves_finals_and_popups() -> Result<()> {
+    use crate::{
+        diagnostics::{
+            journal::{ArchiveState, JournalReader},
+            record::{DiagnosticEvent, Field, FieldValue, SafeValue, Stage},
+        },
+        test::capture,
+        types::ScreenshotType,
+    };
+    use clap::Parser;
+    use serde_json::{Value, json};
+
+    if let Some(root) = std::env::var_os("REGRESSIFY_IMAGE_SIMPLIFICATION_FIXTURE") {
+        let mode = std::env::var("REGRESSIFY_IMAGE_SIMPLIFICATION_MODE")?;
+        let command = if mode == "reference" { "ref" } else { "test" };
+        let arguments: Vec<std::ffi::OsString> = vec![
+            "regressify".into(),
+            "--root".into(),
+            root,
+            "--run-id".into(),
+            mode.into(),
+            "--async-capture-limit".into(),
+            "3".into(),
+            "--async-capture-ramp-ms".into(),
+            "0".into(),
+            command.into(),
+            "--fetch-browser".into(),
+            "false".into(),
+        ];
+        return crate::application::execute(crate::cli::Cli::try_parse_from(arguments)?).await;
+    }
+    let block = SIMPLIFICATION_BLOCK;
+    let site = Site::new(simplification_page)?;
+    let workspace = tempfile::tempdir()?;
+    let root = workspace.path();
+    std::fs::create_dir_all(root.join("visual_tests"))?;
+    std::fs::create_dir_all(root.join("common"))?;
+    std::fs::write(
+        root.join("common/_viewports.yaml"),
+        "- label: desktop\n  width: 640\n  height: 480\n",
+    )?;
+    // The second exclusion matches nothing; its text must never reach a journal.
+    let workspace_config = |block_size: u32| {
+        format!(
+            "elementTimeout: 5000\npostInteractionWait: 0\ndelay: 0\nimageSimplification: pixelate\n\
+             imageSimplificationBlockSize: {block_size}\nimageSimplificationExcludeSelectors:\n  \
+             - '.keep-zone'\n  - 'img[data-secret=\"exclusion-marker\"]'\n"
+        )
+    };
+    std::fs::write(root.join("regressify.yaml"), workspace_config(8))?;
+    let gallery = format!("{}/gallery", site.origin);
+    let suite = json!({ "id": "pixelation", "scenarios": [
+        { "id": "gallery", "url": gallery, "selectors": ["viewport", "#gallery"],
+          "actions": [{ "save": "first" }, { "click": "#toggle" }, { "save": "second" }] },
+        { "id": "popup", "url": gallery, "selectors": ["viewport"],
+          "actions": [{ "click": "#open" }, { "switchTab": "new" }, { "wait": "#popup-image" },
+                      { "save": "popup" }, { "closeTab": "current" }, { "save": "back" }] },
+        { "id": "sharp", "url": gallery, "imageSimplification": "none", "selectors": ["viewport"] }
+    ] });
+    std::fs::write(
+        root.join("visual_tests/pixelation.tests.json"),
+        serde_json::to_vec_pretty(&suite)?,
+    )?;
+    // Returns the child's console output; a nonzero exit fails the fixture.
+    let run = |mode: &str| -> Result<String> {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--ignored",
+                "--exact",
+                "test::browser_tests::image_simplification_ref_and_test_cover_saves_finals_and_popups",
+                "--nocapture",
+            ])
+            .env("REGRESSIFY_IMAGE_SIMPLIFICATION_FIXTURE", root)
+            .env("REGRESSIFY_IMAGE_SIMPLIFICATION_MODE", mode)
+            .env_remove("REPLACEMENT_PROFILE")
+            .env_remove("REGRESSIFY_DISABLE_DIAGNOSTIC_ARCHIVE")
+            .env_remove("REGRESSIFY_DIAGNOSTIC_DISK_BUDGET_BYTES")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "{mode}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    };
+    run("reference")?;
+    run("test")?;
+
+    let output_dir = root.join(".regressify");
+    let suite_dir = output_dir.join("pixelation");
+    let report: Value = serde_json::from_slice(&std::fs::read(
+        suite_dir.join("bitmaps_test/test/report.json"),
+    )?)?;
+    let tests = report["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 8, "{report}");
+    assert!(
+        tests.iter().all(|test| test["status"] == "pass"),
+        "two pixelated runs must compare equal: {report}"
+    );
+    let step = |name: &str| ScreenshotType::Step(name.into());
+    let load = |id: &str, kind: &ScreenshotType| -> Result<(Capture, std::path::PathBuf)> {
+        let key = capture::final_screenshot_order_key(id, Some("desktop"), kind);
+        let reference = suite_dir
+            .join("bitmaps_reference")
+            .join(format!("{key}.png"));
+        let test = suite_dir
+            .join("bitmaps_test/test")
+            .join(format!("{key}.png"));
+        for path in [&reference, &test] {
+            anyhow::ensure!(
+                !capture::error_marker_path(path).exists(),
+                "{key} failed to capture"
+            );
+        }
+        let reference_image = lodepng::decode32(std::fs::read(&reference)?)?;
+        let test_image = lodepng::decode32(std::fs::read(&test)?)?;
+        anyhow::ensure!(
+            (reference_image.width, reference_image.height)
+                == (test_image.width, test_image.height),
+            "{key}: reference and test sizes differ"
+        );
+        let differing: Vec<(usize, usize)> = (0..test_image.height)
+            .flat_map(|y| (0..test_image.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                capture_pixel(&reference_image, x, y) != capture_pixel(&test_image, x, y)
+            })
+            .collect();
+        anyhow::ensure!(
+            differing.is_empty(),
+            "{key}: {} reference and test pixels differ, x {:?}..{:?}, y {:?}..{:?}",
+            differing.len(),
+            differing.iter().map(|point| point.0).min(),
+            differing.iter().map(|point| point.0).max(),
+            differing.iter().map(|point| point.1).min(),
+            differing.iter().map(|point| point.1).max()
+        );
+        Ok((test_image, test))
+    };
+    let hero = noise_pixels(31, 128, 128);
+    let kept = noise_pixels(32, 96, 96);
+    let photos = [33, 34, 35].map(|seed| noise_pixels(seed, 400, 300));
+    let status = |image: &Capture| {
+        let pixel = capture_pixel(image, 615, 65);
+        (pixel.r, pixel.g, pixel.b)
+    };
+    // Full-page checkpoints at the top: every unobscured image is block-averaged,
+    // the excluded image keeps its exact source pixels.
+    for (name, expected_status) in [("first", (128, 128, 128)), ("second", (0, 160, 0))] {
+        let (image, _) = load("gallery", &step(name))?;
+        anyhow::ensure!(
+            block_mean_errors(&image, (0, 40), &hero, (128, 128), block, 0..128) == 0,
+            "{name}: hero is not block-averaged"
+        );
+        let kept_area = Area {
+            x: 0,
+            y: 168,
+            width: 96,
+            height: 96,
+        };
+        anyhow::ensure!(
+            (0..96)
+                .flat_map(|y| (0..96).map(move |x| (x, y)))
+                .all(
+                    |(x, y)| capture_pixel(&image, kept_area.x + x, kept_area.y + y)
+                        == kept[y * 96 + x]
+                ),
+            "{name}: excluded image changed"
+        );
+        for (index, photo) in photos.iter().enumerate() {
+            anyhow::ensure!(
+                block_mean_errors(
+                    &image,
+                    (0, 320 + index * 300),
+                    photo,
+                    (400, 300),
+                    block,
+                    0..300
+                ) == 0,
+                "{name}: gallery image {index} is not block-averaged"
+            );
+        }
+        // The click handler saw no flags and no filters after the first checkpoint.
+        anyhow::ensure!(
+            status(&image) == expected_status,
+            "{name}: status {:?}",
+            status(&image)
+        );
+    }
+    let (viewport, _) = load("gallery", &ScreenshotType::Viewport)?;
+    anyhow::ensure!(
+        (viewport.width, viewport.height) == (640, 480)
+            && block_mean_errors(&viewport, (0, 40), &hero, (128, 128), block, 0..128) == 0
+            && block_mean_errors(&viewport, (0, 320), &photos[0], (400, 300), block, 0..160) == 0
+            && status(&viewport) == (0, 160, 0),
+        "viewport final is not pixelated"
+    );
+    // Centering #gallery scrolls the sticky header (z-index auto, earlier in the
+    // document) over the first photo; the refreshed guard keeps that photo sharp
+    // so the header stays on top, while the other photos stay pixelated.
+    let (selected, _) = load("gallery", &ScreenshotType::Selector("#gallery".into()))?;
+    anyhow::ensure!(
+        (selected.width, selected.height) == (400, 900),
+        "unexpected selector size {}x{}",
+        selected.width,
+        selected.height
+    );
+    let header_rows = 210..250;
+    for y in 0..300 {
+        for x in (0..400).step_by(7) {
+            let pixel = capture_pixel(&selected, x, y);
+            if header_rows.contains(&y) {
+                anyhow::ensure!(
+                    (pixel.r, pixel.g, pixel.b) == (200, 0, 120),
+                    "sticky header hidden at {x},{y}: {pixel:?}"
+                );
+            } else {
+                anyhow::ensure!(
+                    pixel == photos[0][y * 400 + x],
+                    "overlapped photo was pixelated at {x},{y}"
+                );
+            }
+        }
+    }
+    for (index, photo) in photos.iter().enumerate().skip(1) {
+        anyhow::ensure!(
+            block_mean_errors(
+                &selected,
+                (0, index * 300),
+                photo,
+                (400, 300),
+                block,
+                0..300
+            ) == 0,
+            "selector capture photo {index} is not block-averaged"
+        );
+    }
+    // Popups after switchTab, the original after closeTab, and its final.
+    let (popup, _) = load("popup", &step("popup"))?;
+    anyhow::ensure!(
+        block_mean_errors(
+            &popup,
+            (0, 0),
+            &noise_pixels(36, 160, 120),
+            (160, 120),
+            block,
+            0..120
+        ) == 0,
+        "popup checkpoint is not pixelated"
+    );
+    for kind in [step("back"), ScreenshotType::Viewport] {
+        let (image, _) = load("popup", &kind)?;
+        anyhow::ensure!(
+            block_mean_errors(&image, (0, 40), &hero, (128, 128), block, 0..128) == 0
+                && status(&image) == (128, 128, 128),
+            "{kind:?} after closeTab is not pixelated"
+        );
+    }
+    // A scenario override of none captures exact source pixels.
+    let (sharp, _) = load("sharp", &ScreenshotType::Viewport)?;
+    for (origin, source, width, rows) in
+        [((0, 40), &hero, 128, 128), ((0, 320), &photos[0], 400, 160)]
+    {
+        anyhow::ensure!(
+            (0..rows)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .all(|(x, y)| capture_pixel(&sharp, origin.0 + x, origin.1 + y)
+                    == source[y * width + x]),
+            "mode none changed image pixels"
+        );
+    }
+
+    // Diagnostics: counts only, never the configured selector text.
+    let count_fields = [
+        Field::SimplifiedImages,
+        Field::SmallImages,
+        Field::ExcludedImages,
+        Field::FilteredImages,
+        Field::TransformedImages,
+        Field::OverlappedImages,
+        Field::InvalidSelectors,
+    ];
+    let number =
+        |record: &crate::diagnostics::record::DiagnosticRecordV1, field: Field| match record
+            .fields
+            .get(&field)
+        {
+            Some(FieldValue::Number(value)) => Some(*value),
+            _ => None,
+        };
+    let mut journals_checked = 0;
+    for (id, kind, expected_marks, expected_refreshes) in [
+        (
+            "gallery",
+            ScreenshotType::Viewport,
+            vec![vec![4, 0, 1, 0, 0, 0, 0]; 3],
+            vec![(3, 1), (4, 0)],
+        ),
+        (
+            "popup",
+            ScreenshotType::Viewport,
+            vec![
+                vec![1, 0, 0, 0, 0, 0, 0],
+                vec![4, 0, 1, 0, 0, 0, 0],
+                vec![4, 0, 1, 0, 0, 0, 0],
+            ],
+            vec![],
+        ),
+        ("sharp", ScreenshotType::Viewport, vec![], vec![]),
+    ] {
+        let (_, path) = load(id, &kind)?;
+        let log = capture::read_capture_log(&output_dir, &path)
+            .ok_or_else(|| anyhow!("{id}: missing capture log"))?;
+        anyhow::ensure!(log.state == ArchiveState::Complete, "{id}: incomplete log");
+        let archive = log.archive.ok_or_else(|| anyhow!("{id}: no archive"))?;
+        let reader = JournalReader::open(&output_dir, &archive.operation_id)?;
+        let mut marks = Vec::new();
+        let mut refreshes = Vec::new();
+        let mut leaked = false;
+        reader.visit(|record| {
+            if record
+                .execution
+                .as_ref()
+                .is_some_and(|execution| execution.scenario_id.as_str() != id)
+            {
+                return;
+            }
+            for value in record.fields.values() {
+                if let FieldValue::Identity(identity) = value {
+                    leaked |= identity.as_str().contains("exclusion-marker");
+                }
+            }
+            if record.event_name != DiagnosticEvent::Decision
+                || record.fields.get(&Field::Condition)
+                    != Some(&FieldValue::Kind(SafeValue::Images))
+                || !record.fields.contains_key(&Field::SimplifiedImages)
+            {
+                return;
+            }
+            // Only the condition and counts are recorded.
+            leaked |= record
+                .fields
+                .keys()
+                .any(|field| *field != Field::Condition && !count_fields.contains(field));
+            if record.stage == Stage::ScreenshotSettling {
+                marks.push(
+                    count_fields
+                        .iter()
+                        .map(|field| number(&record, *field).unwrap_or(u64::MAX))
+                        .collect::<Vec<_>>(),
+                );
+            } else {
+                refreshes.push((
+                    number(&record, Field::SimplifiedImages).unwrap_or(u64::MAX),
+                    number(&record, Field::OverlappedImages).unwrap_or(u64::MAX),
+                ));
+            }
+        })?;
+        anyhow::ensure!(
+            !leaked,
+            "{id}: image simplification diagnostics leaked data"
+        );
+        anyhow::ensure!(marks == expected_marks, "{id}: marks {marks:?}");
+        anyhow::ensure!(
+            refreshes == expected_refreshes,
+            "{id}: refreshes {refreshes:?}"
+        );
+        journals_checked += 1;
+    }
+    anyhow::ensure!(journals_checked == 3);
+
+    // Every capture link records the effective setting, and `ref` promoted it
+    // with each reference image. Equal settings raise no report warning.
+    let pixelated = json!({
+        "mode": "pixelate",
+        "blockSize": block,
+        "minSize": 64,
+        "excludeSelectorsDigest": crate::test::image_simplification::exclude_selectors_digest(&[
+            ".keep-zone".into(),
+            "img[data-secret=\"exclusion-marker\"]".into(),
+        ]),
+    });
+    let sharp_setting = json!({ "mode": "none" });
+    let expected_setting = |name: &str| {
+        if name.starts_with("sharp_") {
+            &sharp_setting
+        } else {
+            &pixelated
+        }
+    };
+    for test in tests {
+        let name = test["pair"]["fileName"].as_str().unwrap();
+        for path in [
+            suite_dir.join("bitmaps_reference").join(name),
+            suite_dir.join("bitmaps_test/test").join(name),
+        ] {
+            let setting = capture::read_capture_metadata(&output_dir, &path)
+                .and_then(|metadata| metadata.image_simplification)
+                .ok_or_else(|| anyhow!("{}: no recorded setting", path.display()))?;
+            anyhow::ensure!(
+                serde_json::to_value(&setting)? == *expected_setting(name),
+                "{}: recorded {setting:?}",
+                path.display()
+            );
+            let link = std::fs::read_to_string(path.with_extension("log.json"))?;
+            anyhow::ensure!(
+                !link.contains("exclusion-marker") && !link.contains("keep-zone"),
+                "{}: selector text in link",
+                path.display()
+            );
+        }
+        anyhow::ensure!(
+            test["pair"].get("imageSimplificationWarning").is_none(),
+            "{name}: equal settings must not warn"
+        );
+    }
+
+    // Changing a setting without capturing new references warns in the report
+    // and on the console, without failing the comparison or the command.
+    std::fs::write(
+        root.join("regressify.yaml"),
+        workspace_config(block as u32 / 2),
+    )?;
+    let console = run("changed")?;
+    let changed: Value = serde_json::from_slice(&std::fs::read(
+        suite_dir.join("bitmaps_test/changed/report.json"),
+    )?)?;
+    let changed_tests = changed["tests"].as_array().unwrap();
+    anyhow::ensure!(changed_tests.len() == 8, "{changed}");
+    for test in changed_tests {
+        let name = test["pair"]["fileName"].as_str().unwrap();
+        let warning = test["pair"].get("imageSimplificationWarning");
+        if name.starts_with("sharp_") {
+            anyhow::ensure!(warning.is_none(), "{name}: none on both sides warned");
+            continue;
+        }
+        let warning = warning.ok_or_else(|| anyhow!("{name}: missing settings warning"))?;
+        anyhow::ensure!(
+            warning["reference"] == pixelated
+                && warning["test"]["blockSize"] == block / 2
+                && warning["test"]["excludeSelectorsDigest"] == pixelated["excludeSelectorsDigest"],
+            "{name}: {warning}"
+        );
+        anyhow::ensure!(
+            console.contains(&format!(
+                "{name} → Reference and test captures used different image simplification settings"
+            )),
+            "{name}: no console warning in {console}"
+        );
+    }
+    anyhow::ensure!(
+        console.contains("7 comparison(s) used different image simplification settings"),
+        "{console}"
+    );
+    anyhow::ensure!(
+        !console.contains("exclusion-marker") && !changed.to_string().contains("exclusion-marker"),
+        "selector text leaked into the console or report"
+    );
+    Ok(())
+}

@@ -807,6 +807,26 @@ mod tests {
     }
 
     #[test]
+    fn image_simplification_warnings_in_reports_leave_snapshot_data_unchanged() {
+        let (temp, report) = fixture();
+        let baseline = serde_json::to_value(load(temp.path()).unwrap().unwrap()).unwrap();
+        // Newer reports may carry this optional comparison warning; the
+        // version-2 snapshot data does not publish it yet.
+        let mut warned = report;
+        warned["tests"][0]["pair"]["imageSimplificationWarning"] = json!({
+            "message": "Reference and test captures used different image simplification settings",
+            "reference": null,
+            "test": { "mode": "pixelate", "blockSize": 4, "minSize": 64,
+                      "excludeSelectorsDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945" },
+        });
+        write_fixture(temp.path(), &warned);
+        assert_eq!(
+            serde_json::to_value(load(temp.path()).unwrap().unwrap()).unwrap(),
+            baseline
+        );
+    }
+
+    #[test]
     fn visual_mismatch_is_not_an_engine_error() {
         for mismatch in [0.0, 1.25] {
             let (temp, mut report) = fixture();

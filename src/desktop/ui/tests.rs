@@ -8950,6 +8950,272 @@ async fn pixel_match_threshold_controls_inherit_edit_and_reset(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
+async fn image_simplification_fields_inherit_step_evenly_and_guard_invalid_drafts(
+    cx: &mut TestAppContext,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("regressify.yaml"),
+        "imageSimplification: pixelate\nimageSimplificationBlockSize: 8\n",
+    )
+    .unwrap();
+    let (handle, view) = editor(cx, directory.path());
+    let scenario_value = |key: &str, cx: &gpui_kit::App| {
+        view.read(cx).session.value().unwrap()["scenarios"][0]
+            .get(key)
+            .cloned()
+            .unwrap_or_default()
+    };
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |this, cx| {
+            this.select(Selection::Root, window, cx);
+            this.select_editor_tab(0, window, cx);
+        });
+        window.render_frame(cx);
+        // Unset root settings stay behind Advanced, like other optional settings.
+        assert!(!view.read(cx).advanced);
+        assert!(window.try_find("field-pixelMatchThreshold").is_some());
+        assert!(window.try_find("field-imageSimplification").is_none());
+        view.update(cx, |this, cx| {
+            this.select(Selection::Scenario(0), window, cx);
+            this.select_editor_tab(0, window, cx);
+        });
+        window.render_frame(cx);
+        window.click("field-search", cx);
+        window.input("image simplification", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |window, _| {
+        window.try_find("field-url").is_none()
+            && window
+                .within("field-imageSimplificationBlockSize")
+                .try_find("increment")
+                .is_some_and(|field| field.visible())
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        for key in [
+            "imageSimplification",
+            "imageSimplificationBlockSize",
+            "imageSimplificationMinSize",
+        ] {
+            assert!(
+                window
+                    .within(("field-group", 1_usize))
+                    .try_find(gpui_kit::SharedString::from(format!("field-{key}")))
+                    .is_some(),
+                "{key} belongs to the Capture group"
+            );
+        }
+        // Textarea wrappers are not observable by ID; locate the editable child.
+        let exclusions = match &view
+            .read(cx)
+            .bindings
+            .iter()
+            .find(|binding| binding.field.key == "imageSimplificationExcludeSelectors")
+            .unwrap()
+            .control
+        {
+            super::Control::Textarea(state) => state.entity_id(),
+            _ => panic!("exclusions must use the list textarea"),
+        };
+        assert!(
+            window
+                .within(("field-group", 1_usize))
+                .try_find(("input", exclusions))
+                .is_some(),
+            "exclusions belong to the Capture group"
+        );
+        assert_eq!(
+            window.find("hint-imageSimplification").label(),
+            Some("Workspace: pixelate")
+        );
+        assert_eq!(
+            window.find("hint-imageSimplificationBlockSize").label(),
+            Some("Workspace: 8")
+        );
+        assert_eq!(
+            window.find("hint-imageSimplificationMinSize").label(),
+            Some("Default: 64")
+        );
+        assert_eq!(
+            window.find("field-imageSimplification").value(),
+            Some("pixelate")
+        );
+        window
+            .within("field-imageSimplificationBlockSize")
+            .click("increment", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+        scenario_value("imageSimplificationBlockSize", cx) == 10
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        let input = numeric_input_id(&view, "imageSimplificationBlockSize", cx);
+        window
+            .within("field-imageSimplificationBlockSize")
+            .click(input, cx);
+        window.press("ctrl-a", cx);
+        window.input("5", cx);
+        window.click("field-search", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+        scenario_value("imageSimplificationBlockSize", cx) == 5
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        // The odd draft stays editable, but the save gate rejects it.
+        let error = view
+            .read(cx)
+            .session
+            .open
+            .as_ref()
+            .unwrap()
+            .document
+            .validate()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("multiple of 2"), "{error}");
+        window
+            .within("field-imageSimplificationBlockSize")
+            .click("decrement", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+        scenario_value("imageSimplificationBlockSize", cx) == 4
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window
+            .within("field-imageSimplificationMinSize")
+            .click("decrement", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+        scenario_value("imageSimplificationMinSize", cx) == 63
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("field-imageSimplification", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |window, _| {
+        window.try_find("choice-option-none").is_some()
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("choice-option-none", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+        scenario_value("imageSimplification", cx) == "none"
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        let input = match &view
+            .read(cx)
+            .bindings
+            .iter()
+            .find(|binding| binding.field.key == "imageSimplificationExcludeSelectors")
+            .unwrap()
+            .control
+        {
+            super::Control::Textarea(state) => state.clone(),
+            _ => panic!("exclusions must use the list textarea"),
+        };
+        window.click(("input", input.entity_id()), cx);
+        window.input("#hero img", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+        scenario_value("imageSimplificationExcludeSelectors", cx)
+            == serde_json::json!(["#hero img"])
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("ctrl-a", cx);
+        window.press("backspace", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+        scenario_value("imageSimplificationExcludeSelectors", cx) == serde_json::json!([])
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        // The Effective view uses the production resolver for the scenario.
+        let resolved = view.read(cx).effective.clone();
+        assert_eq!(resolved["imageSimplification"], "none");
+        assert_eq!(resolved["imageSimplificationBlockSize"], 4);
+        assert_eq!(resolved["imageSimplificationMinSize"], 63);
+        assert_eq!(
+            resolved["imageSimplificationExcludeSelectors"],
+            serde_json::json!([])
+        );
+        view.read(cx)
+            .session
+            .open
+            .as_ref()
+            .unwrap()
+            .document
+            .validate()
+            .unwrap();
+        // Blur the textarea before targeting neighboring Reset controls.
+        window.click("field-search", cx);
+    })
+    .unwrap();
+    // Reset the most recently added keys, which are the scenario mapping's last
+    // entries. Removing an earlier nested key hits a separate, known YAML editing
+    // defect recorded in OUTSTANDING_ISSUES.md.
+    for (key, inherited) in [
+        ("imageSimplificationExcludeSelectors", None),
+        ("imageSimplification", Some("Workspace: pixelate")),
+    ] {
+        cx.wait_for(handle.into(), Duration::from_secs(3), |window, _| {
+            window
+                .try_find(gpui_kit::SharedString::from(format!("hint-{key}")))
+                .is_some_and(|hint| hint.label() == Some("Override"))
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click(gpui_kit::SharedString::from(format!("reset-{key}")), cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+            view.read(cx).session.value().unwrap()["scenarios"][0]
+                .get(key)
+                .is_none()
+        })
+        .await;
+        if let Some(inherited) = inherited {
+            cx.wait_for(handle.into(), Duration::from_secs(3), |window, _| {
+                window
+                    .try_find(gpui_kit::SharedString::from(format!("hint-{key}")))
+                    .is_some_and(|hint| hint.label() == Some(inherited))
+            })
+            .await;
+        }
+    }
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(
+            window.find("field-imageSimplification").value(),
+            Some("pixelate")
+        );
+        assert_eq!(view.read(cx).effective["imageSimplification"], "pixelate");
+        view.read(cx)
+            .session
+            .open
+            .as_ref()
+            .unwrap()
+            .document
+            .validate()
+            .unwrap();
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 async fn numeric_stepper_uses_inherited_value_and_groups_can_collapse(cx: &mut TestAppContext) {
     let directory = tempfile::tempdir().unwrap();
     let (handle, view) = editor(cx, directory.path());

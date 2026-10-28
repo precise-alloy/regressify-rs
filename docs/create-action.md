@@ -3,7 +3,7 @@ title: Create an action
 description: Reference for creating Optimizely CMS test actions such as click, input, select, wait, scroll, upload files, and frame handling.
 guid: ba348ca1-eb67-4c0f-8461-8f36979aea18
 date: 2023-07-03T17:00:00+00:00
-updated: 2026-10-19T00:00:00+00:00
+updated: 2026-10-23T00:00:00+00:00
 draft: false
 hidden: false
 weight: 40000
@@ -433,6 +433,9 @@ disable their respective checks; `delay: 0` skips the explicit delay.
 are none.
 Text carets are hidden before each checkpoint even when animation freezing or
 settling is disabled; input focus, selection, and values are preserved.
+With `imageSimplification: pixelate`, qualifying images are pixelated for the
+checkpoint only and restored before the next action; see
+[create a test suite](create-test-suite.md) for which images qualify.
 
 Example:
 

@@ -91,13 +91,28 @@ impl Field {
             self.label
         );
         let number = value.as_f64().unwrap_or(0.0);
+        if self.key == "imageSimplificationBlockSize" {
+            // Block sizes must stay even; step an odd draft to the adjacent even value.
+            let next = if increase {
+                (number / 2.0).floor() * 2.0 + 2.0
+            } else {
+                (number / 2.0).ceil() * 2.0 - 2.0
+            };
+            return Ok(json!(next.clamp(
+                crate::config::MIN_IMAGE_SIMPLIFICATION_BLOCK_SIZE as f64,
+                crate::config::MAX_IMAGE_SIMPLIFICATION_BLOCK_SIZE as f64
+            ) as u64));
+        }
         let (step, minimum, maximum) = match self.key.as_str() {
             "misMatchThreshold" => (0.1, 0.0, 100.0),
             "pixelMatchThreshold" => (0.1, 0.0, 100.0),
             "scale" => (0.1, 0.1, 10.0),
-            "asyncCaptureLimit" | "asyncCompareLimit" | "keepTestRuns" | "width" | "height" => {
-                (1.0, 1.0, u32::MAX as f64)
-            }
+            "asyncCaptureLimit"
+            | "asyncCompareLimit"
+            | "keepTestRuns"
+            | "width"
+            | "height"
+            | "imageSimplificationMinSize" => (1.0, 1.0, u32::MAX as f64),
             "lazyLoadTimeout" => (100.0, 1.0, u32::MAX as f64),
             key if key.ends_with("Timeout")
                 || matches!(key, "delay" | "postInteractionWait" | "lazyLoadScrollDelay") =>
@@ -500,6 +515,9 @@ pub(crate) fn label(key: &str) -> String {
         "cssOverridePath" => return "CSS override file".into(),
         "autoCleanRuns" => return "Automatic run cleanup".into(),
         "keepTestRuns" => return "Test runs to keep".into(),
+        "imageSimplificationBlockSize" => return "Pixelation block size (px)".into(),
+        "imageSimplificationMinSize" => return "Minimum image size (px)".into(),
+        "imageSimplificationExcludeSelectors" => return "Excluded image selectors".into(),
         _ => {}
     }
     let mut label = String::new();
@@ -797,6 +815,149 @@ mod tests {
                 "Scenario"
             );
         }
+    }
+
+    #[test]
+    fn image_simplification_fields_support_all_scopes_steps_and_effective_values() {
+        for scope in [Scope::Workspace, Scope::Suite, Scope::Scenario] {
+            let fields = fields(&scope).unwrap();
+            let field = |key: &str| fields.iter().find(|field| field.key == key).unwrap();
+
+            let mode = field("imageSimplification");
+            assert_eq!(
+                mode.kind,
+                FieldKind::Choice(vec!["none".into(), "pixelate".into()]),
+                "{scope:?}"
+            );
+            assert_eq!(mode.label, "Image simplification");
+            assert_eq!(mode.parse("pixelate").unwrap(), json!("pixelate"));
+            assert!(mode.parse("off").is_err());
+
+            let block = field("imageSimplificationBlockSize");
+            assert_eq!(block.kind, FieldKind::Number { integer: true });
+            assert_eq!(block.label, "Pixelation block size (px)");
+            assert!(
+                block.description.contains("2 to 16"),
+                "{}",
+                block.description
+            );
+            assert!(block.parse("4.5").is_err());
+            for (current, increase, expected) in [
+                (4, true, 6),
+                (4, false, 2),
+                (2, false, 2),
+                (16, true, 16),
+                (14, true, 16),
+                (5, true, 6),
+                (5, false, 4),
+                (0, true, 2),
+                (1, false, 2),
+                (17, false, 16),
+                (40, true, 16),
+            ] {
+                assert_eq!(
+                    block.stepped_value(&json!(current), increase).unwrap(),
+                    json!(expected),
+                    "{current} {increase}"
+                );
+            }
+
+            let minimum = field("imageSimplificationMinSize");
+            assert_eq!(minimum.kind, FieldKind::Number { integer: true });
+            assert_eq!(minimum.label, "Minimum image size (px)");
+            assert_eq!(minimum.stepped_value(&json!(64), true).unwrap(), json!(65));
+            assert_eq!(minimum.stepped_value(&json!(1), false).unwrap(), json!(1));
+            assert_eq!(minimum.stepped_value(&json!(0), true).unwrap(), json!(1));
+
+            let excluded = field("imageSimplificationExcludeSelectors");
+            assert_eq!(excluded.kind, FieldKind::List { single: false });
+            assert_eq!(excluded.label, "Excluded image selectors");
+            let value = json!([".logo", "#hero img"]);
+            assert_eq!(excluded.parse(&excluded.display(&value)).unwrap(), value);
+            assert_eq!(excluded.parse("").unwrap(), json!([]));
+
+            for field in [mode, block, minimum, excluded] {
+                assert!(!field.required);
+                // Searching the shared phrase finds every related field.
+                assert!(
+                    field
+                        .description
+                        .to_lowercase()
+                        .contains("image simplification"),
+                    "{}",
+                    field.key
+                );
+            }
+        }
+
+        let workspace = json!({
+            "imageSimplification": "pixelate",
+            "imageSimplificationBlockSize": 8,
+            "imageSimplificationExcludeSelectors": [".logo"]
+        });
+        let suite = json!({"imageSimplificationMinSize": 32, "imageSimplificationExcludeSelectors": [], "scenarios": [
+            {"url": "/", "imageSimplification": "none", "imageSimplificationBlockSize": 2}, {"url": "/other"}
+        ]});
+        for (workspace, suite, scenario, expected) in [
+            (None, None, None, json!(["none", 4, 64, []])),
+            (
+                Some(&workspace),
+                None,
+                None,
+                json!(["pixelate", 8, 64, [".logo"]]),
+            ),
+            (
+                Some(&workspace),
+                Some(&suite),
+                None,
+                json!(["pixelate", 8, 32, []]),
+            ),
+            (
+                Some(&workspace),
+                Some(&suite),
+                Some(0),
+                json!(["none", 2, 32, []]),
+            ),
+            (
+                Some(&workspace),
+                Some(&suite),
+                Some(1),
+                json!(["pixelate", 8, 32, []]),
+            ),
+        ] {
+            let effective = effective(workspace, suite, scenario).unwrap();
+            assert_eq!(
+                json!([
+                    effective[effective_key("imageSimplification")],
+                    effective[effective_key("imageSimplificationBlockSize")],
+                    effective[effective_key("imageSimplificationMinSize")],
+                    effective[effective_key("imageSimplificationExcludeSelectors")],
+                ]),
+                expected
+            );
+        }
+        let scenario = &suite["scenarios"][0];
+        for (key, expected) in [
+            ("imageSimplification", "Scenario"),
+            ("imageSimplificationBlockSize", "Scenario"),
+            ("imageSimplificationMinSize", "Suite"),
+            ("imageSimplificationExcludeSelectors", "Suite"),
+        ] {
+            assert_eq!(origin(key, None, None, None), "Default");
+            assert_eq!(
+                origin(key, Some(&workspace), Some(&suite), Some(scenario)),
+                expected
+            );
+        }
+        assert_eq!(
+            origin(
+                "imageSimplificationBlockSize",
+                Some(&workspace),
+                Some(&suite),
+                None
+            ),
+            "Workspace"
+        );
     }
 
     #[test]

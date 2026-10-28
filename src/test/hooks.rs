@@ -24,6 +24,7 @@ pub(crate) struct DocumentHooks {
     marker: String,
     context: serde_json::Value,
     setup: String,
+    simplifier: Option<super::image_simplification::ImageSimplifier>,
     script: Option<String>,
     before_script: Option<String>,
     ready_script: Option<String>,
@@ -90,6 +91,7 @@ impl DocumentHooks {
             marker: format!("__regressify_hooks_{}", uuid::Uuid::new_v4().simple()),
             context,
             setup,
+            simplifier: super::image_simplification::ImageSimplifier::from_config(config)?,
             script: read(
                 config
                     .js_on_ready_path
@@ -225,6 +227,11 @@ impl DocumentHooks {
             if !completed {
                 evaluate_main_document(page, self.context_setup()).await?;
                 evaluate_main_document(page, self.setup.as_str()).await?;
+                // Install the image filter before user hooks so they see the final
+                // DOM; screenshot preparation re-installs it if a page removes it.
+                if let Some(simplifier) = &self.simplifier {
+                    simplifier.ensure(page).await?;
+                }
                 if let Some(script) = &self.script {
                     evaluate_main_document(page, script.as_str()).await?;
                 }

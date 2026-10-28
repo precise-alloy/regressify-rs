@@ -14,7 +14,8 @@ config.
 For fields supported at each level, values resolve scenario, then suite, then
 workspace, then built-in defaults. Omitted/null optional values inherit. Explicit
 `false` and allowed zero values are not treated as missing. `hideSelectors`,
-`removeSelectors`, and viewport selections replace rather than append lists.
+`removeSelectors`, `imageSimplificationExcludeSelectors`, and viewport
+selections replace rather than append lists.
 An empty viewport selection means all configured viewports, not no viewports.
 
 Do not assume every field exists at every scope:
@@ -23,7 +24,9 @@ Do not assume every field exists at every scope:
   `cookiePath`, `cssOverridePath`, `jsOnReadyPath`, `useCssOverride`,
   `hideSelectors`, `removeSelectors`, `misMatchThreshold`,
   `pixelMatchThreshold`, `postInteractionWait`, `lazyLoadScrollDelay`,
-  `lazyLoadTimeout`, and `viewportNames`.
+  `lazyLoadTimeout`, `imageSimplification`, `imageSimplificationBlockSize`,
+  `imageSimplificationMinSize`, `imageSimplificationExcludeSelectors`, and
+  `viewportNames`.
 - Workspace and scenario only: `delay`, `noScrollTop`, and `requiredLogin`.
   The global `--required-login` flag can force the login flag.
 - Workspace and suite only: `asyncCaptureLimit`, `asyncCompareLimit`,
@@ -86,6 +89,11 @@ Inheritance exceptions:
 - `freezeAnimations`: true; completes finite and pauses infinite CSS/Web
   Animations before actions and each capture.
 - `useCssOverride`: true; applies the configured CSS override file.
+- `imageSimplification`: `none`; opt-in `pixelate` simplifies large images just
+  before each screenshot. See Image Simplification below.
+- `imageSimplificationBlockSize`: 4; even whole CSS pixels from 2 to 16.
+- `imageSimplificationMinSize`: 64; positive whole CSS pixels.
+- `imageSimplificationExcludeSelectors`: empty list of standard CSS selectors.
 - `debug`, `bypassCsp`, `ignoreSslErrors`, `noScrollTop`, `requiredLogin`:
   false. Headed debug mode is disabled in CI without a display.
 
@@ -154,6 +162,48 @@ state may need an awaited browser ready hook. Increasing best-effort
 `settleTimeout` alone cannot activate an untouched placeholder. Recapture and
 review affected references as well as test images; rerunning comparison cannot
 repair existing PNGs.
+
+## Image Simplification
+
+Image simplification is opt-in. `imageSimplification: pixelate` replaces each
+qualifying image in the selected tab's main document with uniform blocks of its
+average color just before every screenshot, including `save` checkpoints.
+Qualifying images are `img`, `video`, and SVG `image` elements rendered at least
+`imageSimplificationMinSize` CSS pixels wide and high. These stay sharp: images
+matching an `imageSimplificationExcludeSelectors` entry or inside a matching
+element; images that already have a CSS `filter`; scaled, zoomed, skewed, or
+fractionally moved images; and images whose simplification could change which
+content paints on top, such as overlaid text or badges. Iframes, shadow DOM,
+canvas, and CSS background images are unchanged. Exclusion selectors that the
+browser rejects match nothing. Images are flagged only while each screenshot is
+taken. Write `none`, not `off`; YAML 1.1 tools read an unquoted `off` as `false`.
+
+Each key inherits independently from workspace to suite to scenario. This
+complete suite pixelates its scenarios but keeps one scenario's images sharp:
+
+```yaml
+id: catalog
+imageSimplification: pixelate
+imageSimplificationBlockSize: 8
+imageSimplificationExcludeSelectors:
+  - '#hero img'
+scenarios:
+  - id: products
+    url: https://example.com/products
+  - id: product-photo
+    url: https://example.com/products/sample
+    imageSimplification: none
+```
+
+Recommend it only with the user's agreement: enabling it or changing any
+image simplification key changes pixels, so affected references must be
+re-captured, and reference and test captures must use identical values. Each
+capture records its setting, and comparisons warn without failing when they
+differ. Keep `pixelMatchThreshold` above 0 for pixelated scenarios; inside
+uniform blocks anti-alias filtering cannot forgive pixels. Do not use it to
+hide a regression in the images under test; exclude those images instead. Odd
+or out-of-range block sizes, `imageSimplificationMinSize: 0`, and blank
+exclusion selectors fail before any browser starts.
 
 ## Files, Replacements, and Credentials
 

@@ -17,6 +17,7 @@ description: 'Use when changing workspace, suite, or scenario configuration, def
 1. `pixelMatchThreshold` cascades at all three levels: finite 0-100, default 5, explicit zero preserved. Desktop steps are 0.1. It controls pixel-color sensitivity, not `misMatchThreshold`'s pass/fail percentage; capture manifests preserve the resolved value for later comparison.
 1. `lazyLoadScrollDelay` and `lazyLoadTimeout` cascade independently at all three levels. Both are whole milliseconds; defaults are 250 and 20000. Preserve zero delay, reject zero timeout at every scope even if overridden or scrolling is skipped, and map both to their resolved `Ms` keys in desktop fields. `noScrollTop` skips the pass, while `settleTimeout` stays workspace-only and best-effort.
 1. Suite `displayName` is an optional presentation label, not a cascading capture option or an ID. Preserve file/output identity and use blank-name fallbacks in desktop and report consumers. Include explicitly set optional fields in schema-coverage fixtures when serialization omits unset values.
+1. `imageSimplification` (`none` default or `pixelate`; `none` because YAML 1.1 reads unquoted `off` as false), `imageSimplificationBlockSize` (even 2-16, default 4; Chromium caps convolution kernels at 16), `imageSimplificationMinSize` (at least 1, default 64), and `imageSimplificationExcludeSelectors` cascade independently at all three levels; the selector list replaces inherited lists. `config::validate_image_simplification` checks every scope's explicit values in preflight, even when overridden or the mode is `none`, and names blank selectors by 1-based entry without echoing selector text. Keep its limits equal to schema `minimum`/`maximum`/`multipleOf` and nonblank item constraints; the desktop block-size stepper moves between even values.
 1. `autoCleanRuns` and `keepTestRuns` are workspace/suite-only settings, resolving independently to false/1. Explicit suite false opts out. Reject keep counts below 1, retain effective-value/stepper parity, and prune only after full-suite Test completion. See [run retention](../run-retention/SKILL.md).
 1. Scenario `selector` and `save.selector` are independent, non-cascading CSS capture options; omitted/null means full page. Keep nonblank constraints and scenario `selector`/`selectors` exclusivity aligned between preflight and generated schema. Explicit plural `selectors` remain compatible and run after terminal saves.
 1. Validate finite thresholds, positive concurrency, non-negative delays, browser support, and replacement regexes before fetch/capture. Do not clamp bad input silently or defer configuration errors to individual scenarios.
@@ -34,7 +35,9 @@ description: 'Use when changing workspace, suite, or scenario configuration, def
 ```sh
 cargo test --lib config::
 cargo test --lib types::
+cargo test --lib image_simplification
 cargo test --features desktop --lib desktop::validation::tests
+cargo test --features desktop --lib image_simplification
 ```
 
 Cover all cascade levels, omitted versus explicit values, malformed regexes, numeric boundaries, unknown fields, escaping, and external/symlink file paths.

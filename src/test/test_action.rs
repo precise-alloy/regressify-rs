@@ -20,6 +20,7 @@ use crate::{
             artifact_write_error, save_screenshot_with_target, state_path,
             validate_screenshot_selector, validate_screenshot_step_name, validate_state_name,
         },
+        image_simplification::{ImageSimplifier, restore_after},
     },
     types::{
         ActionPoint, BlurAction, CheckAction, DialogKind, DialogResponse, FileInput, FocusAction,
@@ -741,18 +742,25 @@ async fn exec_test_action_inner(
                 ),
                 None => None,
             };
-            super::page_stability::prepare_screenshot(main_page, config, log_prefix).await?;
-
-            return save_screenshot_with_target(
-                test_suite,
-                scenario,
-                main_page,
-                target.as_ref(),
-                ScreenshotType::Step(save.to_string()),
-                viewport_label,
-                selector.as_deref(),
-            )
+            // Later actions must see the unmodified page, so restore flagged
+            // images after the checkpoint even when it fails.
+            let simplifier = ImageSimplifier::from_config(config)?;
+            let saved = async {
+                super::page_stability::prepare_screenshot(main_page, config, log_prefix).await?;
+                save_screenshot_with_target(
+                    test_suite,
+                    scenario,
+                    main_page,
+                    target.as_ref(),
+                    ScreenshotType::Step(save.to_string()),
+                    viewport_label,
+                    selector.as_deref(),
+                    simplifier.as_ref(),
+                )
+                .await
+            }
             .await;
+            return restore_after(simplifier.as_ref(), main_page, saved).await;
         }
         TestAction::Wait(WaitAction {
             wait: Wait::Number(milliseconds),

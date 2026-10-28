@@ -26,6 +26,7 @@ use crate::{
     test::{
         browsers::prepare_browser,
         capture,
+        image_simplification::ImageSimplificationSetting,
         test_scenario::{
             ScenarioRequest, capture_progress_keys, collect_needs_scenarios,
             collect_url_replacements, make_log_prefix, scenario_capture_order_keys,
@@ -275,6 +276,11 @@ fn spawn_capture_jobs(
 
         let handle = tokio::spawn(progress::scope_scenario(index, async move {
             use crate::diagnostics::{record::*, runtime};
+            let resolved =
+                config::resolve_config(&ws_config, &suite, &suite.scenarios[scenario_idx]);
+            // Every capture of this job, including saves from `needs` actions,
+            // uses the same resolved setting; its links record it for comparison.
+            let image_simplification = ImageSimplificationSetting::from_config(&resolved);
             let operation = common::REGRESSIFY_DIR.get().map(|output| {
                 let scenario = &suite.scenarios[scenario_idx];
                 let identity = ExecutionIdentity {
@@ -321,6 +327,7 @@ fn spawn_capture_jobs(
                     &suite.scenarios[scenario_idx],
                     viewport.as_ref().map(|viewport| viewport.label.as_str()),
                     &operation.reference(),
+                    &image_simplification,
                 )
                 .is_err()
             {
@@ -330,8 +337,6 @@ fn spawn_capture_jobs(
             }
             let (status, error, infrastructure) =
                 runtime::scope(operation.as_ref().map(runtime::Operation::context), async {
-                    let resolved =
-                        config::resolve_config(&ws_config, &suite, &suite.scenarios[scenario_idx]);
                     if let Some(context) = runtime::current() {
                         context.set_display_level(
                             common::LOG_LEVEL_OVERRIDE
@@ -440,6 +445,7 @@ fn spawn_capture_jobs(
                     &suite.scenarios[scenario_idx],
                     viewport.as_ref().map(|viewport| viewport.label.as_str()),
                     &archive,
+                    &image_simplification,
                 )
                 .is_err()
                 {
@@ -764,6 +770,14 @@ fn validate_workspace_config(workspace_config: &config::WorkspaceConfig) -> Resu
     if workspace_config.keep_test_runs == Some(0) {
         anyhow::bail!("workspace keepTestRuns must be at least 1");
     }
+    config::validate_image_simplification(
+        "workspace",
+        workspace_config.image_simplification_block_size,
+        workspace_config.image_simplification_min_size,
+        workspace_config
+            .image_simplification_exclude_selectors
+            .as_deref(),
+    )?;
     if let Some(browser) = &workspace_config.browser
         && !matches!(browser, TestBrowser::Chromium)
     {
@@ -888,6 +902,12 @@ fn validate_test_suite_config(input: &TestSuiteInput, suite: &TestSuite) -> Resu
             input.name
         );
     }
+    config::validate_image_simplification(
+        &format!("Test suite '{}'", input.name),
+        suite.image_simplification_block_size,
+        suite.image_simplification_min_size,
+        suite.image_simplification_exclude_selectors.as_deref(),
+    )?;
     if let Some(browser) = &suite.browser
         && !matches!(browser, TestBrowser::Chromium)
     {
@@ -927,6 +947,12 @@ fn validate_test_suite_config(input: &TestSuiteInput, suite: &TestSuite) -> Resu
                 scenario_name
             );
         }
+        config::validate_image_simplification(
+            &format!("Test suite '{}' scenario '{}'", input.name, scenario_name),
+            scenario.image_simplification_block_size,
+            scenario.image_simplification_min_size,
+            scenario.image_simplification_exclude_selectors.as_deref(),
+        )?;
         capture::validate_scenario_capture_names(scenario).map_err(|error| {
             anyhow!(
                 "Invalid selectors for scenario '{}': {}",
@@ -1962,35 +1988,12 @@ pub async fn exec_ref(args: RefArgs) -> Result<()> {
                 error
             )
         })?;
-        let ref_dest = suite_dir.join("bitmaps_reference");
-        fs::create_dir_all(&ref_dest)?;
-
-        let mut count = 0;
-        let mut skipped_failed_count = 0;
-        for file_name in screenshots {
-            let src = latest_test_dir.join(&file_name);
-            let marker_src = crate::test::capture::error_marker_path(&src);
-            if marker_src.exists() {
-                skipped_failed_count += 1;
-                eprintln!(
-                    "    {} Skipping failed capture: {}",
-                    "SKIP:".yellow(),
-                    file_name
-                );
-                continue;
-            }
-
-            let dst = ref_dest.join(&file_name);
-            copy_file_atomically(&src, &dst)?;
-            capture::promote_capture_log(regressify_dir, &src, &dst);
-
-            let marker_dst = crate::test::capture::error_marker_path(&dst);
-            if marker_dst.exists() {
-                fs::remove_file(marker_dst)?;
-            }
-
-            count += 1;
-        }
+        let (count, skipped_failed_count) = promote_reference_captures(
+            regressify_dir,
+            &latest_test_dir,
+            &suite_dir.join("bitmaps_reference"),
+            &screenshots,
+        )?;
 
         eprintln!(
             "Captured {} reference screenshot(s) for '{}' (run: {}).",
@@ -2025,6 +2028,43 @@ pub async fn exec_ref(args: RefArgs) -> Result<()> {
     generate_snapshot_reports()?;
 
     Ok(())
+}
+
+/// Promote a reference run's successful captures and return the promoted and
+/// skipped counts. Each PNG is copied atomically before its sidecar link is
+/// rewritten; the link records the image digest, so its archive reference and
+/// image simplification setting only ever describe the promoted bytes. Failed
+/// placeholders are never promoted, and their old references stay untouched.
+fn promote_reference_captures(
+    output_dir: &Path,
+    run_dir: &Path,
+    reference_dir: &Path,
+    screenshots: &[String],
+) -> Result<(usize, usize)> {
+    fs::create_dir_all(reference_dir)?;
+    let mut promoted = 0;
+    let mut skipped = 0;
+    for file_name in screenshots {
+        let source = run_dir.join(file_name);
+        if capture::error_marker_path(&source).exists() {
+            skipped += 1;
+            eprintln!(
+                "    {} Skipping failed capture: {}",
+                "SKIP:".yellow(),
+                file_name
+            );
+            continue;
+        }
+        let destination = reference_dir.join(file_name);
+        copy_file_atomically(&source, &destination)?;
+        capture::promote_capture_log(output_dir, &source, &destination);
+        let marker = capture::error_marker_path(&destination);
+        if marker.exists() {
+            fs::remove_file(marker)?;
+        }
+        promoted += 1;
+    }
+    Ok((promoted, skipped))
 }
 
 fn generate_snapshot_reports() -> Result<()> {
@@ -2368,6 +2408,179 @@ mod tests {
         });
         assert_eq!(live.phase, "Comparing screenshots");
         assert_eq!(reader.archive_state(), ArchiveState::Complete);
+    }
+
+    #[test]
+    fn capture_job_links_record_the_effective_image_simplification() {
+        use serde_json::json;
+        let root = match std::env::var_os("REGRESSIFY_SIMPLIFICATION_LINK_FIXTURE") {
+            Some(root) => PathBuf::from(root),
+            None => {
+                let root = tempfile::tempdir().unwrap();
+                let result = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "test::test_suites::tests::capture_job_links_record_the_effective_image_simplification",
+                        "--nocapture",
+                    ])
+                    .env("REGRESSIFY_SIMPLIFICATION_LINK_FIXTURE", root.path())
+                    .output()
+                    .unwrap();
+                // A filter matching no test would also exit successfully.
+                let stdout = String::from_utf8_lossy(&result.stdout);
+                assert!(
+                    result.status.success() && stdout.contains("1 passed"),
+                    "{}\n{}",
+                    stdout,
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                return;
+            }
+        };
+        // Real spawn path in an isolated process: global output configuration
+        // is set once. The closed semaphore stops jobs before any browser starts,
+        // but both link writes still run.
+        common::ROOT_DIR.set(root.clone()).unwrap();
+        common::REGRESSIFY_DIR.set(root.clone()).unwrap();
+        let workspace = config::WorkspaceConfig {
+            image_simplification: Some(crate::types::ImageSimplification::Pixelate),
+            image_simplification_block_size: Some(6),
+            image_simplification_exclude_selectors: Some(vec![
+                "img[data-secret=\"marker\"]".into(),
+            ]),
+            ..Default::default()
+        };
+        let mut checkout = scenario("checkout", None);
+        checkout.actions =
+            Some(serde_json::from_value(json!([{ "save": "step" }, { "wait": 10 }])).unwrap());
+        let mut sharp = scenario("sharp", None);
+        sharp.image_simplification = Some(crate::types::ImageSimplification::None);
+        let mut suite = suite(vec![checkout, sharp]);
+        suite.test_date = Some("run-links".into());
+        let run = root.join("alloy/bitmaps_test/run-links");
+        fs::create_dir_all(&run).unwrap();
+        let jobs = build_capture_jobs(&[(input(), Arc::new(suite))], &workspace, &[]).unwrap();
+        let semaphore = Arc::new(Semaphore::new(0));
+        semaphore.close();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let handles = spawn_capture_jobs(
+                jobs,
+                &semaphore,
+                &Arc::new(None),
+                &Arc::new(workspace.clone()),
+                &Arc::new(Vec::new()),
+                true,
+            );
+            for handle in handles {
+                assert_eq!(handle.await.unwrap(), TaskStatus::InfraFailed);
+            }
+        });
+        let pixelated = json!({
+            "mode": "pixelate",
+            "blockSize": 6,
+            "minSize": 64,
+            "excludeSelectorsDigest": crate::test::image_simplification::exclude_selectors_digest(
+                &["img[data-secret=\"marker\"]".into()]
+            ),
+        });
+        for (key, expected) in [
+            ("checkout__$step", pixelated.clone()),
+            ("checkout__FINAL", pixelated),
+            ("sharp__FINAL", json!({ "mode": "none" })),
+        ] {
+            let text = fs::read_to_string(run.join(format!("{key}.log.json"))).unwrap();
+            let link: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(link["imageSimplification"], expected, "{key}");
+            assert!(link["archive"]["operationId"].is_string(), "{key}");
+            assert!(!text.contains("marker"), "{key}: {text}");
+        }
+    }
+
+    #[test]
+    fn reference_promotion_carries_recorded_image_simplification_with_each_image() {
+        use serde_json::json;
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path();
+        let run = output.join("shop/bitmaps_test/ref-run");
+        let references = output.join("shop/bitmaps_reference");
+        fs::create_dir_all(&run).unwrap();
+        fs::create_dir_all(&references).unwrap();
+        let png = |red: u8| lodepng::encode32(&[red, 20, 30, 255], 1, 1).unwrap();
+        let link = |image: &Path, setting: Option<serde_json::Value>| {
+            let mut value = json!({
+                "state": "missing",
+                "imageDigest": format!("{:x}", Sha256::digest(fs::read(image).unwrap())),
+            });
+            if let Some(setting) = setting {
+                value["imageSimplification"] = setting;
+            }
+            fs::write(
+                image.with_extension("log.json"),
+                serde_json::to_vec(&value).unwrap(),
+            )
+            .unwrap();
+        };
+        let pixelated = json!({
+            "mode": "pixelate", "blockSize": 4, "minSize": 64,
+            "excludeSelectorsDigest": crate::test::image_simplification::exclude_selectors_digest(&[]),
+        });
+        let none = json!({ "mode": "none" });
+        // Fresh pixelated capture over an older unpixelated reference.
+        fs::write(run.join("home__FINAL.png"), png(10)).unwrap();
+        link(&run.join("home__FINAL.png"), Some(pixelated.clone()));
+        fs::write(references.join("home__FINAL.png"), png(200)).unwrap();
+        link(&references.join("home__FINAL.png"), Some(none.clone()));
+        // New capture without a reference yet.
+        fs::write(run.join("new__FINAL.png"), png(11)).unwrap();
+        link(&run.join("new__FINAL.png"), Some(none.clone()));
+        // Failed placeholder: the previous reference and its setting survive.
+        fs::write(run.join("failed__FINAL.png"), png(12)).unwrap();
+        link(&run.join("failed__FINAL.png"), Some(pixelated.clone()));
+        fs::write(
+            capture::error_marker_path(&run.join("failed__FINAL.png")),
+            br#"{"error":true}"#,
+        )
+        .unwrap();
+        fs::write(references.join("failed__FINAL.png"), png(200)).unwrap();
+        link(&references.join("failed__FINAL.png"), Some(none.clone()));
+        let screenshots: Vec<String> = ["home__FINAL.png", "new__FINAL.png", "failed__FINAL.png"]
+            .map(String::from)
+            .into();
+
+        assert_eq!(
+            promote_reference_captures(output, &run, &references, &screenshots).unwrap(),
+            (2, 1)
+        );
+
+        let setting = |name: &str| {
+            capture::read_capture_metadata(output, &references.join(name))
+                .and_then(|metadata| metadata.image_simplification)
+                .map(|setting| serde_json::to_value(setting).unwrap())
+        };
+        assert_eq!(
+            fs::read(references.join("home__FINAL.png")).unwrap(),
+            png(10)
+        );
+        assert_eq!(setting("home__FINAL.png"), Some(pixelated));
+        assert_eq!(
+            fs::read(references.join("new__FINAL.png")).unwrap(),
+            png(11)
+        );
+        assert_eq!(setting("new__FINAL.png"), Some(none.clone()));
+        assert_eq!(
+            fs::read(references.join("failed__FINAL.png")).unwrap(),
+            png(200)
+        );
+        assert_eq!(setting("failed__FINAL.png"), Some(none));
+        // The promoted link is bound to the promoted bytes.
+        let promoted: serde_json::Value =
+            serde_json::from_slice(&fs::read(references.join("home__FINAL.log.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            promoted["imageDigest"],
+            format!("{:x}", Sha256::digest(png(10)))
+        );
     }
 
     fn input() -> TestSuiteInput {
@@ -3135,6 +3348,171 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+    }
+
+    #[test]
+    fn image_simplification_settings_are_validated_at_every_scope_before_capture() {
+        let blank = || Some(vec![".logo".to_string(), " ".to_string()]);
+        // Invalid workspace values fail even while the mode stays `none`.
+        for (workspace, key) in [
+            (
+                config::WorkspaceConfig {
+                    image_simplification_block_size: Some(5),
+                    ..Default::default()
+                },
+                "workspace imageSimplificationBlockSize",
+            ),
+            (
+                config::WorkspaceConfig {
+                    image_simplification_block_size: Some(18),
+                    image_simplification: Some(crate::types::ImageSimplification::Pixelate),
+                    ..Default::default()
+                },
+                "workspace imageSimplificationBlockSize",
+            ),
+            (
+                config::WorkspaceConfig {
+                    image_simplification_min_size: Some(0),
+                    ..Default::default()
+                },
+                "workspace imageSimplificationMinSize",
+            ),
+            (
+                config::WorkspaceConfig {
+                    image_simplification_exclude_selectors: blank(),
+                    ..Default::default()
+                },
+                "workspace imageSimplificationExcludeSelectors entry #2",
+            ),
+        ] {
+            let error = validate_workspace_config(&workspace)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(key), "{error}");
+        }
+
+        // Suite values are checked even when every scenario overrides them.
+        let mut suite = suite(vec![scenario("home", None)]);
+        suite.scenarios[0].image_simplification_block_size = Some(4);
+        suite.scenarios[0].image_simplification_min_size = Some(64);
+        suite.scenarios[0].image_simplification_exclude_selectors = Some(Vec::new());
+        for (block_size, min_size, selectors, key) in [
+            (Some(3), None, None, "imageSimplificationBlockSize"),
+            (Some(0), None, None, "imageSimplificationBlockSize"),
+            (None, Some(0), None, "imageSimplificationMinSize"),
+            (None, None, blank(), "imageSimplificationExcludeSelectors"),
+        ] {
+            suite.image_simplification_block_size = block_size;
+            suite.image_simplification_min_size = min_size;
+            suite.image_simplification_exclude_selectors = selectors;
+            let error = validate_test_suite_config(&input(), &suite)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with(&format!("Test suite 'alloy' {key}")),
+                "{error}"
+            );
+        }
+        suite.image_simplification_block_size = Some(16);
+        suite.image_simplification_min_size = Some(1);
+        suite.image_simplification_exclude_selectors = Some(vec!["#hero img".into()]);
+        validate_test_suite_config(&input(), &suite).unwrap();
+
+        for (block_size, min_size, selectors, key) in [
+            (Some(1), None, None, "imageSimplificationBlockSize"),
+            (Some(17), None, None, "imageSimplificationBlockSize"),
+            (None, Some(0), None, "imageSimplificationMinSize"),
+            (
+                None,
+                None,
+                Some(vec![String::new()]),
+                "imageSimplificationExcludeSelectors",
+            ),
+        ] {
+            let scenario = &mut suite.scenarios[0];
+            scenario.image_simplification_block_size = block_size;
+            scenario.image_simplification_min_size = min_size;
+            scenario.image_simplification_exclude_selectors = selectors;
+            let error = validate_test_suite_config(&input(), &suite)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with(&format!("Test suite 'alloy' scenario 'home' {key}")),
+                "{error}"
+            );
+        }
+        let scenario = &mut suite.scenarios[0];
+        scenario.image_simplification = Some(crate::types::ImageSimplification::None);
+        scenario.image_simplification_block_size = Some(2);
+        scenario.image_simplification_min_size = Some(u32::MAX);
+        scenario.image_simplification_exclude_selectors = Some(Vec::new());
+        validate_test_suite_config(&input(), &suite).unwrap();
+        validate_workspace_config(&config::WorkspaceConfig {
+            image_simplification: Some(crate::types::ImageSimplification::Pixelate),
+            image_simplification_block_size: Some(4),
+            image_simplification_min_size: Some(64),
+            image_simplification_exclude_selectors: Some(vec![".logo".into()]),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn invalid_image_simplification_in_a_suite_file_fails_parsing_before_capture() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = PathBuf::from("gallery.tests.yaml");
+        fs::write(
+            temp_dir.path().join(&path),
+            "imageSimplification: pixelate\nscenarios:\n  - id: home\n    url: https://example.com\n    imageSimplificationBlockSize: 7\n",
+        )
+        .unwrap();
+        let error = parse_test_suites(
+            temp_dir.path(),
+            vec![TestSuiteInput {
+                name: "gallery".into(),
+                path: path.clone(),
+                format: TestSuiteFormat::Yaml,
+            }],
+        )
+        .err()
+        .expect("Odd block sizes must fail preflight")
+        .to_string();
+        assert!(
+            error.contains(
+                "scenario 'home' imageSimplificationBlockSize must be an even whole number"
+            ),
+            "{error}"
+        );
+
+        fs::write(
+            temp_dir.path().join(&path),
+            "imageSimplification: pixelate\nimageSimplificationExcludeSelectors: ['.logo']\nscenarios:\n  - id: home\n    url: https://example.com\n    imageSimplificationBlockSize: 8\n",
+        )
+        .unwrap();
+        let suites = parse_test_suites(
+            temp_dir.path(),
+            vec![TestSuiteInput {
+                name: "gallery".into(),
+                path,
+                format: TestSuiteFormat::Yaml,
+            }],
+        )
+        .unwrap();
+        let resolved = config::resolve_config(
+            &config::WorkspaceConfig::default(),
+            &suites[0].1,
+            &suites[0].1.scenarios[0],
+        );
+        assert_eq!(
+            resolved.image_simplification,
+            crate::types::ImageSimplification::Pixelate
+        );
+        assert_eq!(resolved.image_simplification_block_size, 8);
+        assert_eq!(resolved.image_simplification_min_size, 64);
+        assert_eq!(
+            resolved.image_simplification_exclude_selectors,
+            vec![".logo"]
+        );
     }
 
     #[test]

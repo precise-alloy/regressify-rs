@@ -3,7 +3,7 @@ title: Regressify CLI Commands
 description: Command reference for the Rust Regressify CLI, including global flags, command behavior, output folders, and exit-code semantics.
 guid: 35858e8f-70fd-4c4d-a3cb-a0ba3c23210f
 date: 2026-06-11T00:00:00+00:00
-updated: 2026-09-13T00:00:00+00:00
+updated: 2026-10-26T00:00:00+00:00
 draft: false
 hidden: false
 weight: 15000
@@ -138,7 +138,8 @@ log links and a comparison outcome; a later visual mismatch does not rewrite
 the successful capture's original execution outcome. Missing or corrupt log
 metadata is diagnostic availability information, not an image comparison error.
 
-`ref` and `approve` carry the selected image's original log link into the baseline;
+`ref` and `approve` carry the selected image's original log link, including its
+recorded [image simplification](#image-simplification) setting, into the baseline;
 they never create a replacement execution history. Log sidecars bind to the image's
 SHA-256 digest, so an old link cannot silently describe different image bytes.
 Suite rename keeps immutable operation IDs, and suite deletion prunes only
@@ -826,10 +827,75 @@ Set `delay: 0` to skip the explicit delay, `settleTimeout: 0` to disable settlin
 
 Before capture, blinking text carets are hidden with `caret-color: transparent`, independently of animation freezing and settling. Focus, selection, and input values are preserved. Re-capture affected reference/test screenshots if they already contain a visible caret; rerunning `compare` alone cannot remove caret pixels from existing PNGs.
 
+With `imageSimplification: pixelate`, preparation also flags qualifying images
+for [image simplification](#image-simplification) after the second animation
+freeze and just before caret hiding. The flags are removed after that `save`
+checkpoint or after the final captures, so later actions, settling, and
+navigation see the original page. The default, `none`, adds no page work.
+
 Capture runs use sortable UTC directory IDs with nanosecond precision, so back-to-back invocations do not overwrite each other's screenshots or reports.
 Capture commands refuse to reuse an existing suite/run directory. Choose a new
 `--run-id` for each invocation or remove an intentionally stale run first; this
 prevents old screenshots from being mixed into a new comparison.
+
+## Image simplification
+
+Image simplification is opt-in and off by default (`imageSimplification: none`).
+Set `imageSimplification: pixelate` in `regressify.yaml`, a suite, or a scenario
+to replace large images in the page's main document with uniform blocks of their
+average color just before each screenshot. Photo-heavy screenshots become much
+smaller, and minor image encoding or scaling differences shrink, while text and
+layout stay sharp.
+
+```yaml
+imageSimplification: pixelate
+imageSimplificationBlockSize: 4
+imageSimplificationMinSize: 64
+imageSimplificationExcludeSelectors:
+  - '#hero img'
+pixelMatchThreshold: 5
+```
+
+`imageSimplificationBlockSize` is an even number of CSS pixels from `2` to `16`
+(default `4`); `imageSimplificationMinSize` keeps images narrower or shorter than
+the given CSS pixels sharp (default `64`, minimum `1`); and
+`imageSimplificationExcludeSelectors` lists standard CSS selectors for images, or
+for elements containing images, that stay sharp. Each key resolves independently
+in this order: scenario, suite, workspace, defaults. The exclusion list replaces
+inherited lists instead of merging. Invalid values fail before any browser
+starts; a selector the browser rejects matches nothing. See
+[create a test suite](create-test-suite.md) for the images that qualify.
+
+Turning simplification on or changing any of these keys changes captured pixels:
+run `ref` again for affected suites and keep reference and test settings identical.
+Keep `pixelMatchThreshold` above `0` for pixelated scenarios, because anti-alias
+filtering cannot forgive pixels inside uniform blocks.
+
+Each capture's `.log.json` link records the setting it used: the mode and, for
+`pixelate`, the block size, minimum size, and a SHA-256 digest of the sorted,
+de-duplicated exclusion list, never the selector text. `ref` and `approve` copy
+the setting with each promoted image and never change PNG bytes. The link is
+bound to its image's SHA-256 digest, so a replaced image no longer claims a
+setting.
+
+When a comparison finds that the reference and test captures recorded different
+settings, it prints a warning for that capture and a count after the suite
+summary, and adds `imageSimplificationWarning` to the pair in `report.json`: a
+`message` plus both recorded settings, `null` when a side has none. A capture
+without a recorded setting, such as a reference from an earlier release, counts
+as `none`, so it warns only against a pixelated capture. The warning never
+changes the comparison result or the exit code. Run `ref` again, or approve the
+test captures if they are correct, so both sides match. The `compare` command's
+journal also records one warning per affected comparison with fingerprinted
+identities only. Web snapshots and desktop Results do not show the warning yet.
+
+Each screenshot's preparation records one capture-log decision with counts only:
+`simplifiedImages`, and for images kept sharp `smallImages`, `excludedImages`,
+`filteredImages` (already filtered), `transformedImages` (scaled, zoomed, or
+fractionally moved), and `overlappedImages` (content painted on top), plus
+`invalidSelectors` for exclusions the browser rejected, logged as a warning.
+Selector captures repeat the overlap check after scrolling their target into
+view. The records never contain selectors, URLs, or paths.
 
 ## Comparison Reports
 

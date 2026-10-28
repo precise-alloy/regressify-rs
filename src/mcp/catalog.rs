@@ -489,6 +489,43 @@ mod tests {
                 json!({"click": "#submit", "viewportNames": []}),
                 true,
             ),
+            (
+                "workspace",
+                json!({"imageSimplification": "pixelate", "imageSimplificationBlockSize": 4, "imageSimplificationMinSize": 64, "imageSimplificationExcludeSelectors": []}),
+                true,
+            ),
+            ("workspace", json!({"imageSimplification": "off"}), false),
+            (
+                "workspace",
+                json!({"imageSimplificationBlockSize": 3}),
+                false,
+            ),
+            (
+                "workspace",
+                json!({"imageSimplificationBlockSize": 18}),
+                false,
+            ),
+            ("workspace", json!({"imageSimplificationMinSize": 0}), false),
+            (
+                "suite",
+                json!({"imageSimplificationBlockSize": 16, "scenarios": []}),
+                true,
+            ),
+            (
+                "suite",
+                json!({"imageSimplificationBlockSize": 0, "scenarios": []}),
+                false,
+            ),
+            (
+                "scenario",
+                json!({"url": "about:blank", "imageSimplification": "none", "imageSimplificationBlockSize": 2}),
+                true,
+            ),
+            (
+                "scenario",
+                json!({"url": "about:blank", "imageSimplificationExcludeSelectors": [".logo", " "]}),
+                false,
+            ),
         ] {
             let validator = jsonschema::validator_for(&catalog["schemas"][kind]).unwrap();
             assert_eq!(validator.is_valid(&value), expected, "{kind}: {value}");
@@ -516,6 +553,20 @@ mod tests {
         let workspace = catalog["guides"]["workspace"]["content"].as_str().unwrap();
         assert!(workspace.contains("profile, then workspace, then suite"));
         assert!(workspace.contains("same origin"));
+        for contract in [
+            "Image simplification is opt-in",
+            "imageSimplification: pixelate",
+            "re-captured",
+            "identical values",
+            "`pixelMatchThreshold` above 0",
+            "not `off`",
+            "`imageSimplificationExcludeSelectors`, and viewport",
+        ] {
+            assert!(
+                workspace.contains(contract),
+                "Missing image simplification contract: {contract}"
+            );
+        }
         let scenarios = catalog["guides"]["scenarios"]["content"].as_str().unwrap();
         assert!(scenarios.contains("not scheduling"));
         assert!(scenarios.contains("last applicable"));

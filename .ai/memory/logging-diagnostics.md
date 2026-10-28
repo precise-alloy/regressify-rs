@@ -84,3 +84,7 @@ Verified: 2026-10-15
   refreshes only sidecars matching the pre-optimization bytes so tamper detection
   remains intact. Scoped scenario/job run logs exclude the outer command journal,
   and `LogPage` retains execution metadata when filtered to terminal records.
+- Links also carry each capture's [image simplification](image-simplification.md)
+  setting. `test` finalizes suites in `spawn_blocking` without the task-local
+  command context, so its comparison records never reach a journal; `compare`
+  records them (probe 2026-10-26; see the outstanding issues).

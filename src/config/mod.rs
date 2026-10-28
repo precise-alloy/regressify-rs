@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     common,
     types::{
-        BasicAuth, BasicAuthConfig, Browser, Needs, Selectors, TestScenario, TestSuite,
-        UrlReplacement,
+        BasicAuth, BasicAuthConfig, Browser, ImageSimplification, Needs, Selectors, TestScenario,
+        TestSuite, UrlReplacement,
     },
 };
 
@@ -24,6 +24,12 @@ pub const DEFAULT_ASYNC_CAPTURE_LIMIT: usize = 5;
 pub const DEFAULT_PIXEL_MATCH_THRESHOLD: f64 = 5.0;
 pub const DEFAULT_LAZY_LOAD_SCROLL_DELAY_MS: u64 = 250;
 pub const DEFAULT_LAZY_LOAD_TIMEOUT_MS: u64 = 20_000;
+pub const DEFAULT_IMAGE_SIMPLIFICATION_BLOCK_SIZE: u32 = 4;
+// Block size limits: Chromium caps `feConvolveMatrix` kernels at 16x16, and the
+// block filter needs an even size so its per-block sample and dilation tile exactly.
+pub const MIN_IMAGE_SIMPLIFICATION_BLOCK_SIZE: u32 = 2;
+pub const MAX_IMAGE_SIMPLIFICATION_BLOCK_SIZE: u32 = 16;
+pub const DEFAULT_IMAGE_SIMPLIFICATION_MIN_SIZE: u32 = 64;
 
 /// Workspace-level configuration loaded from `regressify.yaml` or `regressify.yml`.
 /// All fields are optional — missing fields inherit defaults.
@@ -67,6 +73,19 @@ pub struct WorkspaceConfig {
     pub hide_selectors: Option<Vec<String>>,
     /// Ignore HTTPS certificate errors (default: false).
     pub ignore_ssl_errors: Option<bool>,
+    /// Opt-in image simplification before each screenshot: none (default) keeps images unchanged; pixelate turns large images in the main document into uniform blocks of their average color. Enabling it or changing any image simplification setting changes pixels, so re-capture references; keep pixelMatchThreshold above 0. Suites and scenarios can override it.
+    #[schemars(example = &"pixelate")]
+    pub image_simplification: Option<ImageSimplification>,
+    /// Image simplification block size in whole CSS pixels: an even number from 2 to 16. Default: 4. Larger blocks remove more detail.
+    #[schemars(range(min = 2, max = 16), extend("multipleOf" = 2), example = 4)]
+    pub image_simplification_block_size: Option<u32>,
+    /// Image simplification minimum size in whole CSS pixels; images rendered narrower or shorter stay sharp. Default: 64; at least 1.
+    #[schemars(range(min = 1), example = 64)]
+    pub image_simplification_min_size: Option<u32>,
+    /// Standard CSS selectors for images, or elements containing images, that image simplification keeps sharp; invalid selectors match nothing. Supply a list; entries must not be blank. Suite and scenario lists replace it.
+    #[schemars(example = vec![".product-photo", "#hero img"])]
+    #[schemars(extend("items" = serde_json::json!({"type": "string", "minLength": 1, "pattern": r"\S"})))]
+    pub image_simplification_exclude_selectors: Option<Vec<String>>,
     /// Standard browser JavaScript injected once per active page document after readiness and before onReadyScript and actions. Returned promises are awaited; errors fail the capture. No Node.js or Playwright is required. Defaults to common/_on-ready.js.
     #[schemars(example = "common/_on-ready.js")]
     pub js_on_ready_path: Option<String>,
@@ -160,6 +179,10 @@ pub struct ResolvedConfig {
     pub freeze_animations: bool,
     pub hide_selectors: Vec<String>,
     pub ignore_ssl_errors: bool,
+    pub image_simplification: ImageSimplification,
+    pub image_simplification_block_size: u32,
+    pub image_simplification_min_size: u32,
+    pub image_simplification_exclude_selectors: Vec<String>,
     pub js_on_ready_path: Option<String>,
     pub lazy_load_scroll_delay_ms: u64,
     pub lazy_load_timeout_ms: u64,
@@ -196,6 +219,10 @@ impl Default for ResolvedConfig {
             freeze_animations: true,
             hide_selectors: Vec::new(),
             ignore_ssl_errors: false,
+            image_simplification: ImageSimplification::None,
+            image_simplification_block_size: DEFAULT_IMAGE_SIMPLIFICATION_BLOCK_SIZE,
+            image_simplification_min_size: DEFAULT_IMAGE_SIMPLIFICATION_MIN_SIZE,
+            image_simplification_exclude_selectors: Vec::new(),
             js_on_ready_path: None,
             lazy_load_scroll_delay_ms: DEFAULT_LAZY_LOAD_SCROLL_DELAY_MS,
             lazy_load_timeout_ms: DEFAULT_LAZY_LOAD_TIMEOUT_MS,
@@ -354,9 +381,54 @@ pub fn resolve_async_capture_limit(workspace: &WorkspaceConfig, suite: &TestSuit
         .max(1)
 }
 
+/// Validate one scope's explicit image simplification values before capture.
+/// Every scope is checked even when a narrower scope overrides it or the mode
+/// resolves to `none`, so a latent invalid value cannot surface later. The
+/// generated schema carries the same limits for editors and desktop feedback.
+pub fn validate_image_simplification(
+    scope: &str,
+    block_size: Option<u32>,
+    min_size: Option<u32>,
+    exclude_selectors: Option<&[String]>,
+) -> Result<()> {
+    if let Some(block_size) = block_size
+        && (block_size % 2 != 0
+            || !(MIN_IMAGE_SIMPLIFICATION_BLOCK_SIZE..=MAX_IMAGE_SIMPLIFICATION_BLOCK_SIZE)
+                .contains(&block_size))
+    {
+        anyhow::bail!(
+            "{} imageSimplificationBlockSize must be an even whole number of CSS pixels from {} to {}",
+            scope,
+            MIN_IMAGE_SIMPLIFICATION_BLOCK_SIZE,
+            MAX_IMAGE_SIMPLIFICATION_BLOCK_SIZE
+        );
+    }
+    if min_size == Some(0) {
+        anyhow::bail!(
+            "{} imageSimplificationMinSize must be at least 1 CSS pixel",
+            scope
+        );
+    }
+    // Blank entries are invalid CSS and would otherwise fail inside the page;
+    // report the position only, without echoing configured selector text.
+    if let Some(index) = exclude_selectors
+        .unwrap_or_default()
+        .iter()
+        .position(|selector| selector.trim().is_empty())
+    {
+        anyhow::bail!(
+            "{} imageSimplificationExcludeSelectors entry #{} must not be blank",
+            scope,
+            index + 1
+        );
+    }
+    Ok(())
+}
+
 /// Resolve configuration by cascading: scenario -> suite -> workspace -> defaults.
 /// For most fields: first non-None value wins (scenario overrides suite overrides workspace).
-/// For selectors (hide/remove): scenario replaces suite (no merge).
+/// For selector lists (hide/remove/image simplification exclusions): the most
+/// specific list replaces inherited lists (no merge).
 pub fn resolve_config(
     workspace: &WorkspaceConfig,
     suite: &TestSuite,
@@ -431,6 +503,33 @@ pub fn resolve_config(
             .ignore_ssl_errors
             .or(workspace.ignore_ssl_errors)
             .unwrap_or(defaults.ignore_ssl_errors),
+
+        // Each image simplification key resolves independently, so a scenario
+        // can switch the mode while inheriting the block size, or vice versa.
+        image_simplification: scenario
+            .image_simplification
+            .or(suite.image_simplification)
+            .or(workspace.image_simplification)
+            .unwrap_or(defaults.image_simplification),
+
+        image_simplification_block_size: scenario
+            .image_simplification_block_size
+            .or(suite.image_simplification_block_size)
+            .or(workspace.image_simplification_block_size)
+            .unwrap_or(defaults.image_simplification_block_size),
+
+        image_simplification_min_size: scenario
+            .image_simplification_min_size
+            .or(suite.image_simplification_min_size)
+            .or(workspace.image_simplification_min_size)
+            .unwrap_or(defaults.image_simplification_min_size),
+
+        image_simplification_exclude_selectors: scenario
+            .image_simplification_exclude_selectors
+            .clone()
+            .or(suite.image_simplification_exclude_selectors.clone())
+            .or(workspace.image_simplification_exclude_selectors.clone())
+            .unwrap_or(defaults.image_simplification_exclude_selectors),
 
         js_on_ready_path: scenario
             .js_on_ready_path
@@ -919,6 +1018,361 @@ mod tests {
                         serde_json::json!({(field): invalid, "url": "https://example.com"})
                     )
                     .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn image_simplification_defaults_off_and_each_key_cascades_independently() {
+        let default = resolve_config(&WorkspaceConfig::default(), &suite(), &scenario());
+        assert_eq!(default.image_simplification, ImageSimplification::None);
+        assert_eq!(default.image_simplification_block_size, 4);
+        assert_eq!(default.image_simplification_min_size, 64);
+        assert!(default.image_simplification_exclude_selectors.is_empty());
+        let serialized = serde_json::to_value(&default).unwrap();
+        assert_eq!(serialized["imageSimplification"], "none");
+        assert_eq!(serialized["imageSimplificationBlockSize"], 4);
+        assert_eq!(serialized["imageSimplificationMinSize"], 64);
+        assert_eq!(
+            serialized["imageSimplificationExcludeSelectors"],
+            serde_json::json!([])
+        );
+
+        use ImageSimplification::{None as Off, Pixelate};
+        type Level = (
+            Option<ImageSimplification>,
+            Option<u32>,
+            Option<u32>,
+            Option<Vec<&'static str>>,
+        );
+        let unset: Level = (None, None, None, None);
+        for (workspace_values, suite_values, scenario_values, expected) in [
+            (
+                unset.clone(),
+                unset.clone(),
+                unset.clone(),
+                (Off, 4, 64, vec![]),
+            ),
+            (
+                (Some(Pixelate), Some(8), Some(100), Some(vec![".logo"])),
+                unset.clone(),
+                unset.clone(),
+                (Pixelate, 8, 100, vec![".logo"]),
+            ),
+            (
+                (Some(Pixelate), Some(8), Some(100), Some(vec![".logo"])),
+                (None, Some(6), None, Some(vec![".hero", ".team"])),
+                unset.clone(),
+                (Pixelate, 6, 100, vec![".hero", ".team"]),
+            ),
+            // An explicit scenario `none` and an explicit empty list override
+            // inherited values; lists replace rather than merge.
+            (
+                (Some(Pixelate), Some(8), Some(100), Some(vec![".logo"])),
+                (None, Some(6), Some(32), Some(vec![".hero"])),
+                (Some(Off), None, Some(1), Some(vec![])),
+                (Off, 6, 1, vec![]),
+            ),
+            (
+                unset.clone(),
+                (Some(Pixelate), None, None, None),
+                (None, Some(16), None, Some(vec!["#map img"])),
+                (Pixelate, 16, 64, vec!["#map img"]),
+            ),
+            (
+                (Some(Off), Some(2), None, None),
+                unset.clone(),
+                (Some(Pixelate), None, None, None),
+                (Pixelate, 2, 64, vec![]),
+            ),
+        ] {
+            let workspace = WorkspaceConfig {
+                image_simplification: workspace_values.0,
+                image_simplification_block_size: workspace_values.1,
+                image_simplification_min_size: workspace_values.2,
+                image_simplification_exclude_selectors: workspace_values
+                    .3
+                    .map(|values| values.into_iter().map(String::from).collect()),
+                ..Default::default()
+            };
+            let suite = TestSuite {
+                image_simplification: suite_values.0,
+                image_simplification_block_size: suite_values.1,
+                image_simplification_min_size: suite_values.2,
+                image_simplification_exclude_selectors: suite_values
+                    .3
+                    .map(|values| values.into_iter().map(String::from).collect()),
+                ..suite()
+            };
+            let scenario = TestScenario {
+                image_simplification: scenario_values.0,
+                image_simplification_block_size: scenario_values.1,
+                image_simplification_min_size: scenario_values.2,
+                image_simplification_exclude_selectors: scenario_values
+                    .3
+                    .map(|values| values.into_iter().map(String::from).collect()),
+                ..scenario()
+            };
+            let resolved = resolve_config(&workspace, &suite, &scenario);
+            assert_eq!(
+                (
+                    resolved.image_simplification,
+                    resolved.image_simplification_block_size,
+                    resolved.image_simplification_min_size,
+                    resolved.image_simplification_exclude_selectors,
+                ),
+                (
+                    expected.0,
+                    expected.1,
+                    expected.2,
+                    expected.3.into_iter().map(String::from).collect()
+                )
+            );
+            // Unrelated settings keep their defaults.
+            assert!(resolved.hide_selectors.is_empty());
+            assert_eq!(resolved.pixel_match_threshold, 5.0);
+        }
+    }
+
+    #[test]
+    fn image_simplification_settings_round_trip_and_reject_wrong_types() {
+        let workspace: WorkspaceConfig = serde_yaml::from_str(
+            "imageSimplification: pixelate\nimageSimplificationBlockSize: 8\nimageSimplificationMinSize: 96\nimageSimplificationExcludeSelectors:\n  - .logo\n",
+        )
+        .unwrap();
+        assert_eq!(
+            workspace.image_simplification,
+            Some(ImageSimplification::Pixelate)
+        );
+        assert_eq!(workspace.image_simplification_block_size, Some(8));
+        assert_eq!(workspace.image_simplification_min_size, Some(96));
+        let suite: TestSuite = serde_yaml::from_str(
+            "imageSimplification: none\nimageSimplificationExcludeSelectors: []\nscenarios:\n  - url: https://example.com\n    imageSimplification: pixelate\n    imageSimplificationBlockSize: 2\n    imageSimplificationMinSize: 1\n    imageSimplificationExcludeSelectors: ['#hero img']\n  - url: https://example.com/other\n    imageSimplification: ~\n",
+        )
+        .unwrap();
+        assert_eq!(suite.image_simplification, Some(ImageSimplification::None));
+        assert_eq!(
+            suite.image_simplification_exclude_selectors,
+            Some(Vec::new())
+        );
+        assert_eq!(suite.scenarios[1].image_simplification, None);
+        let suite_json = serde_json::to_value(&suite).unwrap();
+        assert_eq!(suite_json["imageSimplification"], "none");
+        assert_eq!(
+            suite_json["scenarios"][0]["imageSimplification"],
+            "pixelate"
+        );
+        assert_eq!(
+            suite_json["scenarios"][0]["imageSimplificationBlockSize"],
+            2
+        );
+        assert_eq!(suite_json["scenarios"][0]["imageSimplificationMinSize"], 1);
+        assert_eq!(
+            suite_json["scenarios"][0]["imageSimplificationExcludeSelectors"],
+            serde_json::json!(["#hero img"])
+        );
+        let round_trip: TestSuite = serde_json::from_value(suite_json).unwrap();
+        assert_eq!(
+            round_trip.scenarios[0].image_simplification,
+            Some(ImageSimplification::Pixelate)
+        );
+        let workspace_json = serde_json::to_value(workspace).unwrap();
+        let round_trip: WorkspaceConfig = serde_json::from_value(workspace_json).unwrap();
+        assert_eq!(round_trip.image_simplification_min_size, Some(96));
+
+        // YAML 1.1 tools read an unquoted `off` as false; only none/pixelate parse.
+        for invalid in ["off", "false", "Pixelate", "NONE", "blur", "''"] {
+            let yaml = format!("imageSimplification: {invalid}\n");
+            assert!(
+                serde_yaml::from_str::<WorkspaceConfig>(&yaml).is_err(),
+                "{invalid}"
+            );
+            assert!(
+                serde_yaml::from_str::<TestSuite>(&format!("{yaml}scenarios: []\n")).is_err(),
+                "{invalid}"
+            );
+            assert!(
+                serde_yaml::from_str::<TestScenario>(&format!("{yaml}url: https://example.com\n"))
+                    .is_err(),
+                "{invalid}"
+            );
+        }
+        for (field, invalid) in [
+            ("imageSimplificationBlockSize", serde_json::json!(-2)),
+            ("imageSimplificationBlockSize", serde_json::json!(4.5)),
+            ("imageSimplificationBlockSize", serde_json::json!("4")),
+            (
+                "imageSimplificationBlockSize",
+                serde_json::json!(4_294_967_296_u64),
+            ),
+            ("imageSimplificationMinSize", serde_json::json!(-1)),
+            ("imageSimplificationMinSize", serde_json::json!(64.5)),
+            ("imageSimplificationMinSize", serde_json::json!(true)),
+            (
+                "imageSimplificationExcludeSelectors",
+                serde_json::json!(".logo"),
+            ),
+            (
+                "imageSimplificationExcludeSelectors",
+                serde_json::json!([1]),
+            ),
+            ("imageSimplificationBlocksize", serde_json::json!(4)),
+        ] {
+            assert!(
+                serde_json::from_value::<WorkspaceConfig>(serde_json::json!({(field): invalid}))
+                    .is_err(),
+                "{field}: {invalid}"
+            );
+            assert!(
+                serde_json::from_value::<TestSuite>(
+                    serde_json::json!({(field): invalid, "scenarios": []})
+                )
+                .is_err(),
+                "{field}: {invalid}"
+            );
+            assert!(
+                serde_json::from_value::<TestScenario>(
+                    serde_json::json!({(field): invalid, "url": "https://example.com"})
+                )
+                .is_err(),
+                "{field}: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_simplification_validation_rejects_invalid_values_without_echoing_selectors() {
+        for block_size in [2, 4, 6, 8, 10, 12, 14, 16] {
+            validate_image_simplification("workspace", Some(block_size), None, None).unwrap();
+        }
+        for block_size in [0, 1, 3, 5, 15, 17, 18, 32, u32::MAX] {
+            let error = validate_image_simplification("workspace", Some(block_size), None, None)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                "workspace imageSimplificationBlockSize must be an even whole number of CSS pixels from 2 to 16"
+            );
+        }
+        for min_size in [1, 64, u32::MAX] {
+            validate_image_simplification("workspace", None, Some(min_size), None).unwrap();
+        }
+        assert_eq!(
+            validate_image_simplification("Test suite 'shop'", None, Some(0), None)
+                .unwrap_err()
+                .to_string(),
+            "Test suite 'shop' imageSimplificationMinSize must be at least 1 CSS pixel"
+        );
+        let selectors = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+        for valid in [
+            selectors(&[]),
+            selectors(&[".logo"]),
+            selectors(&[" .logo ", "#hero img"]),
+        ] {
+            validate_image_simplification("workspace", None, None, Some(&valid)).unwrap();
+        }
+        for (invalid, entry) in [
+            (selectors(&[""]), 1),
+            (selectors(&[" "]), 1),
+            (selectors(&["\t\n"]), 1),
+            (selectors(&[".private-banner", ""]), 2),
+        ] {
+            let error =
+                validate_image_simplification("scenario 'home'", None, None, Some(&invalid))
+                    .unwrap_err()
+                    .to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "scenario 'home' imageSimplificationExcludeSelectors entry #{entry} must not be blank"
+                )
+            );
+            assert!(!error.contains("private-banner"), "{error}");
+        }
+        // Absent values and the documented defaults are valid at every scope.
+        validate_image_simplification("workspace", None, None, None).unwrap();
+        validate_image_simplification(
+            "workspace",
+            Some(DEFAULT_IMAGE_SIMPLIFICATION_BLOCK_SIZE),
+            Some(DEFAULT_IMAGE_SIMPLIFICATION_MIN_SIZE),
+            Some(&[]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn image_simplification_schema_limits_match_preflight_validation() {
+        let schemas = [
+            serde_json::to_value(schemars::schema_for!(WorkspaceConfig)).unwrap(),
+            serde_json::to_value(schemars::schema_for!(TestSuite)).unwrap(),
+            serde_json::to_value(schemars::schema_for!(TestScenario)).unwrap(),
+        ];
+        for root in &schemas {
+            let validator = jsonschema::validator_for(root).unwrap();
+            let document = |key: &str, value: serde_json::Value| {
+                let mut document = serde_json::json!({(key): value});
+                if root["required"]
+                    .as_array()
+                    .is_some_and(|required| required.contains(&serde_json::json!("url")))
+                {
+                    document["url"] = serde_json::json!("https://example.com");
+                } else if root["required"]
+                    .as_array()
+                    .is_some_and(|required| required.contains(&serde_json::json!("scenarios")))
+                {
+                    document["scenarios"] = serde_json::json!([]);
+                }
+                document
+            };
+            for block_size in 0..=20_u32 {
+                assert_eq!(
+                    validator
+                        .is_valid(&document("imageSimplificationBlockSize", block_size.into())),
+                    validate_image_simplification("scope", Some(block_size), None, None).is_ok(),
+                    "block size {block_size}"
+                );
+            }
+            for min_size in [0_u32, 1, 2, 64, u32::MAX] {
+                assert_eq!(
+                    validator.is_valid(&document("imageSimplificationMinSize", min_size.into())),
+                    validate_image_simplification("scope", None, Some(min_size), None).is_ok(),
+                    "min size {min_size}"
+                );
+            }
+            for selectors in [
+                vec![],
+                vec![".logo".to_string()],
+                vec![String::new()],
+                vec![" ".to_string()],
+                vec![".logo".to_string(), "\t".to_string()],
+            ] {
+                assert_eq!(
+                    validator.is_valid(&document(
+                        "imageSimplificationExcludeSelectors",
+                        serde_json::json!(selectors)
+                    )),
+                    validate_image_simplification("scope", None, None, Some(&selectors)).is_ok(),
+                    "{selectors:?}"
+                );
+            }
+            for (mode, valid) in [
+                (serde_json::json!("none"), true),
+                (serde_json::json!("pixelate"), true),
+                (serde_json::json!(null), true),
+                (serde_json::json!("off"), false),
+                (serde_json::json!(false), false),
+                (serde_json::json!("Pixelate"), false),
+            ] {
+                assert_eq!(
+                    validator.is_valid(&document("imageSimplification", mode.clone())),
+                    valid,
+                    "{mode}"
                 );
             }
         }

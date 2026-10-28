@@ -6,6 +6,7 @@ mod cdp;
 mod dialogs;
 mod gestures;
 mod hooks;
+pub(crate) mod image_simplification;
 mod keyboard;
 mod page_stability;
 pub mod runtime;

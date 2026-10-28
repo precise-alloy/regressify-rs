@@ -302,6 +302,14 @@ pub enum Field {
     TabCount,
     Infrastructure,
     CleanupFailed,
+    // Image simplification counts; selectors and image sources are never recorded.
+    SimplifiedImages,
+    SmallImages,
+    ExcludedImages,
+    FilteredImages,
+    TransformedImages,
+    OverlappedImages,
+    InvalidSelectors,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

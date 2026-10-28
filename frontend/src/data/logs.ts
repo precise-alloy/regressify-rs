@@ -179,6 +179,13 @@ const fields = [
   "tabCount",
   "infrastructure",
   "cleanupFailed",
+  "simplifiedImages",
+  "smallImages",
+  "excludedImages",
+  "filteredImages",
+  "transformedImages",
+  "overlappedImages",
+  "invalidSelectors",
 ] as const;
 const category = z.enum([
   "timeout",

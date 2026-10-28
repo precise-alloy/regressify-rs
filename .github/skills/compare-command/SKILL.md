@@ -24,6 +24,7 @@ description: 'Use when changing regressify compare, capture-run selection, image
 1. Partial-row anchors need local informative signature evidence, not mandatory near-perfect rows or votes from a different region. Track each half's horizontal and vertical variation independently; a constant half cannot inherit information from the other half. Retain clean-row penalties, minimum support, deterministic ties, bounded candidate/depth searches, and canvas pixel/dimension limits.
 1. Report-viewport approval recalculates the reviewed capture list, order, and per-pair thresholds, not a narrowed selection or the current workspace settings.
 1. Persist `pixelMatchThreshold` on report pairs. A reviewed legacy report without it used normalized 0.1, so deserialize that missing field as 10 for approval; do not substitute the new-capture default.
+1. Read both capture links once per pair (`attach_capture_metadata`). Attach optional pair `imageSimplificationWarning` only to compared pairs, not missing references or capture failures, when recorded settings differ; a missing or stale record counts as `none`. Never change status or exit codes. Reviewed-report approval recalculates it instead of copying it. Print it per pair plus a suite count; `compare` also journals a Warn decision with fingerprinted identities only. Snapshot conversion and desktop Results ignore the field for now.
 
 ## Checks
 

@@ -3,7 +3,7 @@ title: Create a test suite
 guid: 4e46191b-a1e4-4d2d-82ff-5ec3827a33cb
 description: Learn how to create Regressify test suites, group related scenarios, and configure suite-level options for stable visual regression testing.
 date: 2023-06-29T17:00:00+00:00
-updated: 2026-04-17T17:00:00+00:00
+updated: 2026-10-26T00:00:00+00:00
 draft: false
 hidden: false
 weight: 20000
@@ -33,8 +33,9 @@ The purpose of these tests is to load the specified URLs and capture screenshots
 
 Configuration is validated before browser capture starts. Malformed suite files,
 invalid viewport names, invalid replacement regexes, unsupported browser
-settings, out-of-range mismatch thresholds, and negative or non-finite timing
-values stop the command early. Suite and scenario IDs must also be portable
+settings, out-of-range mismatch thresholds, negative or non-finite timing
+values, and invalid image simplification settings stop the command early. Suite
+and scenario IDs must also be portable
 single path components no longer than 80 bytes. Viewport labels must produce
 unique screenshot suffixes no longer than 48 bytes. Website failures during
 scenario execution are written to the reports instead of stopping sibling
@@ -256,6 +257,115 @@ Type: `boolean`.
 Default value: `false`.
 
 Whether the tool should ignore SSL errors.
+
+{% end %}
+
+{% spoiler() %}
+
+imageSimplification
+
+:::::
+
+Type: `none | pixelate`.  
+Default value: workspace value, then `none`.
+
+Opt-in image simplification for image-heavy pages. With `pixelate`, each
+qualifying image in the page's main document is replaced by uniform blocks of
+its average color immediately before every screenshot, including `save`
+checkpoints. Screenshots of photo-heavy pages become much smaller and minor
+image encoding or scaling differences shrink, while text, layout, and other
+content stay sharp. `none` captures images unchanged. Write `none`, not `off`:
+YAML 1.1 tools read an unquoted `off` as `false`.
+
+Qualifying images are `img`, `video` (including its poster), and SVG `image`
+elements rendered at least `imageSimplificationMinSize` CSS pixels wide and
+high. Blocks start at each image's top-left corner; blocks cut off by the right
+or bottom edge use their own average. These images stay sharp:
+
+- images that match `imageSimplificationExcludeSelectors` or sit inside an
+  element that matches one;
+- images that already have a CSS `filter`;
+- images that are scaled, zoomed, skewed, rotated other than in quarter turns,
+  or moved by a fraction of a pixel, because that would blur the blocks;
+- images whose simplification could change which content paints on top of
+  them, such as caption text, a badge, or a sticky header drawn over the image.
+
+Iframes, shadow DOM, canvas, and CSS background images are not simplified.
+
+Images are flagged with a `data-regressify-simplify` attribute only while a
+screenshot is taken; the flags are removed before later actions run. Each page
+document also gets a hidden zero-size SVG element holding the filter and one
+constructed stylesheet. Neither changes layout, and both work under a strict
+Content Security Policy. The capture log counts simplified images and the reason
+each other image stayed sharp, without recording selectors or image URLs.
+
+Enabling it, or changing any image simplification setting, changes captured
+pixels. Re-capture references afterwards and keep reference and test captures
+on identical settings. Each capture records its setting, and comparisons warn,
+without failing, when a reference and its test capture differ; see
+[image simplification](commands.md#image-simplification). Keep
+`pixelMatchThreshold` above `0` for pixelated scenarios: inside uniform blocks,
+anti-alias filtering cannot forgive a pixel, so the color tolerance is the only
+allowance there.
+
+Scenario values override this suite value. Each image simplification setting
+resolves independently: scenario, suite, workspace, then the default.
+
+```yaml
+imageSimplification: pixelate
+imageSimplificationBlockSize: 8
+scenarios:
+  - url: https://example.com/gallery
+```
+
+{% end %}
+
+{% spoiler() %}
+
+imageSimplificationBlockSize
+
+:::::
+
+Type: even whole CSS pixels from `2` to `16`.  
+Default value: workspace value, then `4`.
+
+Width and height of each uniform block used by `imageSimplification: pixelate`.
+Larger blocks remove more detail and produce smaller screenshots. Odd or
+out-of-range values are configuration errors; Chromium limits the averaging
+kernel to 16 pixels.
+
+{% end %}
+
+{% spoiler() %}
+
+imageSimplificationExcludeSelectors
+
+:::::
+
+Type: `string[]`.  
+Default value: workspace value, then `[]`.
+
+Standard CSS selectors for images, or for elements containing images, that stay
+sharp during image simplification, such as a product photo under review or the
+gallery around it. A selector the browser rejects matches nothing, like an
+invalid `hideSelectors` entry, and the capture log counts it without recording
+its text. Blank entries are configuration errors. A scenario list replaces this
+suite list, and this list replaces the workspace list; lists are never merged.
+
+{% end %}
+
+{% spoiler() %}
+
+imageSimplificationMinSize
+
+:::::
+
+Type: positive whole CSS pixels.  
+Default value: workspace value, then `64`.
+
+Images rendered narrower or shorter than this size stay sharp during image
+simplification, so icons, logos, and avatars remain recognizable. `0` is a
+configuration error.
 
 {% end %}
 

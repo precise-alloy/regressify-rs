@@ -66,6 +66,9 @@ assistant's private memory store. Keep this directory out of ignore rules.
   bootstrapper preparation, multi-OS scripts, and the deferred bridge rollout.
 - [Licensing](licensing.md): verbatim AGPL text hash, output-exception upkeep,
   and cargo-deny license-gate checks.
+- [Image simplification](image-simplification.md): opt-in pixelation keys and
+  cascade, exact block filter, paint-order guard, flag lifecycle, per-capture
+  setting records, mismatch warnings, measured savings, and rejected alternatives.
 
 ## Checks
 

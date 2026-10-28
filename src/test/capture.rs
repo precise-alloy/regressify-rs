@@ -22,6 +22,10 @@ use crate::{
     types::{ScreenshotType, Selectors, TestAction, TestScenario, TestSuite},
 };
 
+use super::image_simplification::{
+    ImageSimplificationSetting, ImageSimplifier, RecordedImageSimplification,
+};
+
 /// Chunks retained by normalization. Color-management chunks affect rendered
 /// appearance and must not be stripped from visual-regression artifacts.
 const PRESERVED_PNG_CHUNKS: [&[u8; 4]; 9] = [
@@ -412,6 +416,12 @@ pub struct CaptureLog {
     pub archive: Option<crate::diagnostics::runtime::ArchiveReference>,
 }
 
+/// Per-capture sidecar (`<capture>.log.json`) next to each PNG in capture runs
+/// and `bitmaps_reference`. Besides the diagnostic archive it records the
+/// capture's effective image simplification, because this file already travels
+/// with the image: `ref` and `approve` rewrite it right after the atomic PNG
+/// copy, and `image_digest` binds it to the exact PNG bytes, so a stale or
+/// failed link update can never vouch for a newer image.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CaptureLogLink {
@@ -419,6 +429,16 @@ struct CaptureLogLink {
     log: CaptureLog,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_digest: Option<String>,
+    /// Absent in links written before settings were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_simplification: Option<RecordedImageSimplification>,
+}
+
+/// Verified contents of a capture's sidecar link.
+pub(crate) struct CaptureMetadata {
+    pub log: CaptureLog,
+    /// Present only when a readable link that still matches its image recorded it.
+    pub image_simplification: Option<RecordedImageSimplification>,
 }
 
 fn image_digest(path: &Path) -> Result<Option<String>> {
@@ -447,7 +467,12 @@ fn image_digest(path: &Path) -> Result<Option<String>> {
     Ok(Some(format!("{:x}", digest.finalize())))
 }
 
-fn store_capture_log(output: &Path, image: &Path, log: CaptureLog) -> Result<()> {
+fn store_capture_log(
+    output: &Path,
+    image: &Path,
+    log: CaptureLog,
+    image_simplification: Option<RecordedImageSimplification>,
+) -> Result<()> {
     let root = output.canonicalize()?;
     let parent = image
         .parent()
@@ -477,22 +502,36 @@ fn store_capture_log(output: &Path, image: &Path, log: CaptureLog) -> Result<()>
         &serde_json::to_vec(&CaptureLogLink {
             log,
             image_digest: image_digest(image)?,
+            image_simplification,
         })?,
     )
 }
 
+/// Rewrite the destination's link after its image was replaced by `source`,
+/// carrying the source's verified archive reference and capture settings. The
+/// new link replaces the old one, so a promoted image never inherits settings
+/// of the capture it replaced; if this write fails, the old link no longer
+/// matches the new image's digest and readers ignore it.
 pub(crate) fn promote_capture_log(output: &Path, source: &Path, destination: &Path) {
-    let log = read_capture_log(output, source).unwrap_or(CaptureLog {
-        state: crate::diagnostics::journal::ArchiveState::LegacyUnavailable,
-        archive: None,
-    });
-    if store_capture_log(output, destination, log).is_err() {
+    let (log, image_simplification) = match read_capture_metadata(output, source) {
+        Some(metadata) => (metadata.log, metadata.image_simplification),
+        None => (
+            CaptureLog {
+                state: crate::diagnostics::journal::ArchiveState::LegacyUnavailable,
+                archive: None,
+            },
+            None,
+        ),
+    };
+    if store_capture_log(output, destination, log, image_simplification).is_err() {
         crate::diagnostics::install::emergency_warning(
             "Reference image was promoted but its log link could not be updated",
         );
     }
 }
 
+/// Link an image to its diagnostic archive without capture settings, as links
+/// written before settings were recorded. Captures use `write_execution_logs`.
 pub fn write_capture_log(
     output: &Path,
     image: &Path,
@@ -502,7 +541,7 @@ pub fn write_capture_log(
         state: archive.state,
         archive: Some(archive.clone()),
     };
-    store_capture_log(output, image, log)
+    store_capture_log(output, image, log, None)
 }
 
 /// Refresh a capture log sidecar's bound image digest when lossless PNG
@@ -551,6 +590,25 @@ pub(crate) fn read_capture_log_cached(
         crate::diagnostics::journal::ArchiveState,
     >,
 ) -> Option<CaptureLog> {
+    read_capture_metadata_cached(output, image, archive_states).map(|metadata| metadata.log)
+}
+
+pub(crate) fn read_capture_metadata(output: &Path, image: &Path) -> Option<CaptureMetadata> {
+    let mut cache = BTreeMap::new();
+    read_capture_metadata_cached(output, image, &mut cache)
+}
+
+/// Read a capture's link once for both its log reference and its recorded
+/// settings. Missing, unreadable, or stale links (whose digest no longer
+/// matches the image) yield no settings.
+pub(crate) fn read_capture_metadata_cached(
+    output: &Path,
+    image: &Path,
+    archive_states: &mut BTreeMap<
+        crate::diagnostics::record::OperationId,
+        crate::diagnostics::journal::ArchiveState,
+    >,
+) -> Option<CaptureMetadata> {
     use crate::diagnostics::journal::{ArchiveState, inspect_archive};
     let path = image.with_extension("log.json");
     if matches!(fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
@@ -568,16 +626,19 @@ pub(crate) fn read_capture_log_cached(
                     .ok()
             })
             .is_some_and(|value| value["version"] == 1);
-        return Some(CaptureLog {
-            state: if valid {
-                ArchiveState::Missing
-            } else {
-                ArchiveState::LoadingError
+        return Some(CaptureMetadata {
+            log: CaptureLog {
+                state: if valid {
+                    ArchiveState::Missing
+                } else {
+                    ArchiveState::LoadingError
+                },
+                archive: None,
             },
-            archive: None,
+            image_simplification: None,
         });
     }
-    let loaded = (|| -> Result<CaptureLog> {
+    let loaded = (|| -> Result<CaptureMetadata> {
         let root = output.canonicalize()?;
         let link: CaptureLogLink = crate::diagnostics::journal::read_json(&path, &root, 64 * 1024)?;
         if let Some(expected) = link.image_digest {
@@ -593,24 +654,45 @@ pub(crate) fn read_capture_log_cached(
                 .entry(reference.operation_id.clone())
                 .or_insert_with(|| inspect_archive(&root, Some(&reference.operation_id), true));
         }
-        Ok(log)
+        Ok(CaptureMetadata {
+            log,
+            image_simplification: link.image_simplification,
+        })
     })();
-    Some(loaded.unwrap_or(CaptureLog {
-        state: ArchiveState::LoadingError,
-        archive: None,
+    Some(loaded.unwrap_or(CaptureMetadata {
+        log: CaptureLog {
+            state: ArchiveState::LoadingError,
+            archive: None,
+        },
+        image_simplification: None,
     }))
 }
 
+/// Link every capture of one job to its archive and record the job's effective
+/// image simplification. Written before capture (without an image digest) and
+/// again after the job, so a failed final write still leaves correct settings.
 pub(crate) fn write_execution_logs(
     suite: &TestSuite,
     scenario: &TestScenario,
     viewport: Option<&str>,
     archive: &crate::diagnostics::runtime::ArchiveReference,
+    image_simplification: &ImageSimplificationSetting,
 ) -> Result<()> {
     let directory = run_dir(suite)?;
+    let output = common::REGRESSIFY_DIR.get_required()?;
     for key in super::test_scenario::capture_progress_keys(scenario, &suite.scenarios, viewport)? {
         let image = directory.join(format!("{key}.png"));
-        write_capture_log(common::REGRESSIFY_DIR.get_required()?, &image, archive)?;
+        store_capture_log(
+            output,
+            &image,
+            CaptureLog {
+                state: archive.state,
+                archive: Some(archive.clone()),
+            },
+            Some(RecordedImageSimplification::Known(
+                image_simplification.clone(),
+            )),
+        )?;
     }
     Ok(())
 }
@@ -964,13 +1046,14 @@ pub(crate) fn write_report_urls(
     Ok(())
 }
 
-pub async fn save_screenshot(
+pub(crate) async fn save_screenshot(
     test_suite: &TestSuite,
     scenario: &TestScenario,
     page: &Page,
     screenshot_type: ScreenshotType,
     viewport_label: Option<&str>,
     selector: Option<&str>,
+    simplifier: Option<&ImageSimplifier>,
 ) -> Result<()> {
     save_screenshot_with_target(
         test_suite,
@@ -980,10 +1063,12 @@ pub async fn save_screenshot(
         screenshot_type,
         viewport_label,
         selector,
+        simplifier,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn save_screenshot_with_target(
     test_suite: &TestSuite,
     scenario: &TestScenario,
@@ -992,6 +1077,7 @@ pub(crate) async fn save_screenshot_with_target(
     screenshot_type: ScreenshotType,
     viewport_label: Option<&str>,
     selector: Option<&str>,
+    simplifier: Option<&ImageSimplifier>,
 ) -> Result<()> {
     use crate::diagnostics::{record::*, runtime as diagnostics};
     let key = final_screenshot_order_key(
@@ -1013,11 +1099,13 @@ pub(crate) async fn save_screenshot_with_target(
             screenshot_type,
             viewport_label,
             selector,
+            simplifier,
         ),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn save_screenshot_inner(
     test_suite: &TestSuite,
     scenario: &TestScenario,
@@ -1026,12 +1114,13 @@ async fn save_screenshot_inner(
     screenshot_type: ScreenshotType,
     viewport_label: Option<&str>,
     selector: Option<&str>,
+    simplifier: Option<&ImageSimplifier>,
 ) -> Result<()> {
     use crate::diagnostics::{record::*, runtime as diagnostics};
     let path = screenshot_path(test_suite, scenario, &screenshot_type, viewport_label)
         .map_err(|error| artifact_write_error("Failed to create screenshot output path", error))?;
 
-    let png_bytes = capture_png(page, target, &screenshot_type, selector).await?;
+    let png_bytes = capture_png(page, target, &screenshot_type, selector, simplifier).await?;
     let clean_bytes = strip_png_metadata(&png_bytes)?;
     let (width, height) = crate::helpers::png::read_bounded_png_dimensions_from_reader(
         std::io::Cursor::new(&clean_bytes),
@@ -1064,6 +1153,7 @@ async fn capture_png(
     target: Option<&super::runtime::Target>,
     screenshot_type: &ScreenshotType,
     selector: Option<&str>,
+    simplifier: Option<&ImageSimplifier>,
 ) -> Result<Vec<u8>> {
     let selector = selector.or(match screenshot_type {
         ScreenshotType::Selector(selector) => Some(selector.as_str()),
@@ -1071,7 +1161,7 @@ async fn capture_png(
     });
     let viewport = match selector {
         Some(selector) if is_viewport_target(selector) => true,
-        Some(selector) => return capture_selector_png(page, target, selector).await,
+        Some(selector) => return capture_selector_png(page, target, selector, simplifier).await,
         None => *screenshot_type == ScreenshotType::Viewport,
     };
 
@@ -1109,6 +1199,7 @@ async fn capture_selector_png(
     page: &Page,
     target: Option<&super::runtime::Target>,
     selector: &str,
+    simplifier: Option<&ImageSimplifier>,
 ) -> Result<Vec<u8>> {
     let capture = prepare_selector_capture(page, target, selector).await?;
     let params = ScreenshotParams::builder()
@@ -1118,18 +1209,33 @@ async fn capture_selector_png(
         .from_surface(true)
         .omit_background(false)
         .build();
-    let screenshot_result = page.screenshot(params).await.map_err(|error| {
-        anyhow!(
-            "Failed to capture {} screenshot: {}",
-            screenshot_type_description(&ScreenshotType::Selector(selector.to_string())),
-            error
-        )
-    });
+    // Centering the target scrolled the page after images were flagged, which
+    // can move fixed or sticky content over different images. Re-run the
+    // paint-order guard for this geometry, and again after scrolling back so
+    // later captures of the same preparation see their own geometry.
+    let refreshed = match simplifier {
+        Some(simplifier) => simplifier.refresh(page).await.map(drop),
+        None => Ok(()),
+    };
+    let screenshot_result = match refreshed {
+        Ok(()) => page.screenshot(params).await.map_err(|error| {
+            anyhow!(
+                "Failed to capture {} screenshot: {}",
+                screenshot_type_description(&ScreenshotType::Selector(selector.to_string())),
+                error
+            )
+        }),
+        Err(error) => Err(error),
+    };
     let restore_result = async {
         if let (Some(target), Some((frame_x, frame_y))) = (target, capture.frame_restore) {
             restore_target_scroll(target, frame_x, frame_y).await?;
         }
-        restore_page_scroll(page, capture.restore_x, capture.restore_y).await
+        restore_page_scroll(page, capture.restore_x, capture.restore_y).await?;
+        if let Some(simplifier) = simplifier {
+            simplifier.refresh(page).await?;
+        }
+        Ok::<_, anyhow::Error>(())
     }
     .await;
 
@@ -1645,6 +1751,157 @@ mod tests {
             .unwrap();
         assert!(finished);
         assert_eq!(std::fs::read(index).unwrap(), before);
+    }
+
+    #[test]
+    fn capture_links_record_image_simplification_and_approval_promotes_it_with_each_image() {
+        use crate::diagnostics::journal::ArchiveState;
+        use crate::test::image_simplification::{
+            ImageSimplificationSetting, RecordedImageSimplification, exclude_selectors_digest,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path();
+        let suite = output.join("suite");
+        let run = suite.join("bitmaps_test/run");
+        let references = suite.join("bitmaps_reference");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::create_dir_all(&references).unwrap();
+        let png = |red: u8| lodepng::encode32(&[red, 20, 30, 255], 1, 1).unwrap();
+        let log = || CaptureLog {
+            state: ArchiveState::Missing,
+            archive: None,
+        };
+        let pixelated = RecordedImageSimplification::Known(ImageSimplificationSetting::Pixelate {
+            block_size: 8,
+            min_size: 64,
+            exclude_selectors_digest: exclude_selectors_digest(&[".logo".into()]),
+        });
+        let off = RecordedImageSimplification::Known(ImageSimplificationSetting::None);
+        let future = RecordedImageSimplification::Unrecognized(
+            serde_json::json!({"mode": "blur", "radius": 3, "note": "added later"}),
+        );
+        let setting_of = |image: &Path| {
+            read_capture_metadata(output, image).and_then(|metadata| metadata.image_simplification)
+        };
+
+        // Links written before the image exists carry no digest; a job whose
+        // final link write failed still records the right setting.
+        let early = run.join("early__FINAL.png");
+        store_capture_log(output, &early, log(), Some(pixelated.clone())).unwrap();
+        std::fs::write(&early, png(1)).unwrap();
+        assert_eq!(setting_of(&early), Some(pixelated.clone()));
+        // A later write binds the link to the image bytes.
+        store_capture_log(output, &early, log(), Some(pixelated.clone())).unwrap();
+        let link: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(early.with_extension("log.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            link["imageDigest"],
+            image_digest(&early).unwrap().unwrap().as_str()
+        );
+        assert_eq!(
+            link["imageSimplification"],
+            serde_json::to_value(&pixelated).unwrap()
+        );
+
+        let captures = [
+            // (capture, run link setting, reference link setting before approval)
+            (
+                "pixelated__FINAL",
+                Some(pixelated.clone()),
+                Some(off.clone()),
+            ),
+            // A run without a recorded setting must not inherit the old one.
+            ("unrecorded__FINAL", None, Some(pixelated.clone())),
+            ("future__FINAL", Some(future.clone()), None),
+        ];
+        for (index, (key, run_setting, reference_setting)) in captures.iter().enumerate() {
+            let source = run.join(format!("{key}.png"));
+            std::fs::write(&source, png(10 + index as u8)).unwrap();
+            if let Some(setting) = run_setting {
+                store_capture_log(output, &source, log(), Some(setting.clone())).unwrap();
+            }
+            let destination = references.join(format!("{key}.png"));
+            std::fs::write(&destination, png(200)).unwrap();
+            store_capture_log(output, &destination, log(), reference_setting.clone()).unwrap();
+        }
+        // A failed placeholder is skipped and its old reference stays intact.
+        let failed = run.join("failed__FINAL.png");
+        std::fs::write(&failed, png(50)).unwrap();
+        store_capture_log(output, &failed, log(), Some(pixelated.clone())).unwrap();
+        std::fs::write(error_marker_path(&failed), br#"{"error":true}"#).unwrap();
+        let failed_reference = references.join("failed__FINAL.png");
+        std::fs::write(&failed_reference, png(200)).unwrap();
+        store_capture_log(output, &failed_reference, log(), Some(off.clone())).unwrap();
+        let run_bytes: Vec<_> = ["pixelated", "unrecorded", "future", "failed"]
+            .map(|key| std::fs::read(run.join(format!("{key}__FINAL.png"))).unwrap())
+            .into();
+
+        crate::compare::report_gen::approve_screenshots(&suite, Some("run")).unwrap();
+
+        for (index, key) in ["pixelated", "unrecorded", "future"].iter().enumerate() {
+            // Promotion copies PNG bytes unchanged; metadata lives beside them.
+            assert_eq!(
+                std::fs::read(references.join(format!("{key}__FINAL.png"))).unwrap(),
+                run_bytes[index]
+            );
+        }
+        assert_eq!(
+            setting_of(&references.join("pixelated__FINAL.png")),
+            Some(pixelated.clone())
+        );
+        let unrecorded =
+            read_capture_metadata(output, &references.join("unrecorded__FINAL.png")).unwrap();
+        assert_eq!(unrecorded.log.state, ArchiveState::LegacyUnavailable);
+        assert_eq!(unrecorded.image_simplification, None);
+        // Settings from newer releases survive promotion without breaking logs.
+        let promoted_future =
+            read_capture_metadata(output, &references.join("future__FINAL.png")).unwrap();
+        assert_eq!(promoted_future.log.state, ArchiveState::Missing);
+        assert_eq!(promoted_future.image_simplification, Some(future.clone()));
+        assert_eq!(std::fs::read(&failed_reference).unwrap(), png(200));
+        assert_eq!(setting_of(&failed_reference), Some(off.clone()));
+        for (index, key) in ["pixelated", "unrecorded", "future", "failed"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                std::fs::read(run.join(format!("{key}__FINAL.png"))).unwrap(),
+                run_bytes[index]
+            );
+        }
+
+        // Lossless optimization refreshes the digest and keeps the setting.
+        let reference = references.join("pixelated__FINAL.png");
+        let previous = std::fs::read(&reference).unwrap();
+        let optimized = png(99);
+        std::fs::write(&reference, &optimized).unwrap();
+        refresh_capture_log_digest(&reference, &previous, &optimized).unwrap();
+        assert_eq!(setting_of(&reference), Some(pixelated.clone()));
+        // A replaced image no longer matches its link: the setting is unknown.
+        std::fs::write(&reference, png(98)).unwrap();
+        let stale = read_capture_metadata(output, &reference).unwrap();
+        assert_eq!(stale.log.state, ArchiveState::LoadingError);
+        assert_eq!(stale.image_simplification, None);
+        // Links written by `write_capture_log` record no setting.
+        std::fs::write(&reference, png(97)).unwrap();
+        write_capture_log(
+            output,
+            &reference,
+            &crate::diagnostics::runtime::ArchiveReference {
+                operation_id: crate::diagnostics::record::OperationId::new(),
+                execution_id: None,
+                state: ArchiveState::Complete,
+                missing_records: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(setting_of(&reference), None);
+        assert!(
+            !std::fs::read_to_string(reference.with_extension("log.json"))
+                .unwrap()
+                .contains("imageSimplification")
+        );
     }
 
     #[test]

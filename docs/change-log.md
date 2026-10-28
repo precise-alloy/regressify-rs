@@ -3,7 +3,7 @@ title: Change Log
 description: Track changes to the Optimizely CMS testing guides, actions, scenarios, and suite options so you can spot new capabilities quickly.
 guid: 1679e8d7-c710-4a1f-9640-224277efcd7e
 date: 2023-09-06T17:00:00+00:00
-updated: 2026-10-20T00:00:00+00:00
+updated: 2026-10-26T00:00:00+00:00
 draft: false
 hidden: false
 weight: 41000
@@ -16,6 +16,19 @@ extra:
 ---
 
 This page records notable updates to the testing docs, which is much faster than reading Git history with unnecessary archaeology.
+
+## 2026-10-23 (Unreleased)
+
+- Added: opt-in [image simplification](commands.md#image-simplification).
+  `imageSimplification: pixelate` replaces large images with uniform blocks of
+  their average color just before each screenshot and `save` checkpoint, so
+  photo-heavy screenshots shrink while text and layout stay sharp. Images with
+  text or badges drawn on top, excluded images, and scaled images stay sharp.
+  The default `none` leaves captures unchanged. Turning it on or changing its
+  settings changes pixels: capture new references, keep reference and test
+  settings identical, and keep `pixelMatchThreshold` above `0`. Each capture
+  records its setting, `ref` and `approve` keep it with the promoted image, and
+  comparisons warn, without failing, when reference and test settings differ.
 
 ## 2026-10-20 (Unreleased)
 

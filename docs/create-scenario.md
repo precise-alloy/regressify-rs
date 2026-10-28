@@ -3,7 +3,7 @@ title: Create a Test Scenario
 description: Learn how to define Regressify test scenarios, set target URLs, add actions, and tune per-scenario options for reliable runs.
 guid: 620b9098-627b-4db5-bb0b-cd43b9949e35
 date: 2023-06-29T17:00:00+00:00
-updated: 2026-10-06T00:00:00+00:00
+updated: 2026-10-26T00:00:00+00:00
 draft: false
 hidden: false
 weight: 30000
@@ -274,6 +274,111 @@ scenarios:
   - url: https://www.domain.com
     id: return-visit
 ```
+
+{% end %}
+
+{% spoiler() %}
+
+imageSimplification
+
+:::::
+
+Type: `none | pixelate`.  
+Default value: Test suite's value, then workspace value, then `none`.
+
+Opt-in image simplification for this scenario. With `pixelate`, each qualifying
+image in the page's main document is replaced by uniform blocks of its average
+color immediately before every screenshot, including `save` checkpoints. Text,
+layout, and other content stay sharp. Use `none` to turn off an inherited
+`pixelate`; write `none`, not `off`, because YAML 1.1 tools read an unquoted
+`off` as `false`.
+
+Qualifying images are `img`, `video` (including its poster), and SVG `image`
+elements rendered at least `imageSimplificationMinSize` CSS pixels wide and
+high. Blocks start at each image's top-left corner; blocks cut off by the right
+or bottom edge use their own average. Images stay sharp when they match
+`imageSimplificationExcludeSelectors` or sit inside an element that matches one,
+already have a CSS `filter`, are scaled, zoomed, skewed, rotated other than in
+quarter turns, or moved by a fraction of a pixel, or when simplification could
+change which content paints on top of them, such as caption text, a badge, or a
+sticky header drawn over the image. Iframes, shadow DOM, canvas, and CSS
+background images are not simplified.
+
+Images carry a `data-regressify-simplify` attribute only while a screenshot is
+taken, so later actions see the unmodified page. Each page document also gets a
+hidden zero-size SVG element holding the filter and one constructed stylesheet;
+neither changes layout. The capture log counts simplified images and the reason
+each other image stayed sharp, without recording selectors or image URLs.
+
+Enabling it, or changing any image simplification setting, changes captured
+pixels. Re-capture this scenario's references afterwards and keep reference and
+test captures on identical settings. Each capture records its setting, and
+comparisons warn, without failing, when a reference and its test capture differ;
+see [image simplification](commands.md#image-simplification). Keep
+`pixelMatchThreshold` above `0` for pixelated scenarios: inside uniform blocks,
+anti-alias filtering cannot forgive a pixel, so the color tolerance is the only
+allowance there.
+
+Each image simplification setting resolves independently: scenario, suite,
+workspace, then the default.
+
+```yaml
+scenarios:
+  - url: https://example.com/products
+    imageSimplification: pixelate
+    imageSimplificationExcludeSelectors:
+      - '#hero img'
+    pixelMatchThreshold: 5
+```
+
+{% end %}
+
+{% spoiler() %}
+
+imageSimplificationBlockSize
+
+:::::
+
+Type: even whole CSS pixels from `2` to `16`.  
+Default value: Test suite's value, then workspace value, then `4`.
+
+Width and height of each uniform block used by `imageSimplification: pixelate`.
+Larger blocks remove more detail and produce smaller screenshots. Odd or
+out-of-range values are configuration errors reported before any browser
+starts; Chromium limits the averaging kernel to 16 pixels.
+
+{% end %}
+
+{% spoiler() %}
+
+imageSimplificationExcludeSelectors
+
+:::::
+
+Type: `string[]`.  
+Default value: Test suite's value, then workspace value, then `[]`.
+
+Standard CSS selectors for images, or for elements containing images, that stay
+sharp during image simplification, such as the product photo a scenario reviews.
+A selector the browser rejects matches nothing, like an invalid `hideSelectors`
+entry, and the capture log counts it without recording its text. Blank entries
+are configuration errors. A scenario list replaces the inherited list; lists are
+never merged, so use `[]` to clear inherited exclusions.
+
+{% end %}
+
+{% spoiler() %}
+
+imageSimplificationMinSize
+
+:::::
+
+Type: positive whole CSS pixels.  
+Default value: Test suite's value, then workspace value, then `64`.
+
+Images rendered narrower or shorter than this size stay sharp during image
+simplification, so icons, logos, and avatars remain recognizable. `0` is a
+configuration error.
 
 {% end %}
 

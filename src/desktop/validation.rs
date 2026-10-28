@@ -347,6 +347,13 @@ fn explain(
         ValidationErrorKind::MinLength { limit } => {
             format!("Enter text with at least {limit} character(s).")
         }
+        ValidationErrorKind::MultipleOf { multiple_of } => {
+            format!("Use a whole multiple of {multiple_of}.")
+        }
+        // Nonblank constraints otherwise fall through to a misleading type mismatch.
+        ValidationErrorKind::Pattern { pattern } if pattern == r"\S" => {
+            "Enter at least one non-whitespace character.".into()
+        }
         _ => format!(
             "Expected {}; found {}. Example: {}.",
             expected(schema, root),
@@ -863,6 +870,134 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn image_simplification_diagnostics_cover_every_level_format_and_preflight_rule() {
+        for (key, value, valid, guidance) in [
+            ("imageSimplification", json!("none"), true, ""),
+            ("imageSimplification", json!("pixelate"), true, ""),
+            ("imageSimplification", json!(null), true, ""),
+            ("imageSimplification", json!("off"), false, "Choose one of"),
+            ("imageSimplification", json!(false), false, "pixelate"),
+            ("imageSimplificationBlockSize", json!(2), true, ""),
+            ("imageSimplificationBlockSize", json!(16), true, ""),
+            (
+                "imageSimplificationBlockSize",
+                json!(5),
+                false,
+                "multiple of 2",
+            ),
+            (
+                "imageSimplificationBlockSize",
+                json!(0),
+                false,
+                "greater than or equal to 2",
+            ),
+            (
+                "imageSimplificationBlockSize",
+                json!(18),
+                false,
+                "less than or equal to 16",
+            ),
+            (
+                "imageSimplificationBlockSize",
+                json!(4.0),
+                false,
+                "without a decimal point",
+            ),
+            (
+                "imageSimplificationBlockSize",
+                json!("4"),
+                false,
+                "whole number",
+            ),
+            ("imageSimplificationMinSize", json!(1), true, ""),
+            (
+                "imageSimplificationMinSize",
+                json!(0),
+                false,
+                "greater than or equal to 1",
+            ),
+            ("imageSimplificationMinSize", json!(-1), false, ""),
+            ("imageSimplificationExcludeSelectors", json!([]), true, ""),
+            (
+                "imageSimplificationExcludeSelectors",
+                json!([".logo"]),
+                true,
+                "",
+            ),
+            (
+                "imageSimplificationExcludeSelectors",
+                json!([".logo", " "]),
+                false,
+                "non-whitespace",
+            ),
+            (
+                "imageSimplificationExcludeSelectors",
+                json!([""]),
+                false,
+                "at least 1",
+            ),
+            (
+                "imageSimplificationExcludeSelectors",
+                json!(".logo"),
+                false,
+                "list",
+            ),
+        ] {
+            for (kind, document, pointer) in [
+                (
+                    DocumentKind::Workspace,
+                    json!({(key): value}),
+                    format!("/{key}"),
+                ),
+                (
+                    DocumentKind::Suite,
+                    json!({(key): value, "scenarios": []}),
+                    format!("/{key}"),
+                ),
+                (
+                    DocumentKind::Suite,
+                    json!({"scenarios": [{"url": "/", (key): value}]}),
+                    format!("/scenarios/0/{key}"),
+                ),
+            ] {
+                for document in [
+                    serde_json::from_str::<Value>(&serde_json::to_string(&document).unwrap())
+                        .unwrap(),
+                    serde_yaml::from_str::<Value>(&serde_yaml::to_string(&document).unwrap())
+                        .unwrap(),
+                ] {
+                    let issues = diagnostics(kind, &document).unwrap();
+                    assert_eq!(issues.is_empty(), valid, "{document}: {issues:?}");
+                    assert_eq!(
+                        crate::desktop::document::validate_value(kind, &document).is_ok(),
+                        valid,
+                        "{document}"
+                    );
+                    assert!(
+                        issues
+                            .iter()
+                            .all(|issue| issue.pointer.starts_with(&pointer)),
+                        "{issues:?}"
+                    );
+                    assert!(
+                        issues.iter().any(|issue| issue.message.contains(guidance)) || valid,
+                        "{guidance}: {issues:?}"
+                    );
+                    assert!(issues.iter().all(|issue| !issue.message.contains(".logo")));
+                }
+            }
+        }
+        // A blank exclusion is reported at the offending list item.
+        let issues = diagnostics(
+            DocumentKind::Workspace,
+            &json!({"imageSimplificationExcludeSelectors": [".logo", "\t"]}),
+        )
+        .unwrap();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].pointer, "/imageSimplificationExcludeSelectors/1");
     }
 
     #[test]

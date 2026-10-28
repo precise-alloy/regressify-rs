@@ -43,6 +43,10 @@ Each selected viewport runs this sequence in its own fresh browser profile:
    then `delay`, freeze animations, settle within `settleTimeout`, hide text
    carets, and capture each final target.
 
+With `imageSimplification: pixelate`, each checkpoint and final capture also
+pixelates qualifying images after settling and restores them afterwards, so
+actions never see pixelated images (see the workspace guide).
+
 The lazy-load scroll is not repeated, so hover and scroll states created by
 actions survive until capture. `freezeAnimations` completes finite and pauses
 infinite CSS and Web Animations (`document.getAnimations`); it does not stop

@@ -1413,6 +1413,21 @@ threshold is divided by `100` internally, so `5` means a normalized tolerance of
 explicit `0` override. New captures save the resolved value; comparing a saved
 run reuses that run's threshold.
 
+Image simplification settings also live in the Capture group for workspace,
+suite, and scenario Fields. At the workspace or suite root, unset values appear
+with Advanced or a settings search, such as `image simplification`. Image
+simplification chooses `none` or `pixelate` and shows the inherited choice until
+overridden. Pixelation block size (px) steps between even values from `2` to
+`16`, moving an odd draft to the adjacent even value; Minimum image size (px)
+steps by `1` from `1`. Excluded image selectors takes one CSS selector per line,
+and an explicit empty list clears inherited exclusions. Odd or out-of-range
+sizes, zero minimum sizes, and blank selectors stay in the draft as validation
+issues and block Save, matching CLI validation. Enabling simplification or
+changing any of these settings requires new reference captures. Until then,
+comparisons print a settings warning in All run logs without changing results;
+Results does not mark these captures yet. See
+[create a test suite](create-test-suite.md) for runtime behavior.
+
 Viewport and dependency lists retain free-form input and also offer searchable
 multi-select controls. Each accepted toggle is one undoable edit; the picker stays
 open, and Escape closes it without rolling back edits. Viewports load asynchronously from the effective viewport file,

@@ -18,6 +18,10 @@ description: 'Use when changing or reviewing regressify ref, baseline capture, r
    option must not silently apply test-environment substitutions in reference mode.
 1. Capture before promotion. Only successful screenshots may replace references;
    never delete good baselines first or promote error placeholders/sidecars.
+1. `promote_reference_captures` copies each PNG atomically, then rewrites its
+   `.log.json` through `promote_capture_log`, carrying the capture's archive
+   reference and recorded image simplification setting. The link binds to the
+   image digest, so readers ignore a link left over from the replaced image.
 1. A failed website/action stops its scenario but not peers; it remains a report
    result with zero exit. Config, launch, and artifact-write failures are non-zero.
 1. Preserve manifests, self-approved report generation (`generate_reference_report`, without running pixel comparison against existing images), and unselected references during partial runs. Test failures at each stage, including promotion after some captures pass.
@@ -27,6 +31,14 @@ description: 'Use when changing or reviewing regressify ref, baseline capture, r
 ```sh
 cargo test --lib test::test_suites::tests
 cargo test --lib compare::report_gen::tests
+```
+
+For recorded image simplification settings, this ignored fixture runs real
+`ref`, `test`, and a changed-setting `test` with cached Chromium, then checks
+both sides' links and the report and console warnings:
+
+```sh
+cargo test --lib test::browser_tests::image_simplification_ref_and_test -- --ignored
 ```
 
 For live changes use local fixtures with one passing and one failing scenario;

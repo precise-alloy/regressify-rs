@@ -3,6 +3,111 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Test Comparisons Write No Command Journal Records (2026-10-27)
+
+- Open: [`exec_test_suites`](src/test/test_suites.rs) finalizes each suite in
+  `spawn_blocking` without the command's diagnostic context, which is
+  task-local. [Comparison records](src/compare/report_gen.rs), both the
+  per-pair `Compared` event and the image simplification settings warning, are
+  therefore dropped during `test`; `compare` records them. Reports, console
+  output, and desktop All run logs still show results and warnings.
+- Verified with a temporary probe that ran `StagedSuiteComparison::finalize`
+  as `exec_test_suites` does: 0 records without the context, 1 `Compared` and
+  1 warning record with it. Passing the context with `runtime::in_scope` would
+  fix it, but would add one record per pair to every `test` command journal,
+  whose 64-record queue drops records under bursts; measure that first.
+
+## Tall GPU Full-Page Captures Repeat Rows (2026-10-27)
+
+- Open, confirmed: with GPU rasterization, a full-page capture taller than
+  16384 px repeats row `y - 16384` for every row `y >= 16384`, so the lower part
+  of the PNG shows the top of the page again. Seen in all 32 Allbirds captures
+  during the image simplification experiments on Chromium 147 with Intel Arc
+  through ANGLE Direct3D 11; software rendering was unaffected.
+  [Launch flags](src/test/browsers.rs) keep GPU rasterization on purpose, and
+  [full-page captures](src/test/capture.rs) take one `captureBeyondViewport`
+  screenshot of the whole content size.
+- Reproduced on 2026-10-26 with a temporary loopback probe using the same
+  screenshot parameters: an 800x20000 page of 200 uniquely colored bands on
+  Chromium 147.0.7693.0 (ANGLE, Intel Arc Pro 140T, Direct3D 11) returned all
+  3616 rows from 16384 identical to row `y - 16384`. Not investigated: the cause,
+  other GPUs and drivers, and fixes such as tiled captures or software rendering.
+
+## Document CSS Under Strict CSP And In Frames (2026-10-27)
+
+- Open, confirmed: [document hooks](src/test/hooks.rs) inject the CSS override
+  (`common/_override.css` or `cssOverridePath`) and the `hideSelectors` and
+  `removeSelectors` rules as one `<style>` element, and
+  [caret hiding](src/test/page_stability.rs) adds another. A page whose Content
+  Security Policy limits `style-src` without `'unsafe-inline'` blocks both while
+  hook setup still succeeds, so the override, masks, and caret hiding are silently
+  missing from captures unless `bypassCsp: true`. Image simplification is
+  unaffected: its filter uses CSSOM and an adopted constructed stylesheet.
+- Both elements reach only the main document of the captured page (after each
+  navigation and `switchTab`), never iframes, although the
+  [scenario docs](docs/create-scenario.md), schema descriptions, and the MCP
+  [recipes](src/mcp/guides/recipes.md) and [actions](src/mcp/guides/actions.md)
+  guides say the selector lists apply to every document.
+- Verified on 2026-10-26 with a temporary loopback probe: under
+  `default-src 'self'; style-src 'self'` both `<style>` elements were present but
+  no rule applied (computed visibility, display, and caret color unchanged); with
+  `Page.setBypassCSP`, which `bypassCsp: true` enables, every rule applied; a
+  same-origin iframe received none in any case. The strict-CSP page of the
+  [image simplification page fixture](src/test/browser_tests.rs) also asserts that
+  its `hideSelectors` rule stays unapplied.
+
+## Image Simplification Scope (2026-10-27)
+
+- By design in the first release: `imageSimplification: pixelate` considers only
+  `img`, `video`, and SVG `image` elements in the light DOM of the captured page's
+  main document ([page library](src/test/image_simplification.js)). Images in
+  iframes or shadow DOM, canvas drawings, and CSS background images stay sharp
+  and are not counted in the capture log.
+- Deferred: a "simplified" badge in web snapshots and desktop Results. Snapshot
+  conversion and Results ignore recorded settings and
+  `imageSimplificationWarning`; the warning appears only in `report.json`,
+  console output, desktop All run logs, and `compare` command journals.
+
+## Report Bundle Lags Image Simplification Fields (2026-10-27)
+
+- Open: [diagnostic records](src/diagnostics/record.rs) gained seven count fields
+  (`simplifiedImages` through `invalidSelectors`) and the
+  [frontend log schema](frontend/src/data/logs.ts) lists them, but the generated
+  report bundle in [src/snapshot/data](src/snapshot/data) was not rebuilt. Its
+  strict field enum rejects records with unknown keys, so published reports show
+  a log loading error for captures that ran with `imageSimplification: pixelate`.
+  Native desktop logs and captures are unaffected; `none` emits no such records.
+- Needs `bun install --frozen-lockfile` and `bun run build` in `frontend`, then the
+  frontend unit test that covers these fields (`bun run test`). Not run here:
+  frontend dependencies were not installed and installing them needs network access.
+
+## Image Simplification Guard Blind Spots (2026-10-27)
+
+- Open, by analysis only: the paint-order guard in
+  [the page library](src/test/image_simplification.js) cannot see content inside
+  closed shadow roots, has no box for generated `::before`/`::after` content of
+  `display: contents` elements, and approximates in-flow generated content by its
+  element's border box. An overlay drawn that way over an image could end up
+  beneath a pixelated image. Positioned generated content uses resolved offsets.
+  No affected page has been observed. The browser fixtures cover grid overlays,
+  inline, positioned, and generated badges, clipped images, and sticky headers;
+  none uses shadow DOM.
+
+## Nested Scenario Field Reset (2026-10-27)
+
+- Open: desktop Fields Reset cannot remove a scenario property unless it is the
+  scenario mapping's last entry. [Lossless YAML edits](src/desktop/document.rs)
+  reject the result with `Invalid generated YAML` and keep the draft unchanged,
+  so the override remains and the field shows the error. No source is corrupted.
+- Reproduced headlessly with `Document::apply_many` and
+  `Edit::Set { parent: "/scenarios/0", value: None, .. }`: removing `delay`
+  before `postInteractionWait` fails in both indentationless and indented
+  scenario lists, with or without flow values such as `actions: []`. Root-level
+  removals and removing the final scenario key (the earlier trailing-indent
+  fix) succeed. Found while adding image simplification Fields; unrelated to
+  those keys, whose native regression resets only trailing entries.
+
+
 ## GitHub Draft Asset URLs (2026-10-23)
 
 - Resolved locally: [v2.0.6 publication](https://github.com/precise-alloy/regressify-rs/actions/runs/39873111082/job/120161484370)

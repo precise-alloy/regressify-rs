@@ -125,8 +125,9 @@ with `fileName`, `scenarioId`, `selector` (`document`, `viewport`,
 `save:<name>`, or a selector capture name), `url`, `referenceUrl`,
 `misMatchThreshold`, `pixelMatchThreshold`, `comparisonOutcome` (`success`,
 `mismatch`, or `failure`), optional `diff` (`rawMisMatchPercentage`, `mismatchPixels`,
-`isSameDimensions`, `dimensionDifference`), `engineErrorMsg`, and
-`referenceLog`/`testLog` links. Common `engineErrorMsg` values:
+`isSameDimensions`, `dimensionDifference`), `engineErrorMsg`,
+`referenceLog`/`testLog` links, and an optional `imageSimplificationWarning`.
+Common `engineErrorMsg` values:
 
 - `Reference image not found`: no baseline has this capture name, because the
   scenario is new, an ID, save, or viewport was renamed, or its reference
@@ -304,6 +305,28 @@ browser developer tools, with authorization.
   `scenarioTimeout` must be positive whole milliseconds. `settleTimeout: 0`
   disables settling; omitted/zero `readyTimeout` inherits element timeout;
   omitted/zero navigation timeout uses 60000 ms.
+- Invalid image simplification: `imageSimplification` accepts only `none` or
+  `pixelate` (not `off`). `imageSimplificationBlockSize` must be an even whole
+  number from 2 to 16, `imageSimplificationMinSize` at least 1, and
+  `imageSimplificationExcludeSelectors` a list without blank entries. The error
+  names the scope and, for selectors, the 1-based entry number. These checks
+  apply at every scope even when simplification resolves to `none`.
+- Image unexpectedly sharp with `pixelate`: read the capture log's decision
+  counts. `smallImages` are below `imageSimplificationMinSize`; `excludedImages`
+  match an exclusion or sit inside a matching element; `filteredImages` already
+  have a CSS `filter`; `transformedImages` are scaled, zoomed, skewed, or moved
+  by fractional pixels; `overlappedImages` have text, badges, or sticky content
+  painted on top. A nonzero `invalidSelectors` means an exclusion is not valid
+  CSS and matches nothing. These are expected outcomes, not capture failures.
+- Image simplification settings warning: a pair's
+  `imageSimplificationWarning`, and the matching console `WARNING:` line, mean
+  its reference and test captures recorded different settings. Its `reference`
+  and `test` values show what each `.log.json` recorded; `null` is a capture
+  without a recorded setting, such as a reference from an earlier release, and
+  counts as `none`. Exclusions appear only as `excludeSelectorsDigest`. The
+  warning never changes `status`; mismatches it explains are still real pixel
+  differences. Align the settings, then re-capture references with `ref` or
+  approve correct test captures, both only with the user's authorization.
 - Visual mismatch with successful capture: compare reference, test, and diff at
   the same viewport, and verify baseline age, page data, fonts, rendering, and
   intended changes. Distinguish the allowed mismatch percentage from per-pixel

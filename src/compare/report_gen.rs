@@ -15,8 +15,12 @@ use crate::progress::{self, Event as ProgressEvent};
 use crate::test::capture::{
     REPORT_ORDER_FILE, REPORT_ORDER_VERSION, REPORT_PIXEL_THRESHOLDS_FILE, REPORT_THRESHOLDS_FILE,
     REPORT_URLS_FILE, REPORT_URLS_VERSION, ReportOrderManifest, ReportPageUrls, ReportUrlsManifest,
-    read_error_marker,
+    read_capture_metadata_cached, read_error_marker,
 };
+use crate::test::image_simplification::{ImageSimplificationWarning, setting_warning};
+
+type ArchiveStates =
+    BTreeMap<crate::diagnostics::record::OperationId, crate::diagnostics::journal::ArchiveState>;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +131,10 @@ struct ReportPair {
     test_log: Option<crate::test::capture::CaptureLog>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     comparison_outcome: Option<crate::diagnostics::record::Outcome>,
+    /// Set only for compared pairs whose captures recorded different image
+    /// simplification settings. Informational: never changes `status`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_simplification_warning: Option<ImageSimplificationWarning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reference_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -526,6 +534,7 @@ fn report_pair(
         reference_log: None,
         test_log: None,
         comparison_outcome: None,
+        image_simplification_warning: None,
         reference_url: page_urls.map(|urls| urls.reference_url.clone()),
         url: page_urls.map(|urls| urls.url.clone()),
         diff_image: None,
@@ -535,6 +544,40 @@ fn report_pair(
         pixel_match_threshold: pixel_threshold,
         diff: None,
         engine_error_msg: None,
+    }
+}
+
+/// Read both capture links once: their log references go into the pair, and
+/// the returned warning (when the recorded image simplification settings
+/// differ) is attached by callers only to pairs that are actually compared.
+fn attach_capture_metadata(
+    pair: &mut ReportPair,
+    output_root: &Path,
+    reference_path: &Path,
+    test_path: &Path,
+    archive_states: &mut ArchiveStates,
+) -> Option<ImageSimplificationWarning> {
+    let reference = read_capture_metadata_cached(output_root, reference_path, archive_states);
+    let test = read_capture_metadata_cached(output_root, test_path, archive_states);
+    pair.reference_log = reference.as_ref().map(|metadata| metadata.log.clone());
+    pair.test_log = test.as_ref().map(|metadata| metadata.log.clone());
+    setting_warning(
+        reference
+            .as_ref()
+            .and_then(|metadata| metadata.image_simplification.as_ref()),
+        test.as_ref()
+            .and_then(|metadata| metadata.image_simplification.as_ref()),
+    )
+}
+
+fn print_image_simplification_warning(pair: &ReportPair) {
+    if let Some(warning) = &pair.image_simplification_warning {
+        eprintln!(
+            "    {} {} → {}",
+            "WARNING:".yellow(),
+            pair.file_name,
+            warning.message
+        );
     }
 }
 
@@ -834,15 +877,14 @@ fn generate_selected_report(
             pair.diff = None;
             pair.diff_image = None;
             pair.engine_error_msg = None;
+            // Approval may have replaced the reference and its recorded settings.
+            pair.image_simplification_warning = None;
         }
 
-        pair.reference_log = crate::test::capture::read_capture_log_cached(
+        let simplification_warning = attach_capture_metadata(
+            &mut pair,
             output_root,
             &reference_path,
-            &mut archive_states,
-        );
-        pair.test_log = crate::test::capture::read_capture_log_cached(
-            output_root,
             &test_path,
             &mut archive_states,
         );
@@ -884,6 +926,7 @@ fn generate_selected_report(
             continue;
         }
 
+        pair.image_simplification_warning = simplification_warning;
         report_work.push(ReportWork::Compare(ComparisonJob {
             pair,
             reference_path,
@@ -945,6 +988,7 @@ fn generate_selected_report(
                         pair.file_name,
                         error
                     );
+                    print_image_simplification_warning(&pair);
                     pair.engine_error_msg = Some(format!("Comparison error: {}", error));
                     staged_entries.push(StagedReportEntry {
                         test: ReportTest {
@@ -1041,6 +1085,7 @@ fn finish_staged_compared_pair(
         pair.file_name,
         status_text,
     );
+    print_image_simplification_warning(&pair);
     pair.diff = Some(build_diff(&result));
     if !result.is_same_dimensions {
         pair.engine_error_msg = Some(format!(
@@ -1097,6 +1142,32 @@ fn record_comparison_diagnostic(suite_id: &str, test_date: &str, test: &mut Repo
                 duration_ms: None,
             },
         );
+        if test.pair.image_simplification_warning.is_some() {
+            // Fingerprints and kinds only: settings, selectors, and paths stay in
+            // report.json and the console.
+            context.record(
+                Stage::CaptureArtifacts,
+                DiagnosticEvent::Decision,
+                Severity::Warn,
+                [
+                    (Field::Command, FieldValue::Kind(SafeValue::Compare)),
+                    (Field::Condition, FieldValue::Kind(SafeValue::Images)),
+                    (
+                        Field::Target,
+                        FieldValue::Identity(SafeIdentity::fingerprint(suite_id)),
+                    ),
+                    (
+                        Field::Destination,
+                        FieldValue::Identity(SafeIdentity::fingerprint(test_date)),
+                    ),
+                    (
+                        Field::Artifact,
+                        FieldValue::Identity(SafeIdentity::fingerprint(&test.pair.file_name)),
+                    ),
+                ],
+                runtime::Completion::default(),
+            );
+        }
     }
 }
 
@@ -1175,6 +1246,18 @@ fn print_comparison_summary(report: &ReportConfig) {
         },
         report.tests.len()
     );
+    let warnings = report
+        .tests
+        .iter()
+        .filter(|test| test.pair.image_simplification_warning.is_some())
+        .count();
+    if warnings > 0 {
+        eprintln!(
+            "  {} {} comparison(s) used different image simplification settings for reference and test. Results are unchanged; run ref again or approve these captures so both sides match.",
+            "WARNING:".yellow(),
+            warnings
+        );
+    }
 }
 
 /// Generate a self-approved baseline report for `regressify ref` without
@@ -1320,12 +1403,7 @@ pub(crate) struct StagedSuiteComparison {
     default_mis_match_threshold: f64,
     semaphore: std::sync::Arc<tokio::sync::Semaphore>,
     entries: std::sync::Mutex<HashMap<String, StagedReportEntry>>,
-    archive_states: std::sync::Mutex<
-        BTreeMap<
-            crate::diagnostics::record::OperationId,
-            crate::diagnostics::journal::ArchiveState,
-        >,
-    >,
+    archive_states: std::sync::Mutex<ArchiveStates>,
 }
 
 impl StagedSuiteComparison {
@@ -1434,22 +1512,19 @@ impl StagedSuiteComparison {
             pixel_threshold,
             page_urls,
         );
-        {
+        let simplification_warning = {
             let mut archive_states = self
                 .archive_states
                 .lock()
                 .map_err(|_| anyhow!("Staged comparison archive cache lock poisoned"))?;
-            pair.reference_log = crate::test::capture::read_capture_log_cached(
+            attach_capture_metadata(
+                &mut pair,
                 output_root,
                 &reference_path,
-                &mut archive_states,
-            );
-            pair.test_log = crate::test::capture::read_capture_log_cached(
-                output_root,
                 &test_path,
                 &mut archive_states,
-            );
-        }
+            )
+        };
 
         let test_err = read_error_marker(&test_path);
         let ref_err = if reference_path.exists() {
@@ -1485,6 +1560,7 @@ impl StagedSuiteComparison {
             });
         }
 
+        pair.image_simplification_warning = simplification_warning;
         match compare_images_with_threshold(&reference_path, &test_path, pair.pixel_match_threshold)
         {
             Ok((result, diff_png)) => finish_compared_pair(
@@ -1501,6 +1577,7 @@ impl StagedSuiteComparison {
                     pair.file_name,
                     error
                 );
+                print_image_simplification_warning(&pair);
                 pair.engine_error_msg = Some(format!("Comparison error: {}", error));
                 Ok(StagedReportEntry {
                     test: ReportTest {
@@ -1925,6 +2002,7 @@ fn build_diff(result: &CompareResult) -> ReportDiff {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
 
     use super::*;
@@ -3343,6 +3421,339 @@ mod tests {
         );
         assert!(test_dir.join("home__$logo.png_diff.png").is_file());
         assert!(!test_dir.join("home__$logo_diff.png_diff.png").exists());
+    }
+
+    /// Write a capture and, when given, a digest-bound sidecar link recording
+    /// its image simplification setting, as capture jobs and promotion do.
+    fn write_capture(image: &Path, bytes: &[u8], setting: Option<serde_json::Value>) {
+        use sha2::{Digest, Sha256};
+        fs::write(image, bytes).unwrap();
+        if let Some(setting) = setting {
+            fs::write(
+                image.with_extension("log.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "state": "legacyUnavailable",
+                    "imageDigest": format!("{:x}", Sha256::digest(bytes)),
+                    "imageSimplification": setting,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    fn pixelate_setting(block_size: u32) -> serde_json::Value {
+        serde_json::json!({
+            "mode": "pixelate",
+            "blockSize": block_size,
+            "minSize": 64,
+            "excludeSelectorsDigest": crate::test::image_simplification::exclude_selectors_digest(&[]),
+        })
+    }
+
+    #[test]
+    fn image_simplification_setting_mismatches_warn_without_changing_comparison_results() {
+        use crate::diagnostics::{journal::JournalReader, record::*, runtime};
+        use serde_json::{Value, json};
+        let directory = tempfile::tempdir().unwrap();
+        let suite = directory.path().join("shop");
+        let run = suite.join("bitmaps_test/run");
+        let reference = suite.join("bitmaps_reference");
+        fs::create_dir_all(&run).unwrap();
+        fs::create_dir_all(&reference).unwrap();
+        let none = json!({ "mode": "none" });
+        let image = png_bytes(10);
+        // (capture, reference link setting, test link setting, warns); pixels match.
+        let cases = [
+            (
+                "same__FINAL",
+                Some(pixelate_setting(4)),
+                Some(pixelate_setting(4)),
+                false,
+            ),
+            (
+                "block__FINAL",
+                Some(pixelate_setting(8)),
+                Some(pixelate_setting(4)),
+                true,
+            ),
+            // Old references without a recorded setting.
+            ("legacy__FINAL", None, Some(pixelate_setting(4)), true),
+            ("legacy-none__FINAL", None, Some(none.clone()), false),
+            ("off__FINAL", Some(none.clone()), Some(none.clone()), false),
+            // A test run captured before settings were recorded.
+            ("old-run__FINAL", Some(pixelate_setting(4)), None, true),
+            (
+                "stale__FINAL",
+                Some(pixelate_setting(4)),
+                Some(pixelate_setting(4)),
+                true,
+            ),
+        ];
+        for (key, reference_setting, test_setting, _) in &cases {
+            write_capture(
+                &reference.join(format!("{key}.png")),
+                &image,
+                reference_setting.clone(),
+            );
+            write_capture(
+                &run.join(format!("{key}.png")),
+                &image,
+                test_setting.clone(),
+            );
+        }
+        // The stale reference changed after its link was written, so the link
+        // no longer vouches for it and its setting counts as unrecorded.
+        write_capture(
+            &reference.join("stale__FINAL.png"),
+            &png_bytes(11),
+            Some(pixelate_setting(4)),
+        );
+        fs::write(reference.join("stale__FINAL.png"), &image).unwrap();
+        // Pairs that are not compared get no settings warning.
+        write_capture(
+            &run.join("missing__FINAL.png"),
+            &image,
+            Some(pixelate_setting(4)),
+        );
+        write_capture(
+            &run.join("failed__FINAL.png"),
+            &image,
+            Some(pixelate_setting(4)),
+        );
+        write_capture(
+            &reference.join("failed__FINAL.png"),
+            &image,
+            Some(pixelate_setting(8)),
+        );
+        fs::write(
+            crate::test::capture::error_marker_path(&run.join("failed__FINAL.png")),
+            r#"{"error":true,"message":"Capture failed"}"#,
+        )
+        .unwrap();
+        let warned: BTreeSet<String> = cases
+            .iter()
+            .filter(|case| case.3)
+            .map(|case| format!("{}.png", case.0))
+            .collect();
+        let warnings_of = |report: &Value| -> BTreeMap<String, Value> {
+            report["tests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|test| {
+                    test["pair"]
+                        .get("imageSimplificationWarning")
+                        .map(|warning| {
+                            (
+                                test["pair"]["fileName"].as_str().unwrap().to_string(),
+                                warning.clone(),
+                            )
+                        })
+                })
+                .collect()
+        };
+
+        let mut generated = Value::Null;
+        for workers in [1, 3] {
+            let operation = runtime::Operation::start(
+                directory.path(),
+                OperationKind::Command,
+                None,
+                None,
+                None,
+            );
+            runtime::in_scope(Some(operation.context()), || {
+                generate_comparison_report(&suite, "shop", "run", 0.0, workers)
+            })
+            .unwrap();
+            let archive = operation.finish_blocking(Outcome::Success);
+            generated =
+                serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap();
+            let tests = generated["tests"].as_array().unwrap();
+            assert_eq!(tests.len(), 9);
+            for test in tests {
+                let name = test["pair"]["fileName"].as_str().unwrap();
+                if matches!(name, "missing__FINAL.png" | "failed__FINAL.png") {
+                    assert_eq!(test["status"], "fail", "{name}");
+                } else {
+                    // A settings warning never changes the comparison result.
+                    assert_eq!(test["status"], "pass", "{name}");
+                    assert_eq!(test["pair"]["comparisonOutcome"], "success", "{name}");
+                }
+            }
+            let warnings = warnings_of(&generated);
+            assert_eq!(warnings.keys().cloned().collect::<BTreeSet<_>>(), warned);
+            let block = &warnings["block__FINAL.png"];
+            assert_eq!(block["reference"], pixelate_setting(8));
+            assert_eq!(block["test"], pixelate_setting(4));
+            assert!(
+                block["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("reference: pixelate, 8 px blocks, 64 px minimum, no exclusions; test: pixelate, 4 px blocks")
+            );
+            let legacy = &warnings["legacy__FINAL.png"];
+            assert_eq!(legacy["reference"], Value::Null);
+            assert_eq!(legacy["test"], pixelate_setting(4));
+            assert!(
+                legacy["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("reference: no recorded setting; test: pixelate")
+            );
+            assert_eq!(warnings["old-run__FINAL.png"]["test"], Value::Null);
+            assert_eq!(warnings["stale__FINAL.png"]["reference"], Value::Null);
+
+            // One warning record per affected pair, carrying fingerprints only.
+            let reader = JournalReader::open(directory.path(), &archive.operation_id).unwrap();
+            let mut recorded = BTreeSet::new();
+            reader
+                .visit(|record| {
+                    if record.event_name != DiagnosticEvent::Decision
+                        || record.fields.get(&Field::Condition)
+                            != Some(&FieldValue::Kind(SafeValue::Images))
+                    {
+                        return;
+                    }
+                    assert_eq!(record.severity, Severity::Warn);
+                    assert_eq!(
+                        record.fields.get(&Field::Command),
+                        Some(&FieldValue::Kind(SafeValue::Compare))
+                    );
+                    for value in record.fields.values() {
+                        if let FieldValue::Identity(identity) = value {
+                            assert!(identity.as_str().starts_with("sha256:"), "{identity:?}");
+                        }
+                    }
+                    if let Some(FieldValue::Identity(artifact)) =
+                        record.fields.get(&Field::Artifact)
+                    {
+                        recorded.insert(artifact.as_str().to_string());
+                    }
+                })
+                .unwrap();
+            assert_eq!(
+                recorded,
+                warned
+                    .iter()
+                    .map(|name| SafeIdentity::fingerprint(name).as_str().to_string())
+                    .collect()
+            );
+        }
+
+        // The staged comparison used by `test` produces the same warnings.
+        let staged = StagedSuiteComparison::new(&suite, "shop", "run", 0.0, 2).unwrap();
+        staged
+            .compare_job_captures(&cases.map(|case| case.0.to_string()))
+            .unwrap();
+        staged.finalize().unwrap();
+        let staged_report: Value =
+            serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap();
+        assert_eq!(warnings_of(&staged_report), warnings_of(&generated));
+
+        // Readers of report.json accept the optional field, and reports without
+        // it (older releases, or no mismatch) keep their previous shape.
+        let parsed: ReportConfig = serde_json::from_value(generated.clone()).unwrap();
+        assert_eq!(
+            parsed
+                .tests
+                .iter()
+                .filter(|test| test.pair.image_simplification_warning.is_some())
+                .count(),
+            warned.len()
+        );
+        let mut legacy = generated.clone();
+        for test in legacy["tests"].as_array_mut().unwrap() {
+            test["pair"]
+                .as_object_mut()
+                .unwrap()
+                .remove("imageSimplificationWarning");
+        }
+        let parsed: ReportConfig = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(
+            parsed
+                .tests
+                .iter()
+                .all(|test| test.pair.image_simplification_warning.is_none())
+        );
+        assert!(
+            !serde_json::to_string(&parsed)
+                .unwrap()
+                .contains("imageSimplificationWarning")
+        );
+        #[cfg(feature = "desktop")]
+        for test in generated["tests"].as_array().unwrap() {
+            let result: crate::desktop::results::TestResult =
+                serde_json::from_value(test.clone()).unwrap();
+            assert!(!result.copy_summary().is_empty());
+        }
+
+        // Approval promotes each test capture's setting with its image.
+        approve_screenshots(&suite, Some("run")).unwrap();
+        generate_comparison_report(&suite, "shop", "run", 0.0, 1).unwrap();
+        let approved: Value =
+            serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap();
+        assert!(warnings_of(&approved).is_empty(), "{approved}");
+        assert!(
+            approved["tests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|test| test["pair"]["fileName"] != "failed__FINAL.png")
+                .all(|test| test["status"] == "pass")
+        );
+    }
+
+    #[test]
+    fn image_simplification_warnings_are_recalculated_after_viewport_approval() {
+        let directory = viewport_approval_fixture();
+        let suite = directory.path().join("shop");
+        let run = suite.join("bitmaps_test/reviewed");
+        // Pixelated test captures against references that predate recording.
+        for entry in fs::read_dir(&run).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap();
+            if is_capture_screenshot(name) {
+                let bytes = fs::read(&path).unwrap();
+                write_capture(&path, &bytes, Some(pixelate_setting(4)));
+            }
+        }
+        let scope = ["checkout".to_string(), "other".to_string()];
+        generate_comparison_report_for_scenarios(&suite, "shop", "reviewed", 20.0, 1, &scope)
+            .unwrap();
+        let warned = || -> BTreeSet<String> {
+            let report: ReportConfig =
+                serde_json::from_slice(&fs::read(run.join("report.json")).unwrap()).unwrap();
+            report
+                .tests
+                .iter()
+                .filter(|test| test.pair.image_simplification_warning.is_some())
+                .map(|test| test.pair.file_name.clone())
+                .collect()
+        };
+        // The failed viewport capture is not compared, so it has no warning.
+        assert_eq!(
+            warned(),
+            [
+                "checkout_desktop__$payment.png",
+                "checkout_desktop__FINAL.png",
+                "checkout_mobile__FINAL.png",
+                "other_desktop__FINAL.png",
+            ]
+            .map(String::from)
+            .into()
+        );
+        approve_scenario_viewport(&suite, "reviewed", "checkout", "checkout_desktop__FINAL")
+            .unwrap();
+        // The reviewed report's old warnings are not carried over for the
+        // approved viewport, whose references now record the test setting.
+        assert_eq!(
+            warned(),
+            ["checkout_mobile__FINAL.png", "other_desktop__FINAL.png"]
+                .map(String::from)
+                .into()
+        );
     }
 
     #[test]

@@ -104,6 +104,13 @@ async fn prepare_screenshot_inner(
         stabilize_capture_animations(page, log_prefix).await?;
     }
 
+    // Flag images only now, on the settled page: no observers or timers keep
+    // them updated, and the settle observer never watches data attributes.
+    // Callers remove the flags after their screenshot (`restore_after`).
+    if let Some(simplifier) = super::image_simplification::ImageSimplifier::from_config(config)? {
+        simplifier.prepare(page).await?;
+    }
+
     diagnostics::stage(
         Stage::ScreenshotSettling,
         [(Field::Condition, FieldValue::Kind(SafeValue::Caret))],

@@ -141,6 +141,22 @@ describe("snapshot contract", () => {
         }).success,
       ).toBe(true);
     }
+    const simplification = logRecordSchema.parse({
+      ...record,
+      stage: "screenshotSettling",
+      fields: {
+        condition: { type: "kind", value: "images" },
+        simplifiedImages: { type: "number", value: 4 },
+        smallImages: { type: "number", value: 3 },
+        excludedImages: { type: "number", value: 2 },
+        filteredImages: { type: "number", value: 1 },
+        transformedImages: { type: "number", value: 0 },
+        overlappedImages: { type: "number", value: 5 },
+        invalidSelectors: { type: "number", value: 1 },
+      },
+    });
+    expect(formatLogRecord(simplification)).toContain("simplifiedImages=4");
+    expect(formatLogRecord(simplification)).toContain("invalidSelectors=1");
     expect(formatLogRecord(parsed)).toContain("statusCode=200");
     expect(matchesLog(parsed, "error", "all", "")).toBe(false);
     expect(matchesLog(parsed, "debug", "navigation", "STATUSCODE")).toBe(true);

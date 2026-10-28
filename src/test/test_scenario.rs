@@ -14,6 +14,7 @@ use crate::{
             save_screenshot, saved_screenshot_types, validate_cookie_value,
             validate_screenshot_types, write_error_screenshots,
         },
+        image_simplification::{ImageSimplifier, restore_after},
         page_stability::{prepare_screenshot, stabilize_capture_animations, trigger_lazy_loading},
         test_action::{ActionExecutionContext, exec_test_action},
     },
@@ -864,28 +865,34 @@ async fn run_scenario_capture_inner(
         tokio::time::sleep(std::time::Duration::from_millis(wait_ms as u64)).await;
     }
 
-    prepare_screenshot(&active.page, resolved, log_prefix).await?;
-
-    for screenshot_type in screenshot_types {
-        hooks.apply(&active.page).await?;
-        if let Some(tabs) = &active.tabs {
-            tabs.check().await?;
+    // Images flagged during preparation stay flagged for every final target
+    // of this preparation, then are restored even when a capture fails.
+    let simplifier = ImageSimplifier::from_config(resolved)?;
+    let captured = async {
+        prepare_screenshot(&active.page, resolved, log_prefix).await?;
+        for screenshot_type in screenshot_types {
+            hooks.apply(&active.page).await?;
+            if let Some(tabs) = &active.tabs {
+                tabs.check().await?;
+            }
+            if let Some(authentication) = &active.authentication {
+                authentication.check()?;
+            }
+            save_screenshot(
+                test_suite,
+                scenario,
+                &active.page,
+                screenshot_type.clone(),
+                viewport_label,
+                scenario.selector.as_deref(),
+                simplifier.as_ref(),
+            )
+            .await?;
         }
-        if let Some(authentication) = &active.authentication {
-            authentication.check()?;
-        }
-        save_screenshot(
-            test_suite,
-            scenario,
-            &active.page,
-            screenshot_type.clone(),
-            viewport_label,
-            scenario.selector.as_deref(),
-        )
-        .await?;
+        Ok(())
     }
-
-    Ok(())
+    .await;
+    restore_after(simplifier.as_ref(), &active.page, captured).await
 }
 
 /// Apply urlReplacements from the test suite to a URL.
