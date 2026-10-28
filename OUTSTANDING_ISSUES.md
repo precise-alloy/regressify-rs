@@ -107,7 +107,6 @@ are historical evidence, not open implementation tasks.
   fix) succeed. Found while adding image simplification Fields; unrelated to
   those keys, whose native regression resets only trailing entries.
 
-
 ## GitHub Draft Asset URLs (2026-10-23)
 
 - Resolved locally: [v2.0.6 publication](https://github.com/precise-alloy/regressify-rs/actions/runs/39873111082/job/120161484370)
