@@ -1006,6 +1006,13 @@ Windows packaging job prevents publication.
    Only `latest.txt`, installation scripts, website assets, and `/mcp` are hosted
    there. The final credential-free feed check verifies the installer metadata.
 
+Website-only changes do not need a release. The
+[website deploy workflow](../.github/workflows/website-deploy.yml) runs on `master`
+pushes that touch `website/**` (or manually). It reads the live `latest.txt`,
+downloads the Linux CLI of its `tag` with `gh release download`, checks it against
+the feed's SHA-256, and runs the same deploy script. The update feed and `/mcp` keep the deployed release; a final check
+confirms the live feed is byte-for-byte unchanged.
+
 Previous release binaries remain downloadable from GitHub. The website/feed
 selects the version associated with its deployment, not GitHub's mutable latest
 redirect. Configure `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` repository

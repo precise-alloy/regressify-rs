@@ -131,6 +131,13 @@ manifest, copies only `latest.txt` into `dist/downloads/`, generates the MCP Wor
 into ignored `mcp-worker/` with the released CLI, verifies it, and deploys with
 [wrangler.jsonc](wrangler.jsonc).
 
+Docs and site changes deploy without a release. Pushing website changes to
+`master` (or running it manually) starts the
+[website deploy workflow](../.github/workflows/website-deploy.yml). It fetches the
+live `/downloads/latest.txt`, downloads the Linux CLI of that release tag from
+GitHub, checks it against the feed's SHA-256, and runs the same deploy script.
+The update feed and `/mcp` stay on the deployed release; only pages change.
+
 That configuration deploys one Worker, `regressify`, on the custom domain
 `regressify.eshn.dev` with `workers.dev` and preview URLs disabled. `dist/` serves
 static assets with `404.html` for unknown paths. The website-owned

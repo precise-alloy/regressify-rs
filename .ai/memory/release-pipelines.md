@@ -1,6 +1,6 @@
 # Release Pipelines
 
-Verified: 2026-10-23
+Verified: 2026-10-29
 
 - [GitHub](../../.github/workflows/tuyen-release.yml) publishes only automatic
   tags in `precise-alloy/regressify-rs`; Azure publishing is retired. Eight build
@@ -40,12 +40,21 @@ Verified: 2026-10-23
   first, rely on Cloudflare Access for `/admin` and `/admin/*`, and use server-only
   PostHog secrets. Combined typecheck and dry-run build precede deployment; see
   [local checks and setup](../../website/README.md#private-admin).
+- [Website-only deploys](../../.github/workflows/website-deploy.yml) skip the app
+  build. `website/mcp-worker` is git-ignored and bundled into the same Worker
+  script, so each deploy regenerates it with the live release's Linux CLI. The
+  zip must match the live feed's `archive.` SHA-256: only the release pipeline
+  writes that feed, while `gh release download` verifies nothing.
+  Docs deploys and release deploys share no concurrency group; that overlap risk
+  was accepted on 2026-10-29.
 - Workerd rejects `fetch` with `redirect: 'error'`; the admin feed uses `manual`
   and rejects non-2xx responses without forwarding bearer credentials. Website
   tests are scoped to `src` so an ignored MCP export cannot pollute discovery.
 - [Offline tests](../../ci/test-release.py) exercise all 48 GitHub selections,
   full inventories and mocked publication, all supported Unix target scripts,
   and mocked Windows script execution. Set `BASH_PATH` to Git Bash on Windows.
+  Release checks also run on `macos-15` (Bash 3.2 only, no GNU `sha256sum`),
+  so tests that run ubuntu-only workflow steps skip there (`website_step_bash`).
 - Build jobs use GitHub Actions' default timeout, without `timeout-minutes` or a
   matrix `timeout` field. v2.0.3 failed offline checks because a stale desktop
   assertion still indexed that field; matrix regressions now assert its absence.

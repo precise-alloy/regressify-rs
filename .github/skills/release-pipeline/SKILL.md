@@ -7,7 +7,7 @@ description: 'Use when changing GitHub Actions release matrices, Rust target bui
 
 ## Start Here
 
-[GitHub release](../../workflows/tuyen-release.yml), [build script](../../../ci/make-release.sh), [release feed helper](../../../ci/release_feed.py), [Cloudflare deploy script](../../../ci/deploy-cloudflare.sh), [website Worker config](../../../website/wrangler.jsonc), and [offline release tests](../../../ci/test-release.py). Frontend asset publication uses [snapshot-assets.yml](../../workflows/snapshot-assets.yml).
+[GitHub release](../../workflows/tuyen-release.yml), [build script](../../../ci/make-release.sh), [release feed helper](../../../ci/release_feed.py), [Cloudflare deploy script](../../../ci/deploy-cloudflare.sh), [website Worker config](../../../website/wrangler.jsonc), and [offline release tests](../../../ci/test-release.py). Frontend asset publication uses [snapshot-assets.yml](../../workflows/snapshot-assets.yml). Website-only deploys use [website-deploy.yml](../../workflows/website-deploy.yml).
 
 ## Procedure and Invariants
 
@@ -30,6 +30,7 @@ description: 'Use when changing GitHub Actions release matrices, Rust target bui
    Tests must switch to canonical tagged asset URLs after publication and reject
    temporary URLs in published-release verification.
 1. The website hosts metadata, install scripts, static pages, `/mcp`, and private `/admin/`; binaries remain on GitHub. Build from the verified manifest before exporting `website/mcp-worker`, copy only `latest.txt` into `dist/downloads`, verify the generated package, then run website `worker:check` and `worker:build` before deploying. The website-owned `worker/index.ts` delegates MCP unchanged; `run_worker_first` covers `/mcp`, `/admin`, `/admin/*`. Access must protect both admin paths and its API; PostHog bindings stay server-only and no-store. Keep compatibility settings aligned; only deployment receives Cloudflare secrets.
+   Website-only deploys never change the feed: they reuse the live `latest.txt`, regenerate `/mcp` with that tag's Linux CLI only after its SHA-256 matches the feed's `archive.` record, and finish by comparing the live feed bytes. Fail on a missing tag: `gh release download` without one falls back to GitHub's latest release.
 1. Keep preparation/verification separate from publication. A script or workflow edit does not authorize a tag, release upload, real remote operation, or install.
 1. Validate external responses and URLs with bounded reads and clear errors. Never print publishing secrets or embed credentials in artifacts/manifests.
 1. Azure release publishing is retired. Keep workflow concurrency serialized and build/publish credentials separate. Windows scripts require Git Bash. Do not use a glibc C compiler as a Musl sysroot substitute.

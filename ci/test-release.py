@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,6 +26,39 @@ WORKFLOW = yaml.load(
     (ROOT / ".github/workflows/tuyen-release.yml").read_text(encoding="utf-8"),
     Loader=yaml.BaseLoader,
 )
+WEBSITE_WORKFLOW = yaml.load(
+    (ROOT / ".github/workflows/website-deploy.yml").read_text(encoding="utf-8"),
+    Loader=yaml.BaseLoader,
+)
+# Steps that fetch and check the deployed release's CLI, in workflow order.
+WEBSITE_CLI_STEPS = [
+    "Download deployed release manifest",
+    "Read deployed release tag and CLI checksum",
+    "Download the deployed release's Linux CLI",
+    "Verify the Linux CLI against the deployed feed",
+    "Extract the Linux CLI",
+]
+# One `command -v` per tool: with several names it succeeds when any one resolves.
+WEBSITE_BASH_PROBE = ('echo "${BASH_VERSINFO[0]}"; '
+                      'for tool in sha256sum unzip; do command -v "$tool" >/dev/null || echo missing; done')
+
+
+def bash_runs_website_steps(probe_output):
+    """True when WEBSITE_BASH_PROBE output shows Bash 4+ with sha256sum and unzip."""
+    lines = probe_output.split()
+    return bool(lines) and lines[0].isdigit() and int(lines[0]) >= 4 and "missing" not in lines
+
+
+def website_step_bash():
+    """Bash that can run website-deploy steps, which target ubuntu-latest; None elsewhere.
+    The macOS release checks have only Bash 3.2 and no GNU sha256sum."""
+    bash = os.environ.get("BASH_PATH") or shutil.which("bash")
+    if not bash:
+        return None
+    probe = subprocess.run([bash, "-c", WEBSITE_BASH_PROBE], capture_output=True, text=True, check=False)
+    return bash if bash_runs_website_steps(probe.stdout) else None
+
+
 MATRIX_STEP = next(
     step for step in WORKFLOW["jobs"]["set-matrix"]["steps"] if step.get("id") == "matrix"
 )
@@ -529,6 +563,185 @@ gh() {
                 expected = {"cli", "desktop"} if ref_type == "tag" and build != "cli" and selected else set()
                 self.assertEqual({row["application"] for row in payloads}, expected)
                 self.assertTrue(all(row["target"] == "x86_64-pc-windows-msvc" for row in payloads))
+
+    def test_website_workflow_redeploys_the_deployed_release(self):
+        self.assertEqual(WEBSITE_WORKFLOW["on"]["push"]["branches"], ["master"])
+        self.assertIn("website/**", WEBSITE_WORKFLOW["on"]["push"]["paths"])
+        self.assertIn("workflow_dispatch", WEBSITE_WORKFLOW["on"])
+        self.assertEqual(WEBSITE_WORKFLOW["permissions"], {"contents": "read"})
+        self.assertEqual(WEBSITE_WORKFLOW["defaults"], {"run": {"shell": "bash"}})
+        self.assertEqual(set(WEBSITE_WORKFLOW["jobs"]), {"deploy"})
+        deploy = WEBSITE_WORKFLOW["jobs"]["deploy"]
+        self.assertIn("github.repository == 'precise-alloy/regressify-rs'", deploy["if"])
+        self.assertEqual(deploy["env"], {"SITE_ORIGIN": "https://regressify.eshn.dev",
+                                         "CLI_ARCHIVE": "regressify-cli-x86_64-unknown-linux-gnu.zip"})
+        steps = deploy["steps"]
+        self.assertEqual(steps[0]["with"], {"persist-credentials": "false"})
+        by_name = {step.get("name"): step for step in steps}
+        names = WEBSITE_CLI_STEPS + ["Deploy Cloudflare Worker", "Verify update feed is unchanged"]
+        indexes = [steps.index(by_name[name]) for name in names]
+        self.assertEqual(indexes, sorted(indexes))
+        self.assertEqual(by_name[WEBSITE_CLI_STEPS[1]]["id"], "release")
+        self.assertEqual(by_name[WEBSITE_CLI_STEPS[2]]["env"], {
+            "GH_TOKEN": "${{ github.token }}", "TAG": "${{ steps.release.outputs.tag }}"})
+        self.assertEqual(by_name[WEBSITE_CLI_STEPS[3]]["env"], {"SHA256": "${{ steps.release.outputs.cli-sha256 }}"})
+        self.assertIn("sha256sum --check --strict", by_name[WEBSITE_CLI_STEPS[3]]["run"])
+        run = by_name["Deploy Cloudflare Worker"]
+        self.assertEqual(run["run"], "bash ci/deploy-cloudflare.sh")
+        self.assertEqual(run["env"]["CLOUDFLARE_ACCOUNT_ID"], "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}")
+        self.assertEqual(run["env"]["CLOUDFLARE_API_TOKEN"], "${{ secrets.CLOUDFLARE_API_TOKEN }}")
+        self.assertEqual(run["env"]["DOWNLOADS_DIR"], "${{ runner.temp }}/downloads")
+        self.assertEqual(run["env"]["REGRESSIFY_BIN"], "${{ runner.temp }}/cli/regressify")
+        self.assertIn('cmp "$RUNNER_TEMP/downloads/latest.txt"', by_name["Verify update feed is unchanged"]["run"])
+        for step in steps:
+            self.assertNotIn("continue-on-error", step)
+            self.assertNotIn("always()", step.get("if", ""))
+            # Values from the feed reach scripts through env, never as expanded script text.
+            self.assertNotIn("${{", step.get("run", ""))
+            if step is not run:
+                self.assertNotIn("secrets.", json.dumps(step))
+
+    def run_website_steps(self, bash, env):
+        """Runs WEBSITE_CLI_STEPS like GitHub: one `bash -eo pipefail` process per step with
+        job and step env, step outputs via GITHUB_OUTPUT, stopping at the first failure."""
+        job = WEBSITE_WORKFLOW["jobs"]["deploy"]
+        steps = {step.get("name"): step for step in job["steps"]}
+        outputs = {}
+        ran = []
+        prefix = 'if command -v cygpath >/dev/null; then STUB_DIR="$(cygpath -u "$STUB_DIR")"; fi\n'
+        prefix += 'export PATH="$STUB_DIR:$PATH"\n'
+
+        def expression(match):
+            value = match.group(1)
+            if value == "github.token":
+                return "synthetic-token"
+            step_id, _, name = value.removeprefix("steps.").partition(".outputs.")
+            self.assertTrue(value.startswith("steps.") and name, value)
+            return outputs.get(step_id, {}).get(name, "")
+
+        for index, name in enumerate(WEBSITE_CLI_STEPS):
+            step = steps[name]
+            output = Path(env["RUNNER_TEMP"]) / f"github-output-{index}"
+            step_env = {key: re.sub(r"\$\{\{\s*(.+?)\s*\}\}", expression, value)
+                        for key, value in step.get("env", {}).items()}
+            result = subprocess.run(
+                [bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", prefix + step["run"]], cwd=ROOT,
+                env={**env, **job["env"], **step_env, "GITHUB_OUTPUT": output.as_posix()},
+                capture_output=True, text=True, check=False)
+            ran.append(name)
+            if result.returncode != 0:
+                return ran, outputs, result
+            if "id" in step and output.exists():
+                lines = output.read_text(encoding="utf-8").splitlines()
+                outputs[step["id"]] = dict(line.split("=", 1) for line in lines)
+        return ran, outputs, result
+
+    def test_website_workflow_extracts_the_deployed_release_cli(self):
+        bash = website_step_bash()
+        if not bash:
+            self.skipTest("Website deploy steps need Bash 4+ with sha256sum and unzip (ubuntu-latest)")
+        archive_name = "regressify-cli-x86_64-unknown-linux-gnu.zip"
+        stub_sources = {
+            "curl": (
+                "#!/usr/bin/env bash\n"
+                'printf "curl %s\\n" "$*" >> "$CALL_LOG"\n'
+                'while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\n'
+                'mkdir -p "$(dirname "$out")"\n'
+                'cp "$FIXTURES/latest.txt" "$out"\n'
+            ),
+            # Only the deployed tag exists, like `gh release download` on a real repository.
+            "gh": (
+                "#!/usr/bin/env bash\n"
+                'printf "gh %s\\n" "$*" >> "$CALL_LOG"\n'
+                '[ "$3" = v1.2.3 ] || { echo "release not found" >&2; exit 1; }\n'
+                'cp "$FIXTURES/archive.zip" "$9/$7"\n'
+            ),
+        }
+        # The step each broken feed must stop at; None means every step succeeds.
+        cases = {
+            "valid": None,
+            "crlf": None,
+            "missing-tag": WEBSITE_CLI_STEPS[1],
+            "unknown-tag": WEBSITE_CLI_STEPS[2],
+            "bad-digest": WEBSITE_CLI_STEPS[3],
+            "missing-archive": WEBSITE_CLI_STEPS[3],
+        }
+        for case, failing_step in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                stubs = root / "stubs"
+                fixtures = root / "fixtures"
+                runner = root / "runner"
+                for path in (stubs, fixtures, runner):
+                    path.mkdir()
+                for name, source in stub_sources.items():
+                    (stubs / name).write_text(source, encoding="utf-8", newline="\n")
+                    (stubs / name).chmod(0o755)
+                with zipfile.ZipFile(fixtures / "archive.zip", "w") as zf:
+                    zf.writestr("regressify", "synthetic cli")
+                    zf.writestr("LICENSE", "AGPL")
+                data = (fixtures / "archive.zip").read_bytes()
+                digest = "0" * 64 if case == "bad-digest" else hashlib.sha256(data).hexdigest().upper()
+                archives = [] if case == "missing-archive" else [(archive_name, len(data), digest)]
+                manifest = release_feed.manifest_text("v1.2.3", "1.2.3.0", 22, "a" * 64, archives)
+                if case == "crlf":
+                    manifest = manifest.replace("\n", "\r\n")
+                elif case == "missing-tag":
+                    manifest = manifest.replace("tag=v1.2.3\n", "")
+                elif case == "unknown-tag":
+                    manifest = manifest.replace("tag=v1.2.3", "tag=v9.9.9")
+                (fixtures / "latest.txt").write_bytes(manifest.encode("utf-8"))
+                log = root / "calls.log"
+                env = dict(os.environ, STUB_DIR=stubs.as_posix(), FIXTURES=fixtures.as_posix(),
+                           RUNNER_TEMP=runner.as_posix(), CALL_LOG=log.as_posix())
+                ran, outputs, result = self.run_website_steps(bash, env)
+                calls = log.read_text(encoding="utf-8").splitlines()
+                self.assertTrue(calls[0].startswith("curl "))
+                self.assertTrue(calls[0].endswith(" https://regressify.eshn.dev/downloads/latest.txt"))
+                self.assertEqual((runner / "downloads/latest.txt").read_bytes(), manifest.encode("utf-8"))
+                if failing_step is None:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(ran, WEBSITE_CLI_STEPS)
+                    self.assertEqual(outputs["release"], {"tag": "v1.2.3", "cli-sha256": digest})
+                    self.assertEqual(calls[1:], [
+                        f"gh release download v1.2.3 --repo precise-alloy/regressify-rs "
+                        f"--pattern {archive_name} --dir {runner.as_posix()}"])
+                    self.assertEqual((runner / "cli/regressify").read_text(encoding="utf-8"), "synthetic cli")
+                    continue
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(ran[-1], failing_step, result.stderr)
+                # A rejected CLI is never extracted, so it can never run.
+                self.assertFalse((runner / "cli").exists())
+                if case == "missing-tag":
+                    # Never fall back to gh's implicit "latest release" download.
+                    self.assertEqual(len(calls), 1)
+                    self.assertIn("has no tag", result.stderr)
+
+    def test_website_step_bash_requires_bash_4_and_gnu_tools(self):
+        # "3" is macOS Bash 3.2; "missing" means sha256sum or unzip is absent.
+        for output in ["3\n", "5\nmissing\n", "", "x\n"]:
+            with self.subTest(output=output):
+                self.assertFalse(bash_runs_website_steps(output))
+        self.assertTrue(bash_runs_website_steps("5\n"))
+        bash = website_step_bash()
+        if bash:
+            probe = subprocess.run([bash, "-c", WEBSITE_BASH_PROBE], capture_output=True, text=True, check=False)
+            self.assertTrue(bash_runs_website_steps(probe.stdout), probe.stdout)
+
+    def test_website_step_bash_rejects_a_path_missing_one_tool(self):
+        bash = website_step_bash()
+        if not bash:
+            self.skipTest("Website deploy steps need Bash 4+ with sha256sum and unzip (ubuntu-latest)")
+        for tools in [(), ("sha256sum",), ("unzip",), ("sha256sum", "unzip")]:
+            with self.subTest(tools=tools), tempfile.TemporaryDirectory() as directory:
+                # Stubs only need to resolve through `command -v`; the probe never runs them.
+                for name in tools:
+                    stub = Path(directory) / name
+                    stub.write_text("#!/bin/sh\n", encoding="utf-8", newline="\n")
+                    stub.chmod(0o755)
+                with mock.patch.dict(os.environ, {"BASH_PATH": bash, "PATH": directory}):
+                    expected = bash if len(tools) == 2 else None
+                    self.assertEqual(website_step_bash(), expected)
 
     def test_release_build_arguments(self):
         bash = os.environ.get("BASH_PATH") or shutil.which("bash")
