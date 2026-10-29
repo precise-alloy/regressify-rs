@@ -171,9 +171,13 @@ average color just before every screenshot, including `save` checkpoints.
 Qualifying images are `img`, `video`, and SVG `image` elements rendered at least
 `imageSimplificationMinSize` CSS pixels wide and high. These stay sharp: images
 matching an `imageSimplificationExcludeSelectors` entry or inside a matching
-element; images that already have a CSS `filter`; scaled, zoomed, skewed, or
-fractionally moved images; and images whose simplification could change which
-content paints on top, such as overlaid text or badges. Iframes, shadow DOM,
+element; images that already have a CSS `filter`, or a border, padding,
+rounded corners, a box shadow, an outline, a clip path, or a mask; scaled,
+zoomed, skewed, or fractionally moved images, images rotated other than in
+quarter turns, and images rotated a quarter turn while their width and height
+differ by an odd number of pixels; SVG `image` elements not placed at `x` and
+`y` 0 or under a fractional SVG translation; and images whose simplification
+could change which content paints on top, such as overlaid text or badges. Iframes, shadow DOM,
 canvas, and CSS background images are unchanged. Exclusion selectors that the
 browser rejects match nothing. Images are flagged only while each screenshot is
 taken. Write `none`, not `off`; YAML 1.1 tools read an unquoted `off` as `false`.

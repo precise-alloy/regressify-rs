@@ -314,8 +314,11 @@ browser developer tools, with authorization.
 - Image unexpectedly sharp with `pixelate`: read the capture log's decision
   counts. `smallImages` are below `imageSimplificationMinSize`; `excludedImages`
   match an exclusion or sit inside a matching element; `filteredImages` already
-  have a CSS `filter`; `transformedImages` are scaled, zoomed, skewed, or moved
-  by fractional pixels; `overlappedImages` have text, badges, or sticky content
+  have a CSS `filter` or a border, padding, rounded corners, box shadow,
+  outline, clip path, or mask; `transformedImages` are scaled, zoomed, skewed,
+  moved by fractional pixels, turned a quarter turn with an odd width and height
+  difference, or are SVG images away from `x`/`y` 0 or under a fractional SVG
+  translation; `overlappedImages` have text, badges, or sticky content
   painted on top. A nonzero `invalidSelectors` means an exclusion is not valid
   CSS and matches nothing. These are expected outcomes, not capture failures.
 - Image simplification settings warning: a pair's

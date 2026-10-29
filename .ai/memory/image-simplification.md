@@ -1,6 +1,6 @@
 # Image Simplification
 
-Verified: 2026-10-26
+Verified: 2026-10-28
 
 Opt-in in-page pixelation of large images just before screenshots. Scope limits,
 the deferred report/desktop badge, and related capture defects are in the
@@ -33,26 +33,28 @@ the deferred report/desktop badge, and related capture defects are in the
   simplifier, so no page work happens.
 - `ensure` runs in [document hook setup](../../src/test/hooks.rs) after CSS and
   before ready scripts, and again before marking; it re-creates a removed host
-  or adopted sheet. The host is a zero-size `<svg>` under `<html>` styled through
-  CSSOM and the rule lives in a constructed stylesheet, because strict
-  `style-src` CSP silently drops injected `<style>` elements, as it does for hook
-  CSS and caret hiding. IDs carry a per-process token.
+  or adopted sheet. The host is a zero-size CSSOM-styled `<svg>` under `<html>`
+  and the rule a constructed stylesheet, because strict `style-src` CSP drops
+  injected `<style>` (as for hook CSS and caret hiding). IDs carry a run token.
 - Filter: block-start means (`feConvolveMatrix`, target 0, edge duplicate), one
   sample per block (tiled flood plus composite `in`), then two separable copy
   convolutions (divisor 1, edge none). The approved centre-sample/dilation chain
   had equal means but left transparent right/bottom strips when width mod block
   was 1 to block/2-1 and erased images under half a block; copying is no slower.
-- Scale, zoom, skew, non-quarter-turn rotation, or fractional translation on the
-  image or an ancestor, and SVG images whose screen CTM scales, gave seams or one
-  flat colour with both chains, so they stay sharp (`transformedImages`). Integer
-  translation, flips, quarter turns, `will-change`, fixed/sticky positions, and
-  fractional layout positions keep exact blocks.
+- Fractional translation (composed around `transform-origin`, so quarter turns
+  with an odd width/height difference count), scale, zoom, skew, or other
+  rotation on the image or an ancestor seams blocks, so such images stay sharp
+  (`transformedImages`), as do SVG images that scale, sit off user-space (0, 0)
+  (the sample dot is there, so they erase), or sit at a fractional offset in the
+  outermost `<svg>`. Flips, other quarter turns, `will-change`, fixed/sticky, and
+  fractional layout positions keep exact blocks. Borders, padding, radii,
+  shadows, outlines, clip paths, and masks count as filtered (blended or clipped).
 - `mark`: clear flags, ensure, count and ignore invalid exclusions (like invalid
   `hideSelectors` rules), then classify visible light-DOM `img`, `video`, and
   `svg image` elements: small, excluded (`closest`, so containers work), already
-  filtered, transformed, then the paint-order guard. Flags are `pixelate` or
-  `sharp`; a promoted image whose computed filter does not apply (page cascade
-  wins) is unflagged and counted as filtered.
+  filtered or decorated, transformed, then the paint-order guard. Flags are
+  `pixelate` or `sharp`; a promoted image whose computed filter does not apply
+  (page cascade wins) is unflagged and counted as filtered.
 - Paint-order risk: a filter makes a non-positioned image a z-index auto stacking
   context, so it can paint over CSS-grid overlay text, a negative-margin badge,
   or an earlier positioned z-index auto badge; a later positioned overlay stays
@@ -62,15 +64,14 @@ the deferred report/desktop badge, and related capture defects are in the
   positioned/stacking z-index auto/0 content in that layer. Positive and negative
   z-index keep their order; later block backgrounds already paint beneath.
   Overflow clips honour containing blocks; SVG images never change order.
+  Generated boxes follow relative offsets and transforms; shadows add reach.
 - `restore_after` removes flags after the final-capture loop and after each `save`,
   even on failure. [Selector captures](../../src/test/capture.rs) `refresh` the
-  guard after centring the target and after restoring scroll; full-page
-  `captureBeyondViewport` keeps fixed elements at their current viewport position,
-  so geometry measured before full-page and viewport captures stays valid.
+  guard after centring the target and restoring scroll; full-page captures keep
+  fixed elements in place, so geometry measured before any capture stays valid.
 - Diagnostics: one Decision per preparation on `condition: images` with seven
   count fields (Warn for invalid selectors); refresh records add debug counts.
-- Cost on a synthetic 11k-element page with 400 candidates: about 0.7-0.9 s per
-  marking pass and 0.6-0.7 s per refresh; the bound is 30 s.
+  Cost at 400 candidates, 11k elements: 0.7-0.9 s per mark, 0.6-0.7 s per refresh.
 
 ## Recording and Warnings
 
@@ -106,9 +107,8 @@ Reported by the approved 2026-10-23 experiments on real pages, not re-measured:
 
 ## Open Issues
 
-- Guard blind spots (closed shadow roots, generated content of
-  `display: contents` elements, in-flow generated content offsets) are in the
-  outstanding issues; none has been observed on a real page.
+- Guard blind spots (closed shadow roots, generated boxes, ancestor drop shadows)
+  are in the outstanding issues; none has been observed on a real page.
 - GPU full-page captures taller than 16384 px repeat rows (seen on the measured
   pages, reproduced with a loopback probe); judge tall captures with that in mind.
 
@@ -116,5 +116,5 @@ Reported by the approved 2026-10-23 experiments on real pages, not re-measured:
 
 Unit tests: `cargo test --lib image_simplification`, also with `--features desktop`.
 Live fixtures with cached Chromium: `cargo test --lib test::browser_tests::image_simplification_ -- --ignored --test-threads=1`.
-Temporary mutations (guard allows all, no selector refresh, no restore after
-`save`, approved dilation chain with a 67 px image) each failed those fixtures.
+Temporary mutations (guard allows all, no selector refresh or `save` restore,
+dilation chain at 67 px, each sharp-case check reverted) failed the fixtures.

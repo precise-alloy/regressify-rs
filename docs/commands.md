@@ -891,8 +891,12 @@ identities only. Web snapshots and desktop Results do not show the warning yet.
 
 Each screenshot's preparation records one capture-log decision with counts only:
 `simplifiedImages`, and for images kept sharp `smallImages`, `excludedImages`,
-`filteredImages` (already filtered), `transformedImages` (scaled, zoomed, or
-fractionally moved), and `overlappedImages` (content painted on top), plus
+`filteredImages` (already filtered, or decorated with a border, padding,
+rounded corners, a box shadow, an outline, a clip path, or a mask, which the
+filter would blend or clip), `transformedImages` (scaled, zoomed, fractionally
+moved, rotated a quarter turn with an odd width and height difference, or SVG
+images not at `x`/`y` 0 or under a fractional SVG translation), and
+`overlappedImages` (content painted on top), plus
 `invalidSelectors` for exclusions the browser rejected, logged as a warning.
 Selector captures repeat the overlap check after scrolling their target into
 view. The records never contain selectors, URLs, or paths.

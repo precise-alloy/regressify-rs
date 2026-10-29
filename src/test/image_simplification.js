@@ -159,6 +159,43 @@ const alignedScale = (value) => value === 'none' ||
 const alignedTransform = (style) => alignedMatrix(style.transform) && alignedTranslate(style.translate) &&
   alignedRotate(style.rotate) && alignedScale(style.scale);
 
+const lengthPx = (value) => (/^-?[\d.]+(?:e[-+]?\d+)?px$/.test(value) ? Number.parseFloat(value) : null);
+
+// An element's translate, rotate, scale, and transform composed in CSS order
+// around its transform-origin, in px relative to its border box. The computed
+// `transform` alone omits the origin, and rotate/scale also apply around it.
+// Null when a value does not resolve to px (for example a percentage translate).
+const transformMatrix = (style) => {
+  const origin = style.transformOrigin.split(/\s+/).map(lengthPx);
+  if (origin.length < 2 || origin.includes(null)) return null;
+  const [ox, oy, oz = 0] = origin;
+  const parts = [`translate3d(${ox}px, ${oy}px, ${oz}px)`];
+  if (style.translate !== 'none') {
+    const [x, y = '0px', z = '0px'] = style.translate.split(/\s+/);
+    parts.push(`translate3d(${x}, ${y}, ${z})`);
+  }
+  if (style.rotate !== 'none') {
+    const tokens = style.rotate.split(/\s+/);
+    const angle = tokens.pop();
+    const named = { x: '1, 0, 0', y: '0, 1, 0', z: '0, 0, 1' };
+    const axis = tokens.length === 0 ? named.z : tokens.length === 1 ? named[tokens[0]] : tokens.join(', ');
+    if (axis === undefined) return null;
+    parts.push(`rotate3d(${axis}, ${angle})`);
+  }
+  if (style.scale !== 'none') {
+    const [x, y = x, z = '1'] = style.scale.split(/\s+/);
+    parts.push(`scale3d(${x}, ${y}, ${z})`);
+  }
+  if (style.transform !== 'none') parts.push(style.transform);
+  parts.push(`translate3d(${-ox}px, ${-oy}px, ${-oz}px)`);
+  try {
+    // Parsed as a CSS transform list, never evaluated.
+    return new DOMMatrix(parts.join(' '));
+  } catch (_) {
+    return null;
+  }
+};
+
 // Composed-tree parent: slotted nodes render inside their slot, shadow roots inside their host.
 const flatParent = (node) => {
   if (node.assignedSlot) return node.assignedSlot;
@@ -167,12 +204,33 @@ const flatParent = (node) => {
   return parent instanceof Element ? parent : null;
 };
 
+// Whether the filtered blocks land on whole screen pixels.
 const pixelAligned = (element) => {
   if (element.ownerSVGElement) {
-    // SVG user units may be scaled by a viewBox or transforms; fractional SVG
-    // positions are fine because SVG geometry is not resampled after filtering.
+    // The filter's sample grid starts at user-space (0, 0) (`primitiveUnits:
+    // userSpaceOnUse`), so an image placed elsewhere filters to nothing and is
+    // erased. getBBox also sees the CSS `x`/`y` properties.
+    let box;
+    try {
+      box = element.getBBox();
+    } catch (_) {
+      return false;
+    }
+    if (!near(box.x, 0) || !near(box.y, 0)) return false;
+    // SVG user units may be scaled by a viewBox or transforms.
     const matrix = element.getScreenCTM();
     if (matrix === null || !axisAligned(matrix.a, matrix.b, matrix.c, matrix.d)) return false;
+    // The outermost <svg> content box is pixel-snapped like any layout box, so
+    // its own fractional page position is fine; a fractional offset inside it
+    // (transforms, nested viewports, a viewBox origin) resamples the filtered
+    // blocks into seams.
+    let outer = element.ownerSVGElement;
+    while (outer.ownerSVGElement) outer = outer.ownerSVGElement;
+    const rect = outer.getBoundingClientRect();
+    const outerStyle = getComputedStyle(outer);
+    const left = rect.left + outer.clientLeft + (Number.parseFloat(outerStyle.paddingLeft) || 0);
+    const top = rect.top + outer.clientTop + (Number.parseFloat(outerStyle.paddingTop) || 0);
+    if (!integral(matrix.e - left) || !integral(matrix.f - top)) return false;
   }
   for (let node = element; node !== null; node = flatParent(node)) {
     const style = getComputedStyle(node);
@@ -181,6 +239,12 @@ const pixelAligned = (element) => {
     if (style.offsetPath && style.offsetPath !== 'none') return false;
     if (node.ownerSVGElement) continue;
     if (!alignedTransform(style)) return false;
+    if (hasTransform(style)) {
+      // A quarter turn of a box whose width and height differ by an odd
+      // number of px moves it by half a pixel around a centred origin.
+      const matrix = transformMatrix(style);
+      if (matrix === null || !integral(matrix.e) || !integral(matrix.f)) return false;
+    }
   }
   return true;
 };
@@ -210,18 +274,52 @@ const paintsBox = (style) => style.backgroundImage !== 'none' || alphaOf(style.b
       Number.parseFloat(style[`border${side}Width`]) > 0 && alphaOf(style[`border${side}Color`]) > 0;
   });
 
-// Shadows and outlines paint outside the border box; over-estimate their reach.
-const extentOf = (style) => {
-  let extent = 0;
-  if (style.boxShadow !== 'none') {
-    for (const match of style.boxShadow.matchAll(/(-?[\d.]+)px/g)) extent += Math.abs(Number.parseFloat(match[1]));
+// Sum of every px value: offsets, blur, and spread of all listed shadows.
+const shadowReach = (value) => {
+  let reach = 0;
+  for (const match of value.matchAll(/(-?[\d.]+)px/g)) reach += Math.abs(Number.parseFloat(match[1]));
+  return reach;
+};
+
+// Text shadows and drop-shadow filters paint outside the glyphs; text nodes
+// take this from their parent, which they inherit text-shadow from and paint
+// inside the filter of.
+const textExtentOf = (style) => {
+  let extent = style.textShadow && style.textShadow !== 'none' ? shadowReach(style.textShadow) : 0;
+  if (style.filter !== 'none') {
+    for (const match of style.filter.matchAll(/drop-shadow\(((?:[^()]|\([^()]*\))*)\)/g)) extent += shadowReach(match[1]);
   }
+  return extent;
+};
+
+// Box shadows, text shadows, drop-shadow filters, and outlines paint outside
+// the border box or generated text; over-estimate their reach.
+const extentOf = (style) => {
+  let extent = textExtentOf(style);
+  if (style.boxShadow !== 'none') extent += shadowReach(style.boxShadow);
   if (hasOutline(style)) {
     extent = Math.max(extent, Number.parseFloat(style.outlineWidth) +
       Math.max(0, Number.parseFloat(style.outlineOffset) || 0));
   }
   return extent;
 };
+
+const CORNERS = ['TopLeft', 'TopRight', 'BottomRight', 'BottomLeft'];
+
+// A CSS filter processes the image's whole border box and clips to the filter
+// region, so borders and padding (which shows the background) would be
+// blended into the edge blocks, rounded corners and clip paths or masks
+// filled or cut, and shadows and outlines erased. Such images stay sharp and
+// count as filtered.
+const decorated = (style) => style.boxShadow !== 'none' || hasOutline(style) || style.clipPath !== 'none' ||
+  (style.maskImage !== undefined && style.maskImage !== 'none') ||
+  (style.webkitMaskImage !== undefined && style.webkitMaskImage !== 'none') ||
+  SIDES.some((side) => {
+    const borderStyle = style[`border${side}Style`];
+    return (borderStyle !== 'none' && borderStyle !== 'hidden' && Number.parseFloat(style[`border${side}Width`]) > 0) ||
+      Number.parseFloat(style[`padding${side}`]) !== 0;
+  }) ||
+  CORNERS.some((corner) => style[`border${corner}Radius`].split(/\s+/).some((radius) => Number.parseFloat(radius) !== 0));
 
 const toRect = (rect) => ({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
 const inflate = (rect, by) => (by > 0
@@ -425,35 +523,80 @@ const createPaintOrderGuard = () => {
     return null;
   };
 
-  // Generated boxes have no DOM rects; derive positioned ones from resolved
-  // offsets and fall back to the originating box (or containing block).
+  // Generated boxes have no DOM rects. Positioned ones are placed from
+  // resolved offsets, falling back to the originating box (or containing
+  // block); in-flow ones are assumed to lie inside the originating box.
+  // Relative offsets and transforms move them from there, so both are
+  // applied. Whatever cannot be resolved is unbounded (limited by the caller's
+  // clip): overlap may be over-estimated, never missed.
   const pseudoRect = (entry, style) => {
-    if (style.position !== 'absolute' && style.position !== 'fixed') return entry.box;
-    const container = style.position === 'fixed' ? containerOf(entry, containsFixed) : containerOf(entry, containsAbsolute);
-    const fallback = container === null ? entry.box : {
-      left: Math.min(container.box.left, entry.box.left), top: Math.min(container.box.top, entry.box.top),
-      right: Math.max(container.box.right, entry.box.right), bottom: Math.max(container.box.bottom, entry.box.bottom),
-    };
-    const px = (value) => (/^-?[\d.]+(?:e[-+]?\d+)?px$/.test(value) ? Number.parseFloat(value) : null);
-    const [left, top, width, height] = [style.left, style.top, style.width, style.height].map(px);
-    if ([left, top, width, height].includes(null)) return fallback;
-    let originLeft = 0;
-    let originTop = 0;
-    if (container !== null) {
-      originLeft = container.box.left + container.node.clientLeft;
-      originTop = container.box.top + container.node.clientTop;
-    } else if (style.position === 'absolute') {
-      originLeft = -window.scrollX;
-      originTop = -window.scrollY;
-    }
     const sum = (...values) => values.reduce((total, value) => total + (Number.parseFloat(value) || 0), 0);
     const extraWidth = style.boxSizing === 'border-box' ? 0
       : sum(style.paddingLeft, style.paddingRight, style.borderLeftWidth, style.borderRightWidth);
     const extraHeight = style.boxSizing === 'border-box' ? 0
       : sum(style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth);
-    const x = originLeft + left + sum(style.marginLeft);
-    const y = originTop + top + sum(style.marginTop);
-    return { left: x, top: y, right: x + width + extraWidth, bottom: y + height + extraHeight };
+    const [width, height] = [style.width, style.height].map(lengthPx);
+    let rect = entry.box;
+    // Whether `rect` is the generated box itself rather than a region holding it.
+    let exact = false;
+    if (style.position === 'absolute' || style.position === 'fixed') {
+      const container = style.position === 'fixed' ? containerOf(entry, containsFixed) : containerOf(entry, containsAbsolute);
+      const [left, top] = [style.left, style.top].map(lengthPx);
+      if ([left, top, width, height].includes(null)) {
+        if (container !== null) {
+          rect = {
+            left: Math.min(container.box.left, entry.box.left), top: Math.min(container.box.top, entry.box.top),
+            right: Math.max(container.box.right, entry.box.right), bottom: Math.max(container.box.bottom, entry.box.bottom),
+          };
+        }
+      } else {
+        let originLeft = 0;
+        let originTop = 0;
+        if (container !== null) {
+          originLeft = container.box.left + container.node.clientLeft;
+          originTop = container.box.top + container.node.clientTop;
+        } else if (style.position === 'absolute') {
+          originLeft = -window.scrollX;
+          originTop = -window.scrollY;
+        }
+        const x = originLeft + left + sum(style.marginLeft);
+        const y = originTop + top + sum(style.marginTop);
+        rect = { left: x, top: y, right: x + width + extraWidth, bottom: y + height + extraHeight };
+        exact = true;
+      }
+    } else if (style.position === 'relative' || style.position === 'sticky') {
+      const offset = [style.top, style.right, style.bottom, style.left].some((value) => value !== '0px' && value !== 'auto');
+      if (offset) {
+        const [dx, dy] = [style.left, style.top].map(lengthPx);
+        // Sticky offsets depend on the scroll position.
+        if (style.position === 'sticky' || dx === null || dy === null) return UNBOUNDED;
+        rect = { left: rect.left + dx, top: rect.top + dy, right: rect.right + dx, bottom: rect.bottom + dy };
+      }
+    }
+    // Transforms do not apply to non-atomic inline boxes.
+    if (!hasTransform(style) || style.display === 'inline') return rect;
+    if (style.offsetPath !== undefined && style.offsetPath !== 'none') return UNBOUNDED;
+    const matrix = transformMatrix(style);
+    if (matrix === null || width === null || height === null) return UNBOUNDED;
+    const boxWidth = width + extraWidth;
+    const boxHeight = height + extraHeight;
+    const moved = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
+    for (const [x, y] of [[0, 0], [boxWidth, 0], [0, boxHeight], [boxWidth, boxHeight]]) {
+      const point = matrix.transformPoint(new DOMPoint(x, y));
+      if (!(point.w > 0)) return UNBOUNDED;
+      moved.left = Math.min(moved.left, point.x / point.w);
+      moved.top = Math.min(moved.top, point.y / point.w);
+      moved.right = Math.max(moved.right, point.x / point.w);
+      moved.bottom = Math.max(moved.bottom, point.y / point.w);
+    }
+    // A box held somewhere inside a larger region may start anywhere that
+    // keeps it inside, so the transformed box sweeps that slack.
+    const slackX = exact ? 0 : Math.max(0, rect.right - rect.left - boxWidth);
+    const slackY = exact ? 0 : Math.max(0, rect.bottom - rect.top - boxHeight);
+    return {
+      left: rect.left + moved.left, top: rect.top + moved.top,
+      right: rect.left + slackX + moved.right, bottom: rect.top + slackY + moved.bottom,
+    };
   };
 
   for (const entry of entries.values()) {
@@ -485,7 +628,10 @@ const createPaintOrderGuard = () => {
     if (parent.style.visibility !== 'visible' || parent.transparent) continue;
     const range = document.createRange();
     range.selectNodeContents(text.node);
-    addItem(parent, 'text', text.pos, [...range.getClientRects()].map((rect) => clipTo(toRect(rect), parent.clipFlow)));
+    // The parent's own box shadow and outline belong to its box item.
+    const extent = textExtentOf(parent.style);
+    addItem(parent, 'text', text.pos,
+      [...range.getClientRects()].map((rect) => clipTo(inflate(toRect(rect), extent), parent.clipFlow)));
   }
   for (const item of items) {
     item.bounds = item.rects.reduce((bounds, rect) => ({
@@ -624,6 +770,7 @@ const mark = () => {
     if (rect.width < options.minSize || rect.height < options.minSize) counts.small++;
     else if (selectors.some((selector) => element.closest(selector) !== null)) counts.excluded++;
     else if (style.filter !== 'none') counts.filtered++;
+    else if (!element.ownerSVGElement && decorated(style)) counts.filtered++;
     else if (!pixelAligned(element)) counts.transformed++;
     else eligible.push(element);
   }

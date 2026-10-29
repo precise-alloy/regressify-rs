@@ -23,7 +23,9 @@ This page records notable updates to the testing docs, which is much faster than
   `imageSimplification: pixelate` replaces large images with uniform blocks of
   their average color just before each screenshot and `save` checkpoint, so
   photo-heavy screenshots shrink while text and layout stay sharp. Images with
-  text or badges drawn on top, excluded images, and scaled images stay sharp.
+  text or badges drawn on top, excluded images, scaled or fractionally moved
+  images, and images with borders, padding, rounded corners, shadows,
+  outlines, clip paths, or masks stay sharp.
   The default `none` leaves captures unchanged. Turning it on or changing its
   settings changes pixels: capture new references, keep reference and test
   settings identical, and keep `pixelMatchThreshold` above `0`. Each capture

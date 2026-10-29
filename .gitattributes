@@ -3,3 +3,6 @@ src/snapshot/data/** -text
 
 # Keep frontend formatting stable on Windows without converting binary assets.
 frontend/** text=auto eol=lf
+
+# The frontend build hashes and copies the exact bytes of this asset.
+assets/icon.svg -text

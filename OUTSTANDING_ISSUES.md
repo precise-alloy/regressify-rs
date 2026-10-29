@@ -68,19 +68,6 @@ are historical evidence, not open implementation tasks.
   `imageSimplificationWarning`; the warning appears only in `report.json`,
   console output, desktop All run logs, and `compare` command journals.
 
-## Report Bundle Lags Image Simplification Fields (2026-10-27)
-
-- Open: [diagnostic records](src/diagnostics/record.rs) gained seven count fields
-  (`simplifiedImages` through `invalidSelectors`) and the
-  [frontend log schema](frontend/src/data/logs.ts) lists them, but the generated
-  report bundle in [src/snapshot/data](src/snapshot/data) was not rebuilt. Its
-  strict field enum rejects records with unknown keys, so published reports show
-  a log loading error for captures that ran with `imageSimplification: pixelate`.
-  Native desktop logs and captures are unaffected; `none` emits no such records.
-- Needs `bun install --frozen-lockfile` and `bun run build` in `frontend`, then the
-  frontend unit test that covers these fields (`bun run test`). Not run here:
-  frontend dependencies were not installed and installing them needs network access.
-
 ## Image Simplification Guard Blind Spots (2026-10-27)
 
 - Open, by analysis only: the paint-order guard in
@@ -88,10 +75,17 @@ are historical evidence, not open implementation tasks.
   closed shadow roots, has no box for generated `::before`/`::after` content of
   `display: contents` elements, and approximates in-flow generated content by its
   element's border box. An overlay drawn that way over an image could end up
-  beneath a pixelated image. Positioned generated content uses resolved offsets.
+  beneath a pixelated image. Positioned generated content uses resolved offsets;
+  relative offsets and transforms move generated boxes (the transformed bounds,
+  swept across the originating box for in-flow content), and sticky offsets or
+  unresolvable transforms count as overlapping anything inside their clip. Text,
+  generated text, and boxes include `text-shadow` and `drop-shadow()` reach, but
+  descendants are not extended by a `drop-shadow()` on an ancestor other than a
+  text node's parent.
   No affected page has been observed. The browser fixtures cover grid overlays,
-  inline, positioned, and generated badges, clipped images, and sticky headers;
-  none uses shadow DOM.
+  inline, positioned, translated, relatively offset, and generated badges,
+  caption and drop shadows, clipped images, and sticky headers; none uses shadow
+  DOM.
 
 ## Nested Scenario Field Reset (2026-10-27)
 

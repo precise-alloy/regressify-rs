@@ -420,8 +420,11 @@ and the page is restored before the next action.
 These stay sharp:
 
 - images matched by **Excluded image selectors**, or inside a matching element;
-- images that already have a CSS `filter`;
-- images that are scaled, zoomed, skewed, rotated other than in quarter turns, or moved by a fraction of a pixel;
+- images that already have a CSS `filter`, or a border, padding, rounded corners, a box shadow, an outline, a clip path,
+  or a mask;
+- images that are scaled, zoomed, skewed, rotated other than in quarter turns, rotated a quarter turn while their width
+  and height differ by an odd number of pixels, or moved by a fraction of a pixel;
+- SVG `image` elements not placed at `x` and `y` 0, or moved by a fraction of a pixel inside their `<svg>`;
 - images with something drawn on top, such as caption text, a badge, or a sticky header.
 
 Images inside iframes or shadow DOM, canvas drawings, and CSS background images aren't simplified.

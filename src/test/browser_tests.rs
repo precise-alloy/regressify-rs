@@ -1358,6 +1358,40 @@ body { margin: 0; background: rgb(255, 255, 255); font: 20px/24px sans-serif; co
 <div class="scene" style="left:670px;top:250px;width:96px"><img id="bg-under-img" src="/noise/20/96/96.png" width="96" height="96"><div style="margin-top:-30px;height:20px;background:rgb(0,0,0)"></div></div>
 </body></html>"#;
 
+/// Cases beyond the basic scenes: misaligned SVG images and quarter turns,
+/// decorated images, and overlays that only a transform, relative offset, or
+/// shadow moves over an image. Each whole-pixel 120 px cell holds one case.
+const SIMPLIFICATION_SHARP_CASES: &str = r#"<!doctype html>
+<html><head><style>
+body { margin: 0; background: rgb(255, 255, 255); font: 16px/20px sans-serif; color: rgb(0, 0, 0); }
+.cell { position: absolute; box-sizing: border-box; width: 120px; height: 120px; padding: 12px; }
+.cell img, .cell video, .cell svg { display: block; }
+.shift::before { content: ''; position: absolute; left: 96px; top: 20px; width: 20px; height: 20px; background: rgb(255, 0, 255); transform: translateX(-60px); }
+.nudge { height: 12px; }
+.nudge::before { content: ''; display: block; position: relative; top: 30px; width: 40px; height: 12px; background: rgb(0, 200, 200); }
+.caption { color: rgb(255, 255, 255); text-shadow: 0 -30px 0 rgb(255, 0, 0); }
+.drop { position: absolute; left: 20px; top: 100px; width: 30px; height: 10px; background: rgb(255, 255, 255); filter: drop-shadow(0 -40px 0 rgb(0, 0, 255)); }
+</style></head><body>
+<div class="cell" id="c-svg-offset" style="left:10px;top:10px"><svg width="96" height="96"><image id="svg-offset" x="20" href="/noise/40/76/96.png" width="76" height="96"/></svg></div>
+<div class="cell" id="c-svg-fraction" style="left:140px;top:10px"><svg width="96" height="96"><g transform="translate(0.5, 0.5)"><image id="svg-fraction" href="/noise/41/88/88.png" width="88" height="88"/></g></svg></div>
+<div class="cell" id="c-svg-whole" style="left:270px;top:10px"><svg width="96" height="96"><g transform="translate(8, 4)"><image id="svg-whole" href="/noise/42/80/80.png" width="80" height="80"/></g></svg></div>
+<div class="cell" id="c-odd-turn" style="left:400px;top:10px"><img id="odd-turn" src="/noise/43/97/96.png" width="97" height="96" style="transform:rotate(90deg)"></div>
+<div class="cell" id="c-even-turn" style="left:530px;top:10px"><img id="even-turn" src="/noise/44/96/96.png" width="96" height="96" style="transform:rotate(90deg)"></div>
+<div class="cell" id="c-odd-flip" style="left:660px;top:10px"><img id="odd-flip" src="/noise/45/97/96.png" width="97" height="96" style="transform:scale(-1, 1)"></div>
+<div class="cell" id="c-shadowed" style="left:10px;top:140px"><img id="shadowed" src="/noise/46/80/80.png" width="80" height="80" style="box-shadow:6px 6px 0 rgb(0, 0, 0)"></div>
+<div class="cell" id="c-bordered" style="left:140px;top:140px"><img id="bordered" src="/noise/47/80/80.png" width="80" height="80" style="border:4px solid rgb(0, 128, 255)"></div>
+<div class="cell" id="c-padded" style="left:270px;top:140px"><img id="padded" src="/noise/48/80/80.png" width="80" height="80" style="padding:4px;background:rgb(255, 220, 0)"></div>
+<div class="cell" id="c-rounded" style="left:400px;top:140px"><img id="rounded" src="/noise/49/80/80.png" width="80" height="80" style="border-radius:12px"></div>
+<div class="cell" id="c-outlined" style="left:530px;top:140px"><img id="outlined" src="/noise/50/80/80.png" width="80" height="80" style="outline:3px solid rgb(255, 0, 0)"></div>
+<div class="cell" id="c-clipped" style="left:660px;top:140px"><img id="clipped" src="/noise/51/80/80.png" width="80" height="80" style="clip-path:inset(4px)"></div>
+<div class="cell" id="c-masked" style="left:10px;top:270px"><img id="masked" src="/noise/52/80/80.png" width="80" height="80" style="mask-image:linear-gradient(rgb(0, 0, 0), transparent)"></div>
+<div class="cell" id="c-rounded-video" style="left:140px;top:270px"><video id="rounded-video" poster="/noise/53/96/96.png" width="96" height="96" style="border-radius:12px"></video></div>
+<div class="cell shift" id="c-shift-img" style="left:270px;top:270px"><img id="shift-img" src="/noise/54/80/80.png" width="80" height="80"></div>
+<div class="cell" id="c-nudge-img" style="left:400px;top:270px"><div class="nudge"></div><img id="nudge-img" src="/noise/55/80/80.png" width="80" height="80"></div>
+<div class="cell" id="c-caption-img" style="left:530px;top:270px"><img id="caption-img" src="/noise/56/80/80.png" width="80" height="80"><div class="caption">Shadow</div></div>
+<div class="cell" id="c-drop-img" style="left:660px;top:270px"><span class="drop"></span><img id="drop-img" src="/noise/57/80/80.png" width="80" height="80"></div>
+</body></html>"#;
+
 const SIMPLIFICATION_GALLERY: &str = r#"<!doctype html>
 <html><head><style>
 body { margin: 0; background: rgb(255, 255, 255); font: 16px/20px sans-serif; }
@@ -1425,6 +1459,7 @@ fn simplification_page(request: Request) {
         "/pattern.svg" => respond(request, stripe_svg().into_bytes(), "image/svg+xml", None),
         "/scenes" => respond(request, SIMPLIFICATION_SCENES.into(), "text/html", None),
         "/gallery" => respond(request, SIMPLIFICATION_GALLERY.into(), "text/html", None),
+        "/sharp-cases" => respond(request, SIMPLIFICATION_SHARP_CASES.into(), "text/html", None),
         "/popup" => respond(request, SIMPLIFICATION_POPUP.into(), "text/html", None),
         // Inline <style> elements and style attributes are blocked; only
         // same-origin resources and CSSOM changes remain.
@@ -1952,6 +1987,164 @@ async fn image_simplification_pixelates_only_unobscured_images_in_chromium() -> 
             anyhow::ensure!(changed_pixels(&image, &original, area) > 0, "{path}: not pixelated");
             page.close().await?;
         }
+        Ok(())
+    }
+    .await;
+    browser.close().await?;
+    handler.await?;
+    let _ = std::fs::remove_dir_all(directory);
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires managed Chromium; run regressify install"]
+async fn image_simplification_keeps_misaligned_and_decorated_images_sharp_in_chromium() -> Result<()>
+{
+    use super::{
+        hooks::DocumentHooks,
+        image_simplification::{ImageSimplifier, MarkCounts},
+        page_stability::prepare_screenshot,
+        runtime::evaluate_main_document,
+    };
+    use crate::{
+        config::ResolvedConfig,
+        types::{ImageSimplification, TestScenario},
+    };
+
+    // A whole-pixel SVG translation, an even-sized quarter turn, and a flip of
+    // an odd-sized image keep exact blocks.
+    const PIXELATED: [&str; 3] = ["svg-whole", "even-turn", "odd-flip"];
+    // Promotion would paint these over a translated generated badge, a
+    // relatively offset generated badge, caption text-shadow, or an earlier
+    // badge's drop-shadow.
+    const GUARDED: [&str; 4] = ["shift-img", "nudge-img", "caption-img", "drop-img"];
+    // Filtering would erase or seam the first three (non-origin SVG image,
+    // fractional SVG translation, odd-sized quarter turn) and blend or clip
+    // the decorations of the rest.
+    const UNFLAGGED: [&str; 11] = [
+        "svg-offset",
+        "svg-fraction",
+        "odd-turn",
+        "shadowed",
+        "bordered",
+        "padded",
+        "rounded",
+        "outlined",
+        "clipped",
+        "masked",
+        "rounded-video",
+    ];
+    let block = SIMPLIFICATION_BLOCK;
+    let site = Site::new(simplification_page)?;
+    let workspace = tempfile::tempdir()?;
+    let pixelate = ResolvedConfig {
+        image_simplification: ImageSimplification::Pixelate,
+        image_simplification_block_size: block as u32,
+        image_simplification_min_size: 64,
+        delay: Some(0.0),
+        settle_timeout_ms: 2_000,
+        ..Default::default()
+    };
+    let simplifier = ImageSimplifier::from_config(&pixelate)?
+        .ok_or_else(|| anyhow!("pixelate must build a simplifier"))?;
+    let (mut browser, handler, directory) = launch_browser(
+        "image-simplification-sharp",
+        LaunchOptions {
+            viewport: Some((800, 600)),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let result: Result<()> = async {
+        let page = browser
+            .new_page(format!("{}/sharp-cases", site.origin))
+            .await?;
+        settle_simplification_page(&page).await?;
+        let baseline = full_page_capture(&page).await?;
+        DocumentHooks::load(workspace.path(), &TestScenario::default(), &pixelate)?
+            .apply(&page)
+            .await?;
+        prepare_screenshot(&page, &pixelate, "image-simplification-sharp").await?;
+        let flags: std::collections::BTreeMap<String, Option<String>> = evaluate_main_document(
+            &page,
+            "Object.fromEntries([...document.querySelectorAll('img, video, svg image')]\
+             .map(element => [element.id, element.getAttribute('data-regressify-simplify')]))",
+        )
+        .await?
+        .into_value()?;
+        let mut expected = std::collections::BTreeMap::new();
+        for id in PIXELATED {
+            expected.insert(id.to_owned(), Some("pixelate".to_owned()));
+        }
+        for id in GUARDED {
+            expected.insert(id.to_owned(), Some("sharp".to_owned()));
+        }
+        for id in UNFLAGGED {
+            expected.insert(id.to_owned(), None);
+        }
+        anyhow::ensure!(flags == expected, "unexpected image flags: {flags:?}");
+        let first = full_page_capture(&page).await?;
+
+        let cells: Vec<String> = PIXELATED
+            .iter()
+            .chain(GUARDED.iter())
+            .chain(UNFLAGGED.iter())
+            .map(|id| format!("c-{id}"))
+            .collect();
+        let ids: Vec<&str> = cells
+            .iter()
+            .map(String::as_str)
+            .chain(PIXELATED.iter().copied())
+            .collect();
+        let areas = element_areas(&page, &ids).await?;
+        for id in PIXELATED {
+            let area = areas[id];
+            // Chromium filters the flipped image in screen orientation, so even
+            // the 97 px flip keeps blocks aligned to its on-screen left edge.
+            let broken = nonuniform_block_pixels(&first, area, block, None);
+            anyhow::ensure!(broken == 0, "{id}: {broken} pixels break {block}px blocks");
+            anyhow::ensure!(
+                changed_pixels(&first, &baseline, area) > 0,
+                "{id} was not pixelated"
+            );
+        }
+        // Sharp images, their decorations, and every overlay keep their exact
+        // pixels: nothing is erased, blended, or painted over.
+        for id in GUARDED.iter().chain(UNFLAGGED.iter()) {
+            let changed = changed_pixels(&first, &baseline, areas[&format!("c-{id}")]);
+            anyhow::ensure!(
+                changed == 0,
+                "{id} should stay sharp; {changed} pixels changed"
+            );
+        }
+        let pixelated_areas: Vec<Area> = PIXELATED.iter().map(|id| areas[*id]).collect();
+        let outside = (0..first.height)
+            .flat_map(|y| (0..first.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| !pixelated_areas.iter().any(|area| area.contains(x, y)))
+            .filter(|&(x, y)| capture_pixel(&first, x, y) != capture_pixel(&baseline, x, y))
+            .count();
+        anyhow::ensure!(
+            outside == 0,
+            "{outside} pixels changed outside pixelated images"
+        );
+
+        simplifier.restore(&page).await?;
+        let counts = simplifier.prepare(&page).await?;
+        anyhow::ensure!(
+            counts
+                == MarkCounts {
+                    simplified: 3,
+                    small: 0,
+                    excluded: 0,
+                    filtered: 8,
+                    transformed: 3,
+                    overlapped: 4,
+                    invalid_selectors: 0,
+                },
+            "unexpected counts: {counts:?}"
+        );
+        simplifier.restore(&page).await?;
+        page.close().await?;
         Ok(())
     }
     .await;

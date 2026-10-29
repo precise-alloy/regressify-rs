@@ -357,14 +357,28 @@ pub enum RecordedImageSimplification {
 
 impl RecordedImageSimplification {
     /// Reports carry only a marker for unrecognized values, so arbitrary
-    /// sidecar content is never copied into report.json.
+    /// sidecar content is never copied into report.json. A known mode whose
+    /// digest is not the canonical 64 lowercase hex characters was hand-edited
+    /// (links can come from a shared repository) and is treated the same way.
     fn for_report(&self) -> Self {
         match self {
-            Self::Known(_) => self.clone(),
-            Self::Unrecognized(_) => {
-                Self::Unrecognized(serde_json::json!({ "mode": "unrecognized" }))
+            Self::Known(ImageSimplificationSetting::Pixelate {
+                exclude_selectors_digest,
+                ..
+            }) if !(exclude_selectors_digest.len() == 64
+                && exclude_selectors_digest
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))) =>
+            {
+                Self::unrecognized_marker()
             }
+            Self::Known(_) => self.clone(),
+            Self::Unrecognized(_) => Self::unrecognized_marker(),
         }
+    }
+
+    fn unrecognized_marker() -> Self {
+        Self::Unrecognized(serde_json::json!({ "mode": "unrecognized" }))
     }
 }
 
@@ -873,8 +887,34 @@ mod tests {
         );
         assert!(!warning.message.contains("marker"));
 
+        // A well-formed digest is copied into the report on either side.
+        let valid = exclude_selectors_digest(&selectors(&["img[data-secret=\"marker\"]"]));
+        for (reference, test) in [(&base, &excluded), (&excluded, &base)] {
+            let warning = setting_warning(Some(reference), Some(test)).unwrap();
+            assert_eq!(warning.reference.as_ref(), Some(reference));
+            assert_eq!(warning.test.as_ref(), Some(test));
+        }
+        assert!(
+            serde_json::to_string(&setting_warning(Some(&base), Some(&excluded)))
+                .unwrap()
+                .contains(&valid)
+        );
+
         // Hand-edited or future sidecar values are neither printed nor copied.
-        for hostile in ["\u{1b}[2J0123456789abcdef", "éééééééééééééé", "abc"] {
+        let marker = json!({"mode": "unrecognized"});
+        // `true` when the digest prefix itself is unprintable.
+        for (hostile, unreadable) in [
+            ("\u{1b}[2J0123456789abcdef".to_string(), true),
+            ("éééééééééééééé".to_string(), true),
+            ("abc".to_string(), true),
+            // Exactly 64 characters, but not lowercase hex.
+            (valid.to_uppercase(), false),
+            (format!("{}\u{1b}", &valid[..63]), false),
+            // Lowercase hex, one character short or long.
+            (valid[..63].to_string(), false),
+            (format!("{valid}0"), false),
+        ] {
+            let hostile = hostile.as_str();
             let edited = Known(ImageSimplificationSetting::Pixelate {
                 block_size: 4,
                 min_size: 64,
@@ -888,17 +928,23 @@ mod tests {
                 "{}",
                 warning.message
             );
-            assert!(
+            assert_eq!(
                 warning.message.contains("unreadable exclusion list"),
+                unreadable,
                 "{}",
                 warning.message
             );
             assert!(!warning.message.contains(hostile));
+            assert_eq!(serde_json::to_value(&warning.reference).unwrap(), marker);
             assert_eq!(
-                serde_json::to_value(&warning.reference).unwrap(),
-                json!({"mode": "unrecognized"})
+                serde_json::to_value(&warning.test).unwrap(),
+                marker,
+                "{hostile:?} was copied into the report"
             );
-            assert_eq!(warning.test, Some(edited));
+            // The same value on the reference side is replaced as well.
+            let warning = setting_warning(Some(&edited), Some(&base)).unwrap();
+            assert_eq!(serde_json::to_value(&warning.reference).unwrap(), marker);
+            assert_eq!(warning.test.as_ref(), Some(&base));
         }
     }
 

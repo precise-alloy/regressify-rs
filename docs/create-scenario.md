@@ -298,8 +298,12 @@ elements rendered at least `imageSimplificationMinSize` CSS pixels wide and
 high. Blocks start at each image's top-left corner; blocks cut off by the right
 or bottom edge use their own average. Images stay sharp when they match
 `imageSimplificationExcludeSelectors` or sit inside an element that matches one,
-already have a CSS `filter`, are scaled, zoomed, skewed, rotated other than in
-quarter turns, or moved by a fraction of a pixel, or when simplification could
+already have a CSS `filter`, have a border, padding, rounded corners, a box
+shadow, an outline, a clip path, or a mask, are scaled, zoomed, skewed, rotated
+other than in quarter turns, rotated a quarter turn while their width and height
+differ by an odd number of pixels, or moved by a fraction of a pixel, are SVG
+`image` elements not placed at `x` and `y` 0 or under a fractional SVG
+translation, or when simplification could
 change which content paints on top of them, such as caption text, a badge, or a
 sticky header drawn over the image. Iframes, shadow DOM, canvas, and CSS
 background images are not simplified.

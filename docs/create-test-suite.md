@@ -284,9 +284,14 @@ or bottom edge use their own average. These images stay sharp:
 
 - images that match `imageSimplificationExcludeSelectors` or sit inside an
   element that matches one;
-- images that already have a CSS `filter`;
+- images that already have a CSS `filter`, or a border, padding, rounded
+  corners, a box shadow, an outline, a clip path, or a mask, because the filter
+  would blend or clip those decorations;
 - images that are scaled, zoomed, skewed, rotated other than in quarter turns,
-  or moved by a fraction of a pixel, because that would blur the blocks;
+  rotated a quarter turn while their width and height differ by an odd number
+  of pixels, or moved by a fraction of a pixel, and SVG `image` elements not
+  placed at `x` and `y` 0 or under a fractional SVG translation, because that
+  would blur or erase the blocks;
 - images whose simplification could change which content paints on top of
   them, such as caption text, a badge, or a sticky header drawn over the image.
 
