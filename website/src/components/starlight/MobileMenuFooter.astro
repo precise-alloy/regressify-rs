@@ -1,0 +1,74 @@
+---
+// Starlight override: the bottom of the mobile sidebar menu (below 50rem). The
+// docs header hides the site navigation, GitHub link, and theme toggle at that
+// width, so they live here instead of in a second hamburger menu.
+import Button from '../Button.astro';
+import Icon from '../Icon.astro';
+import ThemeToggle from '../ThemeToggle.astro';
+import { HEADER_LINKS, SITE } from '../../config/site';
+import { isActivePath } from '../../lib/nav';
+---
+
+<div class="mobile-footer">
+  <nav aria-label="Site" class="links">
+    {
+      HEADER_LINKS.map((link) => (
+        <a href={link.href} aria-current={isActivePath(Astro.url.pathname, link.href) ? 'page' : undefined}>
+          {link.label}
+        </a>
+      ))
+    }
+  </nav>
+  <div class="preferences">
+    {
+      SITE.repoUrl && (
+        <Button variant="ghost" size="md" icon href={SITE.repoUrl} aria-label="Regressify source on GitHub" title="Source on GitHub">
+          <Icon name="github" />
+        </Button>
+      )
+    }
+    <ThemeToggle />
+  </div>
+</div>
+
+<style>
+  .mobile-footer {
+    display: grid;
+    gap: var(--space-sm);
+    padding-block: var(--space-sm) var(--space-lg);
+    border-top: var(--border-width) solid var(--border);
+  }
+
+  .links {
+    display: grid;
+  }
+
+  .links a {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding-inline: var(--space-sm);
+    border-radius: var(--radius-md);
+    color: var(--tab-foreground);
+    font-size: var(--text-sm);
+    text-decoration: none;
+  }
+
+  .links a:hover {
+    background: var(--button-ghost-hover);
+    color: var(--tab-active-foreground);
+  }
+
+  .links a[aria-current='page'] {
+    color: var(--tab-active-foreground);
+    font-weight: var(--weight-medium);
+  }
+
+  .preferences {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    padding-inline: var(--space-sm);
+  }
+</style>

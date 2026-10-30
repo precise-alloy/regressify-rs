@@ -1,0 +1,39 @@
+---
+// The one no-flash theme script, rendered in <head> by BaseLayout and by the
+// Starlight ThemeProvider override, so landing pages and docs share a single
+// preference: THEME_STORAGE_KEY holds 'light' or 'dark', and no entry means
+// "follow the system".
+//
+// It always sets a resolved data-theme ('light' or 'dark') because Starlight's
+// own styles (search, badges, menu button) key off [data-theme='light'] and
+// cannot read an absent attribute as "system". While no preference is saved it
+// tracks system changes live. ThemeToggle writes the same key and the same
+// attribute. The `js` class gates `.requires-js` controls.
+import { THEME_STORAGE_KEY } from '../config/site';
+---
+
+<script is:inline define:vars={{ key: THEME_STORAGE_KEY }}>
+  (() => {
+    const root = document.documentElement;
+    const light = matchMedia('(prefers-color-scheme: light)');
+    // Only the two literal values are accepted from storage.
+    const saved = () => {
+      try {
+        const value = localStorage.getItem(key);
+        return value === 'light' || value === 'dark' ? value : null;
+      } catch {
+        return null;
+      }
+    };
+    const apply = () => {
+      root.dataset.theme = saved() ?? (light.matches ? 'light' : 'dark');
+    };
+    apply();
+    light.addEventListener('change', apply);
+    // Another tab changed the preference.
+    addEventListener('storage', (event) => {
+      if (event.key === key || event.key === null) apply();
+    });
+    root.classList.add('js');
+  })();
+</script>

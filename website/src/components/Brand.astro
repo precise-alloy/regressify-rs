@@ -1,0 +1,30 @@
+---
+// Logo and wordmark linking home. Shared by the site header and the docs header
+// so both carry the same identity.
+import { SITE } from '../config/site';
+---
+
+<a href="/" class="brand" aria-label={`${SITE.name} home`}>
+  <img src="/icon.svg" alt="" width="22" height="22" />
+  <span>{SITE.name}</span>
+</a>
+
+<style>
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm);
+    min-height: 44px;
+    color: var(--foreground);
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+    text-decoration: none;
+    border-radius: var(--radius-md);
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  img {
+    display: block;
+  }
+</style>

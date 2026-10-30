@@ -1,0 +1,165 @@
+---
+// Starlight override: the docs header in the Astro docs layout (identity left,
+// search aligned with the content column, links and controls right) carrying the
+// site header's identity: brand, main navigation, GitHub, and the theme toggle.
+//
+// Below 50rem (Starlight's sidebar breakpoint) only the brand and the search
+// button remain; the navigation, GitHub, and theme toggle move into the sidebar
+// menu (MobileMenuFooter.astro), opened by Starlight's own menu button, so the
+// docs never show two hamburgers.
+//
+// The site links are labelled "Site" (here and in MobileMenuFooter) because
+// Starlight's docs sidebar nav is already the "Main" navigation landmark.
+import Search from '@astrojs/starlight/components/Search.astro';
+import Brand from '../Brand.astro';
+import Button from '../Button.astro';
+import Icon from '../Icon.astro';
+import ThemeToggle from '../ThemeToggle.astro';
+import { HEADER_LINKS, SITE } from '../../config/site';
+import { isActivePath } from '../../lib/nav';
+---
+
+<div class="sl-header">
+  <div class="title-wrapper">
+    <Brand />
+  </div>
+  <div class="search print:hidden">
+    <Search />
+  </div>
+  <div class="right-group sl-hidden md:sl-flex print:hidden">
+    <nav aria-label="Site" class="tabs">
+      {
+        HEADER_LINKS.map((link) => (
+          <a href={link.href} class="tab" aria-current={isActivePath(Astro.url.pathname, link.href) ? 'page' : undefined}>
+            {link.label}
+          </a>
+        ))
+      }
+    </nav>
+    <div class="actions">
+      {
+        SITE.repoUrl && (
+          <Button variant="ghost" size="sm" icon href={SITE.repoUrl} aria-label="Regressify source on GitHub" title="Source on GitHub">
+            <Icon name="github" />
+          </Button>
+        )
+      }
+      <ThemeToggle />
+    </div>
+  </div>
+</div>
+
+<style>
+  .sl-header {
+    display: flex;
+    gap: var(--sl-nav-gap);
+    justify-content: space-between;
+    align-items: center;
+    height: 100%;
+  }
+
+  .title-wrapper {
+    display: flex;
+    min-width: 0;
+    overflow: clip;
+    /* Room for the focus ring around the brand link, which overflow would clip. */
+    padding: 4px;
+    margin: -4px;
+  }
+
+  .search {
+    display: flex;
+    justify-content: center;
+  }
+
+  .right-group {
+    align-self: stretch;
+    align-items: stretch;
+    gap: var(--space-xl);
+  }
+
+  /* Same underline tabs as the site header (Header.astro). */
+  .tabs {
+    display: flex;
+    gap: var(--space-lg);
+  }
+
+  .tab {
+    display: inline-flex;
+    align-items: center;
+    color: var(--tab-foreground);
+    font-size: var(--text-sm);
+    text-decoration: none;
+    border-bottom: var(--tab-underline-width) solid transparent;
+    white-space: nowrap;
+  }
+
+  .tab:hover {
+    color: var(--tab-active-foreground);
+  }
+
+  .tab[aria-current='page'] {
+    color: var(--tab-active-foreground);
+    border-bottom-color: var(--tab-underline);
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+  }
+
+  .actions::before {
+    content: '';
+    height: var(--control-sm);
+    border-inline-start: var(--border-width) solid var(--border);
+    margin-inline-end: var(--space-xs);
+  }
+
+  /*
+   * Starlight's header grid: the first column runs to the content column's left
+   * edge so the search box lines up with the page content, as in the Astro
+   * docs. Copied from Starlight's Header.astro (0.42.7), which this replaces;
+   * the custom properties it reads are set by Starlight's PageFrame and Page.
+   */
+  @media (min-width: 50rem) {
+    :global(:root[data-has-sidebar]) {
+      --__sidebar-pad: calc(2 * var(--sl-nav-pad-x));
+    }
+
+    :global(:root:not([data-has-toc])) {
+      --__toc-width: 0rem;
+    }
+
+    .sl-header {
+      --__sidebar-width: max(0rem, var(--sl-content-inline-start, 0rem) - var(--sl-nav-pad-x));
+      --__main-column-fr: calc(
+        (
+            100% + var(--__sidebar-pad, 0rem) - var(--__toc-width, var(--sl-sidebar-width)) -
+              (2 * var(--__toc-width, var(--sl-nav-pad-x))) - var(--sl-content-inline-start, 0rem) -
+              var(--sl-content-width)
+          ) / 2
+      );
+      display: grid;
+      /*
+       * Starlight's first track is minmax(<sidebar width>, auto), a hard minimum.
+       * Just above 50rem the site links and controls in the third track are wider
+       * than Starlight's, so that minimum pushed them past the right gutter.
+       * Making the sidebar width the track's maximum instead keeps the search
+       * aligned whenever there is room and lets the first track give way when
+       * there is not (the grid fills fixed maximums before the 1fr track).
+       */
+      grid-template-columns:
+        minmax(auto, calc(var(--__sidebar-width) + max(0rem, var(--__main-column-fr) - var(--sl-nav-gap))))
+        1fr
+        auto;
+      /* Rows fill the bar height (no align-content: center as in Starlight) so
+         the tab underline sits on the header's bottom edge like the site header. */
+      align-items: center;
+    }
+
+    .search {
+      justify-content: flex-start;
+    }
+  }
+</style>

@@ -1,7 +1,7 @@
 ---
 // System / Light / Dark picker, matching the desktop theme menu. Hidden without
 // JavaScript (the page then follows prefers-color-scheme). The initial theme is
-// applied by the inline script in BaseLayout before first paint to avoid a flash.
+// applied before first paint by ThemeScript.astro, on landing and docs pages.
 import Icon from './Icon.astro';
 import { THEME_STORAGE_KEY } from '../config/site';
 
@@ -26,39 +26,58 @@ const choices = [
 <script>
   type Choice = 'system' | 'light' | 'dark';
 
-  for (const group of document.querySelectorAll<HTMLElement>('.theme-toggle')) {
-    const key = group.dataset.storageKey ?? 'regressify-theme';
-    const buttons = [...group.querySelectorAll<HTMLButtonElement>('[data-theme-choice]')];
+  // Several toggles can share a page (docs header and docs mobile menu), so the
+  // pressed state is computed for every group from storage, not from the clicked
+  // group. data-theme is always resolved (see ThemeScript.astro), so it cannot
+  // tell "system" apart from an explicit choice.
+  const groups = [...document.querySelectorAll<HTMLElement>('.theme-toggle')];
+  const key = groups[0]?.dataset.storageKey ?? 'regressify-theme';
+  const prefersLight = matchMedia('(prefers-color-scheme: light)');
 
-    const current = (): Choice => {
-      const theme = document.documentElement.dataset.theme;
-      return theme === 'light' || theme === 'dark' ? theme : 'system';
-    };
-
-    const sync = () => {
-      const active = current();
-      for (const button of buttons) {
-        button.setAttribute('aria-pressed', String(button.dataset.themeChoice === active));
-      }
-    };
-
-    for (const button of buttons) {
-      button.addEventListener('click', () => {
-        const choice = button.dataset.themeChoice as Choice;
-        if (choice === 'system') delete document.documentElement.dataset.theme;
-        else document.documentElement.dataset.theme = choice;
-        try {
-          if (choice === 'system') localStorage.removeItem(key);
-          else localStorage.setItem(key, choice);
-        } catch {
-          // Storage can be unavailable (privacy mode); the choice lasts for this page.
-        }
-        sync();
-      });
+  const saved = (): Choice => {
+    try {
+      const value = localStorage.getItem(key);
+      return value === 'light' || value === 'dark' ? value : 'system';
+    } catch {
+      return 'system';
     }
+  };
 
+  let choice: Choice = saved();
+
+  const sync = () => {
+    for (const button of document.querySelectorAll<HTMLButtonElement>('.theme-toggle [data-theme-choice]')) {
+      button.setAttribute('aria-pressed', String(button.dataset.themeChoice === choice));
+    }
+  };
+
+  const select = (next: Choice) => {
+    choice = next;
+    document.documentElement.dataset.theme = next === 'system' ? (prefersLight.matches ? 'light' : 'dark') : next;
+    try {
+      if (next === 'system') localStorage.removeItem(key);
+      else localStorage.setItem(key, next);
+    } catch {
+      // Storage can be unavailable (privacy mode); the choice lasts for this page.
+    }
     sync();
+  };
+
+  for (const group of groups) {
+    for (const button of group.querySelectorAll<HTMLButtonElement>('[data-theme-choice]')) {
+      button.addEventListener('click', () => select(button.dataset.themeChoice as Choice));
+    }
   }
+
+  // Another tab changed the preference; ThemeScript re-applies data-theme.
+  window.addEventListener('storage', (event) => {
+    if (event.key === key || event.key === null) {
+      choice = saved();
+      sync();
+    }
+  });
+
+  sync();
 </script>
 
 <style>

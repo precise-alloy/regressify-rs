@@ -1,0 +1,9 @@
+---
+// Starlight override: the stock Markdown wrapper plus the site's full-screen
+// image viewer, which enhances every image inside `.sl-markdown-content`.
+import Default from '@astrojs/starlight/components/MarkdownContent.astro';
+import ImageZoom from '../ImageZoom.astro';
+---
+
+<Default><slot /></Default>
+<ImageZoom />

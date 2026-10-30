@@ -60,7 +60,13 @@ a {
   text-underline-offset: 3px;
 }
 
-a:hover {
+/*
+ * Element-level specificity (same as `a` above, later in source, so it still
+ * wins over it). Starlight sets `scopedStyleStrategy: 'where'` site-wide, so a
+ * component's `.link { color }` no longer gains a scoping attribute and would
+ * lose to a plain `a:hover`; with this, any class-level color wins, as before.
+ */
+a:where(:hover) {
   color: var(--link-hover);
 }
 

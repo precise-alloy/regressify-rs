@@ -1,0 +1,12 @@
+---
+// Starlight override: the stock head plus the legacy hash redirect on the
+// desktop Overview page only (see src/lib/docs-redirects.ts).
+import Default from '@astrojs/starlight/components/Head.astro';
+import { LEGACY_HASH_PAGE_ID } from '../../lib/docs-redirects';
+import LegacyHashRedirect from './LegacyHashRedirect.astro';
+
+const isLegacyHashPage = Astro.locals.starlightRoute.id === LEGACY_HASH_PAGE_ID;
+---
+
+<Default />
+{isLegacyHashPage && <LegacyHashRedirect />}

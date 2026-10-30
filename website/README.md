@@ -2,8 +2,10 @@
 
 The public site for Regressify: a minimal landing page, downloads, docs, a blog,
 and a private deployment admin view. Public pages are static [Astro](https://astro.build)
-with no UI framework and work without JavaScript. The admin view uses a Worker
-API and JavaScript. The site's look follows the desktop app's theme.
+with no UI framework and work without JavaScript. The docs use
+[Starlight](https://starlight.astro.build) for the Astro docs layout; its search
+needs JavaScript. The admin view uses a Worker API and JavaScript. The site's look
+follows the desktop app's theme.
 
 ## Develop
 
@@ -27,11 +29,14 @@ bun run dev
 | --------------------------- | -------------------------------------------------------------------------- |
 | `src/config/site.ts`        | Site name, description, repository URL, and navigation.                    |
 | `src/styles/tokens.css`     | Design tokens mirrored from the desktop theme (light and dark).            |
-| `src/styles/global.css`     | Base element styles and Markdown `.prose` styles.                          |
+| `src/styles/global.css`     | Base element styles and Markdown `.prose` styles (not loaded on docs).     |
+| `src/styles/starlight.css`  | Maps Starlight's `--sl-*` theme onto the tokens for the docs.              |
 | `src/components/`           | Button, Card, CodeBlock, Header, Footer, ThemeToggle, and others.          |
-| `src/layouts/`              | `BaseLayout`, `DocsLayout`, and `BlogLayout`.                              |
-| `src/pages/`                | Routes: `/`, `/download/`, `/docs/`, `/blog/`, `/about/`, `/rss.xml`, 404. |
-| `src/content/docs`, `/blog` | Markdown content collections.                                              |
+| `src/components/starlight/` | Starlight overrides (head, header, theme, image zoom, mobile menu).        |
+| `src/layouts/`              | `BaseLayout` and `BlogLayout`.                                             |
+| `src/pages/`                | Routes: `/`, `/download/`, `/blog/`, `/about/`, `/rss.xml`, 404.           |
+| `src/content/docs/docs/`    | Docs pages, routed by Starlight under `/docs/`.                            |
+| `src/content/blog`          | Blog posts (Markdown).                                                     |
 | `src/lib/release.ts`        | Build-time installer resolution and validation.                            |
 | `public/`                   | Logo and favicons copied from [assets](../assets).                         |
 
@@ -43,20 +48,63 @@ which includes `NAV_LINKS` plus `/about/`. Add future header-only links to
 Below 640px all header links sit in a native hamburger dropdown, keeping the
 header one row tall even when open. Navigation works without JavaScript; scripts
 add Escape, outside-click, focus-leave, and desktop-resize dismissal.
+Docs pages use the same `HEADER_LINKS` in their own header; below 50rem those
+links, the GitHub link, and the theme toggle move into Starlight's sidebar menu.
 
 ## Add Docs and Blog Posts
 
-Add a Markdown (`.md`) file to `src/content/docs/` or `src/content/blog/`. MDX is not enabled; `.mdx` files are not loaded. The file path becomes the URL: `src/content/docs/guides/suites.md` is served at `/docs/guides/suites/`. Files whose names start with `_` are ignored.
+### Docs Pages
 
-Docs front matter:
+Docs are rendered by [Starlight](https://starlight.astro.build) (configured in `starlight({ ... })` in [astro.config.mjs](astro.config.mjs)) with the Astro docs layout: a left sidebar of groups, one page per section, an **On this page** list (h2 and h3), previous/next links that follow the sidebar order, and an **Edit page** link built from `SITE.repoUrl`.
+
+Pages are Markdown (`.md`; MDX is not installed) under `src/content/docs/docs/`. The path below `src/content/docs/` becomes the URL: `src/content/docs/docs/desktop-app/running-tests.md` is served at `/docs/desktop-app/running-tests/`, and an `index.md` serves its folder (`docs/desktop-app/index.md` is `/docs/desktop-app/`). Files whose names start with `_` are ignored. The collection uses Starlight's `docsLoader` and `docsSchema` in [src/content.config.ts](src/content.config.ts); a build fails on invalid front matter.
+
+| Path (under `src/content/docs/`) | URL                            | Sidebar group                           |
+| -------------------------------- | ------------------------------ | --------------------------------------- |
+| `docs/index.md`                  | `/docs/`                       | Start here (label "Introduction")       |
+| `docs/getting-started.md`        | `/docs/getting-started/`       | Start here                              |
+| `docs/desktop-app/index.md`      | `/docs/desktop-app/`           | Desktop app (label "Overview", order 0) |
+| `docs/desktop-app/<section>.md`  | `/docs/desktop-app/<section>/` | Desktop app, ordered by `sidebar.order` |
+
+Docs front matter ([Starlight reference](https://starlight.astro.build/reference/frontmatter/)):
 
 ```yaml
-title: Create a test suite
-description: One sentence used for the page lead and search results.
-order: 20        # Sidebar position, lowest first (default 100).
-updated: 2026-10-22  # Optional.
-draft: false     # Optional; drafts appear only in `bun run dev`.
+title: Run tests # Page title (h1), browser title, and default sidebar label.
+description: One sentence for the meta description and search results (required).
+sidebar:
+  order: 4 # Position within its sidebar group, lowest first.
+  label: Run tests # Optional shorter sidebar label.
+lastUpdated: 2026-10-27 # Optional; shown at the bottom of the page. Git dates are off.
+draft: false # Optional; drafts appear only in `bun run dev`.
 ```
+
+Each page starts at `##`; the title is the page's only h1. Keep heading text stable once published, because its id is the anchor that other pages and external sites link to.
+
+**Sidebar.** Groups are defined in the `sidebar` option of [astro.config.mjs](astro.config.mjs). **Start here** lists pages by slug, in order. **Desktop app** autogenerates from every page in `src/content/docs/docs/desktop-app/`, ordered by `sidebar.order` (Overview is 0, then Install 1 through Troubleshooting 11). A new page in that folder appears automatically; give it a unique `sidebar.order` and add it to the **In this guide** list on the Overview page. A new top-level section needs its own folder and sidebar group.
+
+**Asides.** Starlight asides work in plain Markdown: `:::note`, `:::tip`, `:::caution`, `:::danger`. Desktop pages that list `Ctrl` shortcuts repeat a one-line macOS `:::tip`, and pages with screenshots add "Click any screenshot to view it full screen." to that tip (or open with a tip of their own), because readers often land on a section page directly.
+
+**Maintainer notes.** Put notes about a page in YAML comments (`# ...`) inside its front matter. HTML comments in Markdown are copied into the public HTML.
+
+**Old single-page links.** The desktop guide used to be one page. Old deep links such as `/docs/desktop-app/#run-settings` are sent to the page that now holds that section by a small script that runs only on the Overview page. The map and its pure resolver are in [src/lib/docs-redirects.ts](src/lib/docs-redirects.ts) (tested by `docs-redirects.test.ts`), and the [Head override](src/components/starlight/Head.astro) mounts [LegacyHashRedirect](src/components/starlight/LegacyHashRedirect.astro) on that page. Unknown hashes, ids that exist on the Overview page, and visitors without JavaScript stay on the Overview, which lists every section. When you rename a desktop page or one of its headings, update the map's target; never give an Overview heading one of the map's old ids.
+
+**Search.** Pagefind indexes the docs pages during `bun run build` into `dist/pagefind/`, and the header search box (`Ctrl+K`) queries it. Search needs JavaScript and a production build: `bun run dev` shows a notice instead, so use `bun run build` and `bun run preview` to try it. Only Starlight pages are indexed, not the landing pages or the blog.
+
+**Theme and overrides.** Docs share the site's header identity, design tokens, and theme preference:
+
+| File                                                                           | Role                                                                                                          |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| [src/styles/tokens.css](src/styles/tokens.css)                                 | Design tokens mirrored from the desktop theme; loaded through Starlight's `customCss`.                        |
+| [src/styles/starlight.css](src/styles/starlight.css)                           | Maps Starlight's `--sl-*` colors, fonts, header height, and spacing onto the tokens for both themes.          |
+| [src/components/starlight/Header.astro](src/components/starlight/Header.astro) | Brand, search, `HEADER_LINKS`, GitHub, and theme toggle, like the site header.                                |
+| [src/components/starlight/Head.astro](src/components/starlight/Head.astro)     | Stock head plus the legacy hash redirect on `/docs/desktop-app/` only.                                        |
+| `ThemeProvider.astro`, `ThemeSelect.astro`                                     | Use the site's `regressify-theme` preference and the shared [ThemeScript](src/components/ThemeScript.astro). |
+| `MobileMenuFooter.astro`                                                       | Below 50rem, holds the header links, GitHub, and theme toggle in the sidebar menu.                            |
+| `MarkdownContent.astro`                                                        | Stock Markdown wrapper plus [ImageZoom](src/components/ImageZoom.astro) for full-screen screenshots.          |
+
+Do not import `global.css` into docs pages: Starlight's styles are in cascade layers, so the site's unlayered element rules would override them. Starlight also sets `scopedStyleStrategy: 'where'` for the whole site, so scoped component styles get no extra specificity from scoping; `global.css` keeps its link hover rule at `a:where(:hover)` for that reason. Starlight's hover prefetch is turned off (`prefetch: false`) so links to `/admin/` are never prefetched.
+
+### Blog Posts
 
 Blog front matter:
 
@@ -68,13 +116,32 @@ author: Optional name
 draft: false
 ```
 
-The schemas live in [src/content.config.ts](src/content.config.ts); a build fails on invalid front matter. When migrating files from [docs](../docs), replace Zola shortcodes such as `{% spoiler() %}` with plain Markdown or `<details>`, and replace `@/...` links with site paths. Do not hard-code repository URLs in content; `SITE.repoUrl` controls every repository link.
+The schemas live in [src/content.config.ts](src/content.config.ts); a build fails on invalid front matter. Blog posts are Markdown only. When migrating files from [docs](../docs), replace Zola shortcodes such as `{% spoiler() %}` with plain Markdown or `<details>`, and replace `@/...` links with site paths. Do not hard-code repository URLs in content; `SITE.repoUrl` controls every repository link.
 
-The getting-started doc, the landing page quickstart, and the download page's build-from-source steps are copies of [docs/get-started.md](../docs/get-started.md), [docs/commands.md](../docs/commands.md), and [docs/desktop.md](../docs/desktop.md). Update them when those sources change. The desktop app guide (`src/content/docs/desktop-app.md`) is a user-facing adaptation of [docs/desktop.md](../docs/desktop.md); update it when desktop workflows, labels, or shortcuts change. Its **Simplify images** section adapts the image simplification sections of [docs/commands.md](../docs/commands.md), [docs/create-test-suite.md](../docs/create-test-suite.md), and [docs/create-scenario.md](../docs/create-scenario.md); update it when those settings or their behavior change.
+### Copies of Repository Docs
+
+The getting-started doc, the landing page quickstart, and the download page's build-from-source steps are copies of [docs/get-started.md](../docs/get-started.md), [docs/commands.md](../docs/commands.md), and [docs/desktop.md](../docs/desktop.md). Update them when those sources change.
+
+The desktop app pages in `src/content/docs/docs/desktop-app/` are a user-facing adaptation of [docs/desktop.md](../docs/desktop.md). Update the matching page when desktop workflows, labels, or shortcuts change:
+
+| docs/desktop.md section                                 | Website page (`desktop-app/`) |
+| ------------------------------------------------------- | ----------------------------- |
+| Windows Installation and Updates                        | `install.md`                  |
+| Workspace and Files                                     | `workspaces.md`               |
+| Editing (including Inheritance, Source and Save Safety) | `editing-suites.md`           |
+| Running Commands                                        | `running-tests.md`            |
+| Reviewing Results, Cleaning Test Runs                   | `reviewing-results.md`        |
+| Git                                                     | `git.md`                      |
+| Deploy Reports, Deployment Tokens, Landing Apps         | `publishing-reports.md`       |
+| Appearance and Commands                                 | `appearance-and-commands.md`  |
+| Shortcuts                                               | `keyboard-shortcuts.md`       |
+| Problems from any of these sections                     | `troubleshooting.md`          |
+
+The **Simplify images** page (`desktop-app/simplify-images.md`) adapts the image simplification settings in the Editing section of [docs/desktop.md](../docs/desktop.md), "Image simplification" in [docs/commands.md](../docs/commands.md), and the `imageSimplification` settings in [docs/create-test-suite.md](../docs/create-test-suite.md) and [docs/create-scenario.md](../docs/create-scenario.md); update it when those settings or their behavior change.
 
 ### Desktop Screenshots
 
-Screenshots in the desktop guide live in [src/assets/docs/desktop](src/assets/docs/desktop) and are referenced from Markdown with relative paths, so Astro converts them to WebP with fixed dimensions. Readers can click any image to open it full screen ([ImageZoom](src/components/ImageZoom.astro)). They are dark-theme window captures (1440x900 before cropping) of a release build (`cargo build --release --features gui --bin regressify-desktop`) opened on a throwaway fictional workspace ("northwind-qa", served from `127.0.0.1`).
+Screenshots in the desktop pages live in [src/assets/docs/desktop](src/assets/docs/desktop) and are referenced from Markdown with relative paths, so Astro converts them to WebP with fixed dimensions. From a page in `src/content/docs/docs/desktop-app/` the path is `../../../../assets/docs/desktop/<file>.png`. Each file is used once; delete a screenshot when no page references it. Readers can click any image to open it full screen ([ImageZoom](src/components/ImageZoom.astro)). They are dark-theme window captures (1440x900 before cropping) of a release build (`cargo build --release --features gui --bin regressify-desktop`) opened on a throwaway fictional workspace ("northwind-qa", served from `127.0.0.1`).
 
 Annotations are baked into the PNGs: a brand-violet (`#7a7efa`) ring around each control the text mentions and a numbered badge, filled with the brand gradient, matching the step's circled number (①, ②, …). Rings stay violet rather than gradient because the gradient's magenta would blend into the app's magenta diff pixels. Ring positions came from each control's Windows UI Automation bounding box, looked up by accessible name, so they line up with the real controls. When you change a step's numbering, recapture or re-annotate the image so the badges still match.
 

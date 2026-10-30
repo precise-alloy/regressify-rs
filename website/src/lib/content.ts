@@ -1,12 +1,8 @@
 import { getCollection, type CollectionEntry } from 'astro:content';
 
 // Drafts render in `astro dev` for previewing but never ship in production builds.
+// Docs are listed and routed by Starlight, which applies the same draft rule.
 const includeEntry = ({ data }: { data: { draft: boolean } }) => import.meta.env.DEV || !data.draft;
-
-export async function getDocs(): Promise<CollectionEntry<'docs'>[]> {
-  const entries = await getCollection('docs', includeEntry);
-  return entries.sort((a, b) => a.data.order - b.data.order || a.data.title.localeCompare(b.data.title));
-}
 
 export async function getPosts(): Promise<CollectionEntry<'blog'>[]> {
   const entries = await getCollection('blog', includeEntry);

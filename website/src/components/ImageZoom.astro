@@ -1,6 +1,8 @@
 ---
-// Full-screen viewer for images inside `.prose`. Progressive enhancement: without
-// JavaScript, images render inline as usual and nothing here is interactive.
+// Full-screen viewer for content images: `.prose` (blog) and `.sl-markdown-content`
+// (Starlight docs, via components/starlight/MarkdownContent.astro). Progressive
+// enhancement: without JavaScript, images render inline as usual and nothing
+// here is interactive.
 // The viewer is always dark, whatever the page theme, so screenshots read the
 // same against the backdrop; its colors are therefore fixed rather than tokens.
 import Icon from './Icon.astro';
@@ -15,6 +17,8 @@ import Icon from './Icon.astro';
 </dialog>
 
 <script>
+  // `.not-content` opts Starlight UI (cards, buttons) out of content styling.
+  const CONTENT_IMAGES = '.prose img, .sl-markdown-content img:not(:where(.not-content *))';
   const dialog = document.querySelector<HTMLDialogElement>('dialog.image-zoom');
   const view = dialog?.querySelector<HTMLImageElement>('[data-zoom-image]');
   const caption = dialog?.querySelector<HTMLElement>('[data-zoom-caption]');
@@ -31,7 +35,7 @@ import Icon from './Icon.astro';
       dialog.showModal();
     };
 
-    for (const image of document.querySelectorAll<HTMLImageElement>('.prose img')) {
+    for (const image of document.querySelectorAll<HTMLImageElement>(CONTENT_IMAGES)) {
       // Images are made operable only once this script runs, so no-JS readers never
       // meet a focusable element that does nothing.
       image.tabIndex = 0;
@@ -122,7 +126,7 @@ import Icon from './Icon.astro';
     background: #242424;
   }
 
-  :global(.prose img[data-zoomable]) {
+  :global(img[data-zoomable]) {
     cursor: zoom-in;
   }
 

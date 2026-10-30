@@ -5,9 +5,11 @@
  * theme JSON (verified 2026-10-22) and may differ from the app by 1/255.
  * When the desktop theme changes, update these values in the same change.
  *
- * Each color uses light-dark(light, dark). `color-scheme` picks the branch:
- * the system preference by default, or [data-theme] when the visitor chooses a
- * theme. Without JavaScript the system preference still applies.
+ * Each color uses light-dark(light, dark). `color-scheme` picks the branch.
+ * ThemeScript.astro always sets [data-theme] to the resolved theme (the saved
+ * choice, else the system preference). Without JavaScript there is no attribute
+ * on landing pages, so the system preference still applies; docs pages handle
+ * Starlight's server-rendered data-theme="dark" in starlight.css.
  */
 :root {
   color-scheme: light dark;

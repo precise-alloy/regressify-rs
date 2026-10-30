@@ -1,8 +1,13 @@
 ---
 title: Getting started
 description: Install Regressify, create your first test suite, and run your first visual check.
-order: 1
-updated: 2026-10-22
+sidebar:
+  order: 1
+# The next page is the Desktop app group's Overview; its sidebar label alone
+# would not say which overview the card leads to.
+next:
+  label: Desktop app overview
+lastUpdated: 2026-10-22
 ---
 
 This guide takes you from an empty folder to a reviewed visual check. It is adapted from the repository's

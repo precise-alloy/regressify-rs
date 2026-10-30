@@ -1,0 +1,20 @@
+---
+// Sends old single-page desktop guide links (/docs/desktop-app/#run-settings) to
+// the page that now holds that section. Rendered only on the desktop Overview
+// page by the Head override. Without JavaScript the page stays put and still
+// lists every section.
+---
+
+<script>
+  import { resolveLegacyHash } from '../../lib/docs-redirects';
+
+  function redirect() {
+    const target = resolveLegacyHash(location.hash, (id) => document.getElementById(id) !== null);
+    // replace() keeps the dead link out of history, so Back does not loop here.
+    if (target) location.replace(target);
+  }
+
+  redirect();
+  // Same-document navigation to an old hash does not reload the page.
+  addEventListener('hashchange', redirect);
+</script>

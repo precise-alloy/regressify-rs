@@ -1,0 +1,344 @@
+/*
+ * Starlight theme for the docs (loaded through `customCss` after tokens.css).
+ *
+ * Maps Starlight's --sl-* properties onto the site tokens, which mirror the
+ * desktop app's neutral theme, so the docs match the landing pages and the app.
+ * Every color token is light-dark(), so one declaration covers both themes.
+ *
+ * Everything here is deliberately unlayered: Starlight puts all of its styles
+ * in `@layer starlight.*`, and unlayered rules beat layered ones whatever their
+ * specificity, including Starlight's [data-theme='light'] and media-query
+ * blocks. Do not import global.css on docs pages for the same reason: its
+ * element rules (a, img, svg, body) would override Starlight's components.
+ */
+
+:root {
+  /*
+   * Gray scale. Starlight names it from the dark theme's point of view
+   * (white = strongest text, black = page background) and inverts it in light
+   * mode; light-dark() does the same inversion here.
+   */
+  --sl-color-white: var(--foreground);
+  --sl-color-gray-1: light-dark(#171717, #f5f5f5);
+  --sl-color-gray-2: var(--tab-foreground);
+  /* Muted text (TOC, page meta): >= 4.5:1 on the page and sidebar backgrounds. */
+  --sl-color-gray-3: var(--muted-foreground);
+  --sl-color-gray-4: light-dark(#a3a3a3, #525252);
+  --sl-color-gray-5: var(--border);
+  --sl-color-gray-6: light-dark(#f5f5f5, #171717);
+  --sl-color-gray-7: light-dark(#fafafa, #121212);
+  --sl-color-black: var(--background);
+
+  /* No brand accent: like the desktop app, emphasis is foreground on neutral. */
+  --sl-color-accent-low: var(--secondary);
+  --sl-color-accent: light-dark(#404040, #d4d4d4);
+  --sl-color-accent-high: var(--primary);
+
+  /*
+   * Aside and badge hues, built on the status tokens (each >= 4.5:1 on its
+   * low background): note = info, tip and success = success, caution =
+   * warning, danger = danger.
+   */
+  --sl-color-blue-low: light-dark(#ecfeff, #0b2a30);
+  --sl-color-blue: var(--info);
+  --sl-color-blue-high: var(--info);
+  --sl-color-green-low: light-dark(#f0fdf4, #0d2818);
+  --sl-color-green: var(--success);
+  --sl-color-green-high: var(--success);
+  --sl-color-purple-low: light-dark(#f0fdf4, #0d2818);
+  --sl-color-purple: var(--success);
+  --sl-color-purple-high: var(--success);
+  --sl-color-orange-low: light-dark(#fefce8, #2a2405);
+  --sl-color-orange: var(--warning);
+  --sl-color-orange-high: var(--warning);
+  --sl-color-red-low: light-dark(#fef2f2, #2c1010);
+  --sl-color-red: var(--danger);
+  --sl-color-red-high: var(--danger);
+
+  --sl-color-text: var(--foreground);
+  --sl-color-text-accent: var(--link);
+  --sl-color-text-invert: var(--primary-foreground);
+  --sl-color-bg: var(--background);
+  --sl-color-bg-nav: var(--title-bar);
+  /* The desktop navigator panel color. */
+  --sl-color-bg-sidebar: var(--navigator);
+  --sl-color-bg-inline-code: var(--muted);
+  --sl-color-bg-accent: var(--primary);
+  --sl-color-hairline-light: var(--border);
+  --sl-color-hairline: var(--border);
+  --sl-color-hairline-shade: var(--title-bar-border);
+
+  --sl-shadow-sm: var(--shadow-sm);
+  --sl-shadow-md: var(--shadow-md);
+  --sl-shadow-lg: var(--shadow-lg);
+
+  /* Type: the platform UI font, no web fonts, same scale as the site. */
+  --sl-font: var(--font-sans);
+  --sl-font-mono: var(--font-mono);
+  --sl-text-code: var(--text-mono);
+  --sl-text-code-sm: var(--text-mono);
+  --sl-text-h1: var(--text-3xl);
+  --sl-text-h2: var(--text-2xl);
+  --sl-text-h3: var(--text-xl);
+  --sl-text-h4: var(--text-lg);
+  --sl-text-h5: var(--text-md);
+  /* Used by Starlight's markdown.css but never defined by it. */
+  --sl-text-h6: var(--text-sm);
+  --sl-line-height: 1.7;
+
+  /*
+   * Header: the site header's 51px (2px brand stripe + 48px bar + 1px border,
+   * --header-height) at every width, with the site container's 16/24px gutter.
+   */
+  --sl-nav-height: var(--header-height);
+  --sl-nav-pad-y: 0px;
+  --sl-nav-pad-x: var(--space-lg);
+  --sl-nav-gap: var(--space-xl);
+  --sl-menu-button-size: var(--control-md);
+}
+
+/* The search dialog backdrop does not see :root tokens in every browser, so it
+   gets a literal value. */
+:root,
+::backdrop {
+  --sl-color-backdrop-overlay: rgb(10 10 10 / 0.6);
+}
+
+@media (min-width: 50rem) {
+  :root {
+    --sl-nav-pad-x: var(--space-xl);
+    /* Starlight steps every heading up on wide screens; only the title grows here. */
+    --sl-text-h1: var(--text-4xl);
+  }
+}
+
+/*
+ * Starlight server-renders <html data-theme="dark">, and tokens.css turns that
+ * into `color-scheme: dark`. ThemeScript replaces it with the visitor's
+ * resolved theme and adds `.js`; without JavaScript, follow the system instead
+ * of forcing dark.
+ */
+:root:not(.js) {
+  color-scheme: light dark;
+}
+
+/* The page scrollbar from global.css, so it stays the same between the landing
+   pages and the docs. */
+html {
+  scrollbar-gutter: stable;
+  scrollbar-color: var(--muted-foreground) var(--muted);
+}
+
+/* Helpers from global.css that shared components (ThemeToggle) rely on. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+html:not(.js) .requires-js {
+  display: none !important;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+/* Same focus shape as the rest of the site (global.css). */
+:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px var(--focus-indicator);
+}
+
+/*
+ * The menu button and prev/next cards clear box-shadow in their resting style
+ * below, which would remove the ring (the outline above is transparent). The
+ * extra pseudo-class out-ranks those rules wherever they sit in this file.
+ */
+.sl-menu-button:focus-visible,
+.pagination-links a:focus-visible {
+  box-shadow: 0 0 0 3px var(--focus-indicator);
+}
+
+/* ---- Header: the site header's 2px brand gradient stripe. ---- */
+
+.page > header.header {
+  padding-top: var(--tab-underline-width);
+  background:
+    var(--brand-gradient) top / 100% var(--tab-underline-width) no-repeat,
+    var(--title-bar);
+}
+
+/* Starlight's menu button, restyled as the site's ghost hamburger. */
+.sl-menu-button {
+  top: calc(var(--tab-underline-width) + (48px - var(--sl-menu-button-size)) / 2);
+  border-radius: var(--radius-md);
+  background-color: transparent;
+  color: var(--button-ghost-foreground);
+  box-shadow: none;
+}
+
+.sl-menu-button:hover,
+.sl-menu-button:has(~ :popover-open) {
+  background-color: var(--button-ghost-hover);
+}
+
+/* ---- Search ---- */
+
+site-search button[data-open-modal] {
+  border-radius: var(--radius-md);
+}
+
+@media (min-width: 50rem) {
+  site-search button[data-open-modal] {
+    height: var(--control-md);
+    border-color: var(--input);
+    background-color: var(--background);
+    color: var(--muted-foreground);
+  }
+
+  site-search button[data-open-modal]:hover {
+    border-color: var(--ring);
+    color: var(--foreground);
+  }
+
+  site-search dialog {
+    border-radius: var(--radius-lg);
+  }
+}
+
+site-search dialog {
+  background-color: var(--popover);
+  border-color: var(--border);
+}
+
+/* ---- Left sidebar (the page list; the mobile menu footer styles itself) ---- */
+
+.sidebar-content .top-level a {
+  border-radius: var(--radius-md);
+}
+
+.sidebar-content .top-level a:hover {
+  background-color: var(--button-ghost-hover);
+}
+
+/*
+ * Current page: the old docs sidebar treatment. The background alone is below
+ * 3:1 against the sidebar and disappears in forced-colors mode, so it also gets
+ * the 2px indicator used by the header tabs. Padding shrinks by the border
+ * width so the label does not move.
+ */
+.sidebar-content .top-level a[aria-current='page'],
+.sidebar-content .top-level a[aria-current='page']:hover,
+.sidebar-content .top-level a[aria-current='page']:focus {
+  padding-inline-start: calc(0.5rem - var(--tab-underline-width));
+  border-inline-start: var(--tab-underline-width) solid var(--tab-underline);
+  background-color: var(--secondary-active);
+  color: var(--foreground);
+  font-weight: var(--weight-medium);
+}
+
+/* ---- Right sidebar ("On this page") ---- */
+
+starlight-toc a {
+  border-inline-start: var(--tab-underline-width) solid transparent;
+  border-radius: 0;
+}
+
+starlight-toc a[aria-current='true'] {
+  border-inline-start-color: var(--tab-underline);
+  color: var(--foreground);
+  font-weight: var(--weight-medium);
+}
+
+@media (forced-colors: active) {
+  .sidebar-content .top-level a[aria-current='page'],
+  starlight-toc a[aria-current='true'] {
+    border-inline-start-color: Highlight;
+  }
+}
+
+/* ---- Page content ---- */
+
+.sl-markdown-content :not(pre) > code:not(:where(.not-content *)) {
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+/* Code stays monochrome (Expressive Code is disabled in astro.config.mjs). */
+.sl-markdown-content pre:not(:where(.not-content *)) {
+  overflow-x: auto;
+  border-color: var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--muted);
+  color: var(--foreground);
+  line-height: var(--leading-sm);
+}
+
+.sl-markdown-content table:not(:where(.not-content *)) {
+  font-size: var(--text-sm);
+}
+
+.sl-markdown-content th:not(:where(.not-content *)) {
+  color: var(--muted-foreground);
+  font-weight: var(--weight-medium);
+}
+
+/*
+ * Body links use the site's link style (global.css). Starlight's hover color,
+ * --sl-color-white, is the same value as --link here, so without this rule
+ * hovering would change nothing.
+ */
+.sl-markdown-content a:not(:where(.not-content *)) {
+  text-underline-offset: 3px;
+}
+
+.sl-markdown-content a:hover:not(:where(.not-content *)) {
+  color: var(--link-hover);
+}
+
+.sl-markdown-content blockquote:not(:where(.not-content *)) {
+  border-inline-start: var(--tab-underline-width) solid var(--border);
+  color: var(--muted-foreground);
+}
+
+/* App screenshots are dark window captures; the hairline border keeps their
+   edge visible on the dark page background. Same as `.prose img`. */
+.sl-markdown-content img:not(:where(.not-content *)) {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  /* Tall crops (the navigator) would otherwise fill the screen; the full-screen
+     viewer still shows them at full size. */
+  max-height: 640px;
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.starlight-aside {
+  border-radius: var(--radius-md);
+}
+
+/* Prev/next cards: site card shape, no heavy shadow. */
+.pagination-links a {
+  border-color: var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+.pagination-links a:hover {
+  border-color: var(--ring);
+  background-color: var(--list-hover);
+}
+
+.pagination-links .link-title {
+  font-size: var(--text-lg);
+}

@@ -2,7 +2,8 @@
 import '../styles/global.css';
 import Footer from '../components/Footer.astro';
 import Header from '../components/Header.astro';
-import { SITE, THEME_STORAGE_KEY } from '../config/site';
+import ThemeScript from '../components/ThemeScript.astro';
+import { SITE } from '../config/site';
 
 interface Props {
   title?: string;
@@ -44,17 +45,8 @@ const ogImage = new URL('/icon.png', Astro.site);
     <meta property="og:image" content={ogImage} />
     <meta name="twitter:card" content="summary" />
     <meta name="generator" content={Astro.generator} />
-    <!--
-      Runs before first paint so a saved theme never flashes the wrong colors.
-      Only the two literal values are accepted from storage.
-    -->
-    <script is:inline define:vars={{ key: THEME_STORAGE_KEY }}>
-      try {
-        const saved = localStorage.getItem(key);
-        if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved;
-      } catch {}
-      document.documentElement.classList.add('js');
-    </script>
+    <!-- Runs before first paint so a saved theme never flashes the wrong colors. -->
+    <ThemeScript />
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>

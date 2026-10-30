@@ -1,24 +1,19 @@
 ---
 // Echoes the desktop title bar: logo, semibold wordmark, underline tabs with a
 // 2px active indicator, and ghost icon buttons on the right.
+import Brand from './Brand.astro';
 import Button from './Button.astro';
 import Icon from './Icon.astro';
 import ThemeToggle from './ThemeToggle.astro';
 import { HEADER_LINKS, SITE } from '../config/site';
+import { isActivePath } from '../lib/nav';
 
-const path = Astro.url.pathname;
-const isActive = (href: string) => {
-  const base = href.replace(/\/$/, '');
-  return path.replace(/\/$/, '') === base || path.startsWith(`${base}/`);
-};
+const isActive = (href: string) => isActivePath(Astro.url.pathname, href);
 ---
 
 <header class="site-header">
   <div class="container bar">
-    <a href="/" class="brand" aria-label="Regressify home">
-      <img src="/icon.svg" alt="" width="22" height="22" />
-      <span>{SITE.name}</span>
-    </a>
+    <Brand />
     <nav aria-label="Main" class="tabs">
       {
         HEADER_LINKS.map((link) => (
@@ -103,20 +98,6 @@ const isActive = (href: string) => {
     align-items: center;
     column-gap: var(--space-sm);
     height: 48px;
-  }
-
-  .brand {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-sm);
-    min-height: 44px;
-    color: var(--foreground);
-    font-size: var(--text-sm);
-    font-weight: var(--weight-semibold);
-    text-decoration: none;
-    border-radius: var(--radius-md);
-    flex-shrink: 0;
-    white-space: nowrap;
   }
 
   .tabs {

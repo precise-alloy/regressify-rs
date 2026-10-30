@@ -1,0 +1,9 @@
+---
+// Starlight override: replaces Starlight's `starlight-theme` storage with the
+// site's single no-flash script, so a theme chosen on any page applies to both
+// the landing pages and the docs. Stock ThemeSelect depends on the global the
+// default provider defines; it is overridden too and must not be rendered.
+import ThemeScript from '../ThemeScript.astro';
+---
+
+<ThemeScript />
