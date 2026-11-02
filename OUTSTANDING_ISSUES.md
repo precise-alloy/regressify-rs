@@ -3,6 +3,32 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Frontend Asset Build Race (2026-11-02)
+
+- Open: [CodeQL alert 3](https://github.com/precise-alloy/regressify-rs/security/code-scanning/3)
+  identifies a check/use race in [asset synchronization](frontend/scripts/sync-assets.ts).
+  A process that can replace entries in the build tree concurrently can change a
+  checked path before it is read. The symlink checks are not a security boundary
+  against such a writer, and a cooperative lock would not prevent it.
+- The supported mitigation is an isolated checkout where no other process can
+  modify the build inputs or embedded asset destination. The
+  [asset workflow](.github/workflows/snapshot-assets.yml) uses a separate checkout
+  and concurrency group. This build-time issue is distinct from runtime test
+  output. A cross-platform handle-relative, no-follow traversal has not been
+  implemented or tested.
+
+## Vendored Python Locator Escaping (2026-11-02)
+
+- Open: [CodeQL alert 1](https://github.com/precise-alloy/regressify-rs/security/code-scanning/1)
+  flags Python locator string generation in the vendored
+  [injected script](src/test/vendor/injected.js). By source inspection, the
+  [Regressify runtime](src/test/runtime.rs) configures the engine for JavaScript
+  and uses selector parsing and querying, not the Python locator generator.
+  Reachability and exploitability were not tested.
+- The same escaping expression remains in the upstream `playwright-core` 1.64.1
+  bundle. No local patch or vendor upgrade was made; revisit the alert when a
+  suitable upstream fix is available or the integration exposes this generator.
+
 ## Website-Only Deploys (2026-10-29)
 
 - Open: the [website deploy workflow](.github/workflows/website-deploy.yml) has

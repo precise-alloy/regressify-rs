@@ -37,6 +37,11 @@ The sync script validates the output in a staging directory before replacing the
 previous assets. It removes obsolete assets and generates the Rust include list.
 Files are replaced atomically inside the existing directory so Windows editor
 watchers do not block a directory rename. Finish the frontend build before Cargo.
+Run builds in an isolated checkout where no other process can modify `dist`,
+`hosting`, or `../src/snapshot/data` during the build. The sync script rejects
+observed symlinks, but its path-based checks do not protect against a concurrent
+writer replacing entries between checks and reads. This is separate from the
+output directory used by a running Regressify test.
 Commit the generated directory for ordinary Cargo builds, which do not run Bun.
 Do not edit generated files directly. `bun build` is Bun's separate built-in bundler;
 the project command is **`bun run build`**.
