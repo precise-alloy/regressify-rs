@@ -29,9 +29,14 @@ Verified: 2026-11-03
   serializes that test (write lock) against desktop-launching tests (read lock).
 - Product bug surfaced by parallel load: a navigation could destroy a cached
   isolated-world context before its event arrived. `Runtime::evaluate` in
-  [runtime.rs](../../src/test/runtime.rs) now evicts the cached frame and retries on
-  "Cannot find context with specified id". The regression test is
-  `evaluation_recovers_when_navigation_destroys_a_cached_context`.
+  [runtime.rs](../../src/test/runtime.rs) now evicts the cached frame and retries
+  only when an error-chain cause is exactly the CDP protocol rejection
+  `CDP command failed: Cannot find context with specified id`
+  (`is_stale_context`). A page exception with the same text already ran, so
+  retrying it would re-run side effects. The regression tests are
+  `evaluation_recovers_when_navigation_destroys_a_cached_context` (ignored, which
+  also counts the runs of a throwing expression) and
+  `only_protocol_stale_context_errors_are_retryable`.
 
 ## Pitfalls
 
@@ -85,6 +90,12 @@ Verified: 2026-11-03
   `site_serves_every_concurrent_keep_alive_connection` reproduces the stall
   against tiny_http under CPU load. The desktop landing preview still uses
   tiny_http (see [OUTSTANDING_ISSUES.md](../../OUTSTANDING_ISSUES.md)).
+- `Site` shutdown joins the acceptor before shutting down registered connections,
+  so no accepted socket registers after the sweep. On `Connection: close`, it
+  sends a write-side shutdown before a bounded (1 s) body drain: draining first
+  blocks on a client that stopped uploading after an early response, and a full
+  shutdown or close with unread data can reset the socket and discard the
+  response (`site_closes_after_an_early_response_without_waiting_for_the_body`).
 - Long tail: `workspace_files_scroll_within_sidebar_at_both_window_sizes` opens
   20 editors one after another. Many `desktop::git::tests` take longer than 60 s
   under full parallel load, which is expected and not a hang.

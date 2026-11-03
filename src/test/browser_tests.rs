@@ -149,7 +149,8 @@ pub(crate) struct Site {
     stop: Arc<AtomicBool>,
     address: std::net::SocketAddr,
     connections: Arc<Mutex<Vec<TcpStream>>>,
-    threads: Vec<std::thread::JoinHandle<()>>,
+    acceptor: Option<std::thread::JoinHandle<()>>,
+    dispatcher: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Site {
@@ -194,7 +195,8 @@ impl Site {
             stop,
             address,
             connections,
-            threads: vec![acceptor, dispatcher],
+            acceptor: Some(acceptor),
+            dispatcher: Some(dispatcher),
         })
     }
 }
@@ -204,6 +206,10 @@ impl Drop for Site {
         self.stop.store(true, Ordering::Relaxed);
         // Wake the blocking accept so the acceptor observes `stop`.
         let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
+        // Join before the sweep so no accepted connection registers after it.
+        if let Some(acceptor) = self.acceptor.take() {
+            let _ = acceptor.join();
+        }
         for connection in self
             .connections
             .lock()
@@ -212,8 +218,8 @@ impl Drop for Site {
         {
             let _ = connection.shutdown(Shutdown::Both);
         }
-        for thread in self.threads.drain(..) {
-            let _ = thread.join();
+        if let Some(dispatcher) = self.dispatcher.take() {
+            let _ = dispatcher.join();
         }
     }
 }
@@ -301,10 +307,15 @@ fn serve_connection(stream: TcpStream, requests: &mpsc::Sender<Request>) -> std:
         let Some(mut body) = body else {
             return Ok(());
         };
-        std::io::copy(&mut body, &mut std::io::sink())?;
         if close {
-            return writer.shutdown(Shutdown::Both);
+            // Send EOF before draining so a client that stopped uploading is not
+            // blocked; the bounded drain avoids a reset discarding the response.
+            writer.shutdown(Shutdown::Write)?;
+            writer.set_read_timeout(Some(Duration::from_secs(1)))?;
+            let _ = std::io::copy(&mut body, &mut std::io::sink());
+            return Ok(());
         }
+        std::io::copy(&mut body, &mut std::io::sink())?;
         reader = body.reader;
     }
 }
@@ -446,13 +457,37 @@ fn site_serves_every_concurrent_keep_alive_connection() -> Result<()> {
             )?;
         }
         for (index, connection) in connections.iter().enumerate() {
+            let mut reader = BufReader::new(connection);
             let mut status = String::new();
-            BufReader::new(connection)
+            reader
                 .read_line(&mut status)
                 .with_context(|| format!("round {round}: connection {index} was never served"))?;
             ensure!(
                 status.starts_with("HTTP/1.1 200"),
                 "round {round}: connection {index}: {status:?}"
+            );
+            let mut length = None;
+            loop {
+                let mut header = String::new();
+                ensure!(
+                    reader.read_line(&mut header)? > 0,
+                    "round {round}: connection {index}: headers ended early"
+                );
+                if header == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = Some(value.trim().parse::<usize>()?);
+                }
+            }
+            let mut body = vec![0; length.context("response has no Content-Length")?];
+            reader.read_exact(&mut body)?;
+            ensure!(
+                body == format!("/{index}").as_bytes(),
+                "round {round}: connection {index} got {:?}",
+                String::from_utf8_lossy(&body)
             );
         }
         Ok(())
@@ -499,6 +534,29 @@ fn site_answers_dropped_requests_and_honours_connection_close() -> Result<()> {
         .context("sized body not echoed")?;
     ensure!(
         dropped < chunked && chunked < sized && transcript.ends_with("POST world"),
+        "{transcript:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn site_closes_after_an_early_response_without_waiting_for_the_body() -> Result<()> {
+    let site = Site::new(|request| {
+        let _ = request.respond(Response::from_string("early"));
+    })?;
+    let mut connection = TcpStream::connect(site.origin.trim_start_matches("http://"))?;
+    connection.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        connection,
+        "POST /upload HTTP/1.1\r\nHost: fixture\r\nContent-Length: 1000000\r\n\
+         Connection: close\r\n\r\npartial"
+    )?;
+    let mut transcript = String::new();
+    connection
+        .read_to_string(&mut transcript)
+        .context("the server waited for the unsent body instead of closing")?;
+    ensure!(
+        transcript.starts_with("HTTP/1.1 200") && transcript.ends_with("early"),
         "{transcript:?}"
     );
     Ok(())
