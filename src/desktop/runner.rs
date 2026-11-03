@@ -2052,23 +2052,34 @@ pub(crate) mod tests {
                 .unwrap();
             lock.lock().unwrap();
             println!("orphan ready");
+            // Signal the parent only after the ready line is in the shared pipe.
+            (&lock).write_all(b"ready").unwrap();
             thread::park();
         }
         if mode == "orphan-pipe" {
             let lock_path = std::env::var_os("REGRESSIFY_ORPHAN_LOCK").unwrap();
-            let child = Command::new(std::env::current_exe().unwrap())
+            let mut child = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "desktop::runner::tests::process_fixture",
                     "--nocapture",
                 ])
                 .env("REGRESSIFY_DESKTOP_FIXTURE", "orphan-child")
-                .env("REGRESSIFY_ORPHAN_LOCK", lock_path)
+                .env("REGRESSIFY_ORPHAN_LOCK", &lock_path)
                 .stdin(Stdio::null())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit())
                 .spawn()
                 .unwrap();
+            // Exit only once the descendant is ready. Otherwise slow process startup
+            // under parallel test load races the worker's short pipe-drain grace.
+            while !std::fs::metadata(&lock_path).is_ok_and(|metadata| metadata.len() > 0) {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "Orphan descendant exited before becoming ready"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
             // Intentionally leave the descendant running when the parent exits so
             // pipe-drain tests verify process-group cleanup.
             std::mem::forget(child);
@@ -2182,18 +2193,19 @@ pub(crate) mod tests {
             let lock_path = directory.path().join("orphan.lock");
             let mut command = fixture("orphan-pipe");
             command.env("REGRESSIFY_ORPHAN_LOCK", &lock_path);
-            let started = std::time::Instant::now();
             let mut handle = RunHandle::spawn(command, None, None, None).unwrap();
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            // The log channel disconnects if every pipe closes, so this observes
+            // either readiness or a failed fixture without a startup-time budget.
             loop {
                 let line = handle
                     .logs
-                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .recv()
                     .expect("orphan child must emit ready line");
                 if line.text.contains("orphan ready") {
                     break;
                 }
             }
+            let started = std::time::Instant::now();
             if cancel_after_parent_exit {
                 handle.cancel();
             }

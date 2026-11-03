@@ -3344,7 +3344,7 @@ mod tests {
                 std::thread::park();
             }
         }
-        let _child = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "desktop::updates::tests::preparation_group_fixture",
@@ -3352,9 +3352,13 @@ mod tests {
             .env("REGRESSIFY_PREPARE_TEST_CHILD", "1")
             .spawn()
             .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // Observe the descendant instead of a wall-clock budget: process startup
+        // is slow under parallel test load, and the parent group bounds this wait.
         while !fs::metadata(directory.join("hold.lock")).is_ok_and(|metadata| metadata.len() > 0) {
-            assert!(std::time::Instant::now() < deadline);
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "Preparation descendant exited before holding its lock"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         std::process::exit(0);
@@ -3364,51 +3368,73 @@ mod tests {
     #[tokio::test]
     async fn preparation_cancellation_and_timeout_reap_launcher_descendants() {
         for mode in ["timeout", "pause", "handoff"] {
-            let directory = tempfile::tempdir().unwrap();
-            let release = UpdateFeed::new("https://regressify.eshn.dev")
-                .unwrap()
-                .parse_manifest(&manifest(b"installer"))
-                .unwrap();
-            let control = DownloadControl::new(&release);
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    "desktop::updates::tests::preparation_group_fixture",
-                ])
-                .env("REGRESSIFY_PREPARE_TEST_DIR", directory.path())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            let stop = async {
-                tokio::time::timeout(Duration::from_secs(15), async {
-                    while !fs::metadata(directory.path().join("hold.lock"))
-                        .is_ok_and(|metadata| metadata.len() > 0)
-                    {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .unwrap();
+            // The timeout under test is wall-clock, but starting PowerShell plus two
+            // test-binary processes can exceed it under parallel load. Retry with a
+            // longer timeout only when the descendant never became ready; every
+            // attempt still asserts that cleanup leaves no survivor.
+            let mut timeout = Duration::from_secs(10);
+            loop {
+                if preparation_reaps_descendants(mode, timeout).await {
+                    break;
+                }
+                timeout *= 2;
+                assert!(
+                    timeout <= Duration::from_secs(80),
+                    "{mode}: preparation descendant never became ready"
+                );
+            }
+        }
+    }
+
+    /// Returns whether the descendant held its lock before preparation ended.
+    #[cfg(windows)]
+    async fn preparation_reaps_descendants(mode: &str, timeout: Duration) -> bool {
+        let directory = tempfile::tempdir().unwrap();
+        let lock_path = directory.path().join("hold.lock");
+        let release = UpdateFeed::new("https://regressify.eshn.dev")
+            .unwrap()
+            .parse_manifest(&manifest(b"installer"))
+            .unwrap();
+        let control = DownloadControl::new(&release);
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "desktop::updates::tests::preparation_group_fixture",
+            ])
+            .env("REGRESSIFY_PREPARE_TEST_DIR", directory.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let ready = async {
+            while !fs::metadata(&lock_path).is_ok_and(|metadata| metadata.len() > 0) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let preparation = super::wait_for_preparation(&mut command, &control, timeout);
+        tokio::pin!(preparation);
+        let (result, became_ready) = tokio::select! {
+            result = &mut preparation => (result, false),
+            () = ready => {
                 match mode {
                     "pause" => control.cancel(),
                     "handoff" => control.cancel_for_handoff(),
                     _ => {}
                 }
-            };
-            let (result, ()) = tokio::join!(
-                super::wait_for_preparation(&mut command, &control, Duration::from_secs(10)),
-                stop
-            );
-            assert!(
-                result.is_err(),
-                "{mode} completed while a child was still running"
-            );
+                (preparation.await, true)
+            }
+        };
+        assert!(
+            result.is_err(),
+            "{mode} completed while a child was still running"
+        );
+        if lock_path.exists() {
             let hold = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
-                .open(directory.path().join("hold.lock"))
+                .open(&lock_path)
                 .unwrap();
             hold.try_lock().expect("Preparation child survived cleanup");
         }
+        became_ready
     }
 }
