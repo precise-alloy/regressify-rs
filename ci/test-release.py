@@ -362,20 +362,47 @@ gh() {
         publish_gh = by_name["Publish GitHub Release"]
         self.assertEqual(publish_gh["env"]["GH_TOKEN"], "${{ github.token }}")
         self.assertIn("ci/release_feed.py publish", publish_gh["run"])
+
+        catalog = WORKFLOW["jobs"]["mcp-catalog"]
+        self.assertNotIn("needs", catalog)
+        self.assertNotIn("permissions", catalog)
+        self.assertNotIn("secrets.", json.dumps(catalog))
+        catalog_steps = catalog["steps"]
+        catalog_build = next(step for step in catalog_steps if step.get("name") == "Build release MCP catalog")
+        self.assertEqual(
+            catalog_build["run"],
+            "cargo run --locked --features mcp-catalog --bin regressify-mcp-catalog > mcp-catalog.json",
+        )
+        catalog_upload = next(
+            step for step in catalog_steps if step.get("uses", "").startswith("actions/upload-artifact@")
+        )
+        self.assertEqual(catalog_upload["with"], {
+            "name": "mcp-catalog",
+            "path": "mcp-catalog.json",
+            "if-no-files-found": "error",
+        })
+        self.assertLess(catalog_steps.index(catalog_build), catalog_steps.index(catalog_upload))
+
         deploy = WORKFLOW["jobs"]["deploy"]
-        self.assertEqual(deploy["needs"], ["set-matrix", "publish"])
+        self.assertEqual(deploy["needs"], ["set-matrix", "publish", "mcp-catalog"])
         self.assertNotIn("permissions", deploy)
         steps = deploy["steps"]
         by_name = {step.get("name"): step for step in steps}
         verify = by_name["Verify GitHub release before building website"]
         self.assertIn("ci/release_feed.py verify-github", verify["run"])
         self.assertLess(steps.index(verify), steps.index(by_name["Deploy Cloudflare Worker"]))
-        self.assertIn("--features mcp-catalog --bin regressify-mcp-catalog", by_name["Build release MCP catalog"]["run"])
-        self.assertLess(steps.index(by_name["Build release MCP catalog"]), steps.index(by_name["Deploy Cloudflare Worker"]))
+        catalog_download = by_name["Download MCP catalog"]
+        self.assertTrue(catalog_download["uses"].startswith("actions/download-artifact@"))
+        self.assertEqual(catalog_download["with"], {
+            "name": "mcp-catalog",
+            "path": "${{ runner.temp }}",
+        })
+        self.assertLess(steps.index(catalog_download), steps.index(by_name["Deploy Cloudflare Worker"]))
         run = by_name["Deploy Cloudflare Worker"]
         self.assertEqual(run["run"], "bash ci/deploy-cloudflare.sh")
         self.assertEqual(run["env"]["CLOUDFLARE_ACCOUNT_ID"], "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}")
         self.assertEqual(run["env"]["CLOUDFLARE_API_TOKEN"], "${{ secrets.CLOUDFLARE_API_TOKEN }}")
+        self.assertEqual(run["env"]["MCP_CATALOG"], "${{ runner.temp }}/mcp-catalog.json")
         self.assertEqual(run["env"]["DOWNLOADS_DIR"], "${{ runner.temp }}/downloads")
         self.assertIn("ci/release_feed.py verify", by_name["Verify published update feed"]["run"])
         self.assertIn("Regressify-Setup-$INSTALLER_VERSION-x64.exe", by_name["Verify published update feed"]["run"])
@@ -385,7 +412,7 @@ gh() {
         self.assertNotIn("PAT_TOKEN", json.dumps(WORKFLOW))
         self.assertEqual(WORKFLOW["jobs"]["release"]["needs"], "set-matrix")
         self.assertNotIn("needs", WORKFLOW["jobs"]["checks"])
-        for job_name in ("release", "installer", "publish", "deploy"):
+        for job_name in ("release", "installer", "publish", "mcp-catalog", "deploy"):
             for step in WORKFLOW["jobs"][job_name]["steps"]:
                 self.assertNotIn("continue-on-error", step)
                 self.assertNotIn("always()", step.get("if", ""))
