@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{BufRead, BufReader, ErrorKind, Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
     path::PathBuf,
@@ -81,9 +82,31 @@ impl Request {
     }
 }
 
+/// One accepted socket shared without `TcpStream::try_clone`: on Windows its
+/// duplicates are inheritable, so a child process spawned by a concurrent test
+/// could keep the connection open after the fixture closes it.
+#[derive(Clone)]
+struct Connection(Arc<TcpStream>);
+
+impl Read for Connection {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        (&*self.0).read(buffer)
+    }
+}
+
+impl Write for Connection {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        (&*self.0).write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        (&*self.0).flush()
+    }
+}
+
 /// Request body framed by `Content-Length` or chunked transfer encoding.
 struct Body {
-    reader: BufReader<TcpStream>,
+    reader: BufReader<Connection>,
     remaining: u64,
     chunked: bool,
     started: bool,
@@ -148,7 +171,7 @@ pub(crate) struct Site {
     pub origin: String,
     stop: Arc<AtomicBool>,
     address: std::net::SocketAddr,
-    connections: Arc<Mutex<Vec<TcpStream>>>,
+    connections: Arc<Mutex<HashMap<u64, Connection>>>,
     acceptor: Option<std::thread::JoinHandle<()>>,
     dispatcher: Option<std::thread::JoinHandle<()>>,
 }
@@ -158,23 +181,28 @@ impl Site {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
-        let connections = Arc::new(Mutex::new(Vec::<TcpStream>::new()));
+        let connections = Arc::new(Mutex::new(HashMap::<u64, Connection>::new()));
         let (requests, received) = mpsc::channel::<Request>();
 
         let accepting = stop.clone();
         let open = connections.clone();
         let acceptor = std::thread::spawn(move || {
-            for stream in listener.incoming() {
+            for (id, stream) in (0_u64..).zip(listener.incoming()) {
                 if accepting.load(Ordering::Relaxed) {
                     break;
                 }
                 let Ok(stream) = stream else { continue };
-                if let Ok(clone) = stream.try_clone() {
-                    open.lock().unwrap_or_else(|e| e.into_inner()).push(clone);
-                }
+                let stream = Connection(Arc::new(stream));
+                open.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id, stream.clone());
                 let requests = requests.clone();
+                let open = open.clone();
                 std::thread::spawn(move || {
                     let _ = serve_connection(stream, &requests);
+                    // The registry reference would otherwise keep the socket open after
+                    // the worker exits, so clients reading to EOF would never see it close.
+                    open.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
                 });
             }
         });
@@ -210,13 +238,13 @@ impl Drop for Site {
         if let Some(acceptor) = self.acceptor.take() {
             let _ = acceptor.join();
         }
-        for connection in self
+        for (_, connection) in self
             .connections
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
+            .drain()
         {
-            let _ = connection.shutdown(Shutdown::Both);
+            let _ = connection.0.shutdown(Shutdown::Both);
         }
         if let Some(dispatcher) = self.dispatcher.take() {
             let _ = dispatcher.join();
@@ -224,8 +252,8 @@ impl Drop for Site {
     }
 }
 
-fn serve_connection(stream: TcpStream, requests: &mpsc::Sender<Request>) -> std::io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+fn serve_connection(stream: Connection, requests: &mpsc::Sender<Request>) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.clone());
     let mut writer = stream;
     loop {
         let mut line = String::new();
@@ -310,8 +338,8 @@ fn serve_connection(stream: TcpStream, requests: &mpsc::Sender<Request>) -> std:
         if close {
             // Send EOF before draining so a client that stopped uploading is not
             // blocked; the bounded drain avoids a reset discarding the response.
-            writer.shutdown(Shutdown::Write)?;
-            writer.set_read_timeout(Some(Duration::from_secs(1)))?;
+            writer.0.shutdown(Shutdown::Write)?;
+            writer.0.set_read_timeout(Some(Duration::from_secs(1)))?;
             let _ = std::io::copy(&mut body, &mut std::io::sink());
             return Ok(());
         }
@@ -562,6 +590,73 @@ fn site_closes_after_an_early_response_without_waiting_for_the_body() -> Result<
     Ok(())
 }
 
+#[test]
+fn site_closes_connections_whose_worker_exited() -> Result<()> {
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let site = Site::new(|request| {
+        let _ = request.respond(Response::from_string("served"));
+    })?;
+    let address = site.origin.trim_start_matches("http://");
+
+    let mut half_closed = TcpStream::connect(address)?;
+    half_closed.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(half_closed, "GET /keep HTTP/1.1\r\nHost: fixture\r\n\r\n")?;
+    half_closed.shutdown(Shutdown::Write)?;
+    let mut transcript = String::new();
+    half_closed
+        .read_to_string(&mut transcript)
+        .context("a half-closed keep-alive connection was never closed")?;
+    ensure!(
+        transcript.starts_with("HTTP/1.1 200") && transcript.ends_with("served"),
+        "{transcript:?}"
+    );
+
+    let mut malformed = TcpStream::connect(address)?;
+    malformed.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(malformed, "GET /open HTTP/1.1\r\nHost: fixture\r\n\r\n")?;
+    let mut opened = Vec::new();
+    while !opened.ends_with(b"served") {
+        let mut byte = [0; 1];
+        malformed
+            .read_exact(&mut byte)
+            .context("the keep-alive response did not arrive")?;
+        opened.push(byte[0]);
+    }
+    // Tests spawn processes concurrently; one started while the server holds this
+    // connection must not inherit a handle that keeps it open after the worker exits.
+    let mut sleeper = if cfg!(windows) {
+        let mut command = std::process::Command::new("ping");
+        command.args(["-n", "30", "127.0.0.1"]);
+        command
+    } else {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        command
+    };
+    let _sleeper = KillOnDrop(
+        sleeper
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?,
+    );
+    write!(
+        malformed,
+        "POST /bad HTTP/1.1\r\nHost: fixture\r\nContent-Length: nope\r\n\r\n"
+    )?;
+    let mut transcript = String::new();
+    malformed
+        .read_to_string(&mut transcript)
+        .context("a connection with a framing error was never closed")?;
+    ensure!(transcript.is_empty(), "{transcript:?}");
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires managed Chromium; isolated child owns fixture paths"]
 async fn expanded_actions_dispatch_trusted_events_and_preserve_frames() -> Result<()> {
@@ -714,7 +809,21 @@ async fn expanded_actions_dispatch_trusted_events_and_preserve_frames() -> Resul
             let pinched: String = target.evaluate("document.body.dataset.pinched").await?.into_value()?;
             anyhow::ensure!(pinched == "true", "Pinch did not move two trusted touch points");
             let cancelling: TestAction = serde_json::from_value(json!({"longPress":"#touch","duration":5000,"frame":frame}))?;
-            anyhow::ensure!(tokio::time::timeout(Duration::from_millis(800), exec_test_action(context(), &cancelling)).await.is_err(), "Cancellation fixture did not interrupt the hold");
+            target.evaluate("(delete document.body.dataset.touchStarted, delete document.body.dataset.touchCancelled)").await?;
+            {
+                let hold = exec_test_action(context(), &cancelling);
+                tokio::pin!(hold);
+                // Abort after the page sees touchstart; an earlier abort has no touch to cancel.
+                loop {
+                    tokio::select! {
+                        result = &mut hold => anyhow::bail!("Cancellation fixture finished before it was interrupted: {result:?}"),
+                        started = async {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            target.evaluate("document.body.dataset.touchStarted === 'true'").await
+                        } => if started?.into_value::<bool>()? { break },
+                    }
+                }
+            }
             exec_test_action(context(), &serde_json::from_value(json!({"wait":"body[data-touch-cancelled=true]","frame":frame}))?).await?;
             exec_test_action(context(), &serde_json::from_value(json!({"click":"#click","frame":frame}))?).await?;
             let released: String = target.evaluate("document.body.dataset.modifiers").await?.into_value()?;
@@ -772,25 +881,29 @@ async fn expanded_actions_dialogs_and_history_are_strict() -> Result<()> {
             url: site.origin.clone(),
             ..Default::default()
         };
-        let config = ResolvedConfig {
+        // Short budgets only for actions expected to fail; dialog-opening clicks hold
+        // their CDP input call until the dialog is handled, which can exceed them under load.
+        let strict = ResolvedConfig {
             element_timeout_ms: 2500,
             actionability_timeout_ms: 1500,
             ..Default::default()
         };
-        let context = || ActionExecutionContext {
+        let config = ResolvedConfig::default();
+        let with = |config| ActionExecutionContext {
             page: &page,
             runtime: &runtime,
             storage: &storage,
             test_suite: &suite,
             scenario: &scenario,
-            config: &config,
+            config,
             url_replacements: &[],
             viewport_label: None,
             log_prefix: "dialogs",
         };
+        let context = || with(&config);
         let back: TestAction = serde_json::from_value(json!({"navigate":"back"}))?;
         anyhow::ensure!(
-            exec_test_action(context(), &back).await.is_err(),
+            exec_test_action(with(&strict), &back).await.is_err(),
             "Missing history must fail"
         );
         page.goto(format!("{}/one", site.origin)).await?;
@@ -834,14 +947,16 @@ async fn expanded_actions_dialogs_and_history_are_strict() -> Result<()> {
             ),
         ] {
             exec_test_action(context(), &serde_json::from_value(expectation)?).await?;
+            // Hang guard only: element_timeout_ms bounds the dialog wait and each dialog command.
             anyhow::ensure!(
                 tokio::time::timeout(
-                    Duration::from_secs(6),
-                    exec_test_action(context(), &serde_json::from_value(trigger)?)
+                    Duration::from_secs(30),
+                    exec_test_action(with(&strict), &serde_json::from_value(trigger.clone())?)
                 )
-                .await?
+                .await
+                .with_context(|| format!("{trigger} hung"))?
                 .is_err(),
-                "Unmet/extra dialog expectation succeeded"
+                "Unmet/extra dialog expectation succeeded: {trigger}"
             );
         }
         for value in [

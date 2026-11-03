@@ -2098,9 +2098,11 @@ mod tests {
         .await?;
         let result: Result<()> = async {
             let suite = TestSuite { id: Some("tabs".into()), test_date: Some("run".into()), ..Default::default() };
+            // Keep the default element budget: under parallel load, Chromium can delay
+            // a paused popup's first CDP reply for seconds while its renderer starts.
             let resolved = ResolvedConfig {
                 no_scroll_top: true, delay: Some(0.0), post_interaction_wait: Some(0.0),
-                settle_timeout_ms: 0, freeze_animations: false, element_timeout_ms: 5000,
+                settle_timeout_ms: 0, freeze_animations: false,
                 state: Some(Needs::String("popup-initial".into())),
                 basic_auth: vec![crate::types::BasicAuth { origin: destination.origin.clone(), username: "user".into(), password: "pass".into() }],
                 ..Default::default()

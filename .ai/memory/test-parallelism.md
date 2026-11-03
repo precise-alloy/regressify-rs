@@ -52,13 +52,18 @@ Verified: 2026-11-03
     exits only after the orphan writes a ready marker. Before this, the orphan
     raced the 250 ms `PIPE_DRAIN_TIMEOUT`.
 - Browser fixture setup waits (iframe load, initial page markers) are hang guards.
-  Bound them generously (30 s). Keep the short bounds only on behavior that is
-  being tested, such as the hooks deadline case in
-  [hooks.rs](../../src/test/hooks.rs). The same applies to a `ResolvedConfig`
-  `element_timeout_ms` override that bounds actions expected to succeed: the
-  5 s `switchTab` budget in [tabs.rs](../../src/test/tabs.rs) and the 250 ms
-  viewport-gate click in [test_scenario.rs](../../src/test/test_scenario.rs)
-  failed under load, so they now use the 30 s default.
+  Bound them generously (30 s); keep short bounds only on tested behavior, such as
+  the hooks deadline in [hooks.rs](../../src/test/hooks.rs) or the unmet/extra
+  dialog cases of `expanded_actions_dialogs_and_history_are_strict` (under a 30 s
+  guard). `element_timeout_ms` overrides on actions expected to succeed (5 s
+  `switchTab` in [tabs.rs](../../src/test/tabs.rs) and the popup test, 250 ms
+  viewport-gate click in [test_scenario.rs](../../src/test/test_scenario.rs))
+  failed under load and now use the 30 s default. Popup probes showed paused-tab
+  replies arriving together after up to 5 s, in the same millisecond across
+  browsers: Chromium/OS renderer stalls, not chromiumoxide or `Tabs`.
+- Interrupt a held gesture only after the page observes it: a fixed 800 ms
+  `longPress` abort could land before `TouchStart`, so no `touchcancel` fired;
+  `expanded_actions_dispatch_trusted_events_and_preserve_frames` polls first.
 - Screenshot fixtures on a fresh `browser.new_page` tab must set device metrics
   first, as scenario captures do (`apply_viewport` in
   [test_scenario.rs](../../src/test/test_scenario.rs)). Without them, under
@@ -68,34 +73,30 @@ Verified: 2026-11-03
   pixel diff showed it was not the caret. Separately, 1 in 32 runs at 8 concurrent
   browsers hit a transient CDP `-32000 Unable to capture screenshot`.
 - Real Chromium in unit tests is capped by a `cfg(test)` semaphore in
-  [browsers.rs](../../src/test/browsers.rs) (`test_browser_slots`: a quarter
-  of the logical CPUs, minimum 2), acquired in `launch_browser` and held until the handler
-  ends. Unbounded launches overloaded the opt-in `--ignored` suite (CDP request
-  timeouts, `switchTab` deadlines). Half the CPUs (11 browsers, about 250 Chromium
-  processes on a 22-thread host) still pushed CPU to ~90% with heavy paging and
-  failed 6–10 tests per run; check `Get-Counter` before blaming waits.
-  Wrap the handler in its abort guard before
-  `tokio::spawn`: an abort that lands before the first poll otherwise detaches
-  the handler, so the browser keeps running after its slot is released. The cap
-  is per process: tests that re-run `current_exe()` as a child get their own
-  semaphore.
-- tiny_http 0.12 (current upstream) can starve connections. Its pool only
-  notifies when a worker counts as waiting, and a notified worker keeps counting
-  until it wakes; tasks spawned in that window queue with no wakeup while the
-  four workers serve Chromium's idle keep-alive sockets. Under parallel load
-  image requests hung forever (one extra `Connection: close` request freed a
-  worker and the stuck test passed in 2 s). The browser fixture `Site` in
-  [browser_tests.rs](../../src/test/browser_tests.rs) now reads each connection
-  on its own thread and keeps tiny_http only for response serialization;
-  `site_serves_every_concurrent_keep_alive_connection` reproduces the stall
-  against tiny_http under CPU load. The desktop landing preview still uses
-  tiny_http (see [OUTSTANDING_ISSUES.md](../../OUTSTANDING_ISSUES.md)).
-- `Site` shutdown joins the acceptor before shutting down registered connections,
-  so no accepted socket registers after the sweep. On `Connection: close`, it
-  sends a write-side shutdown before a bounded (1 s) body drain: draining first
-  blocks on a client that stopped uploading after an early response, and a full
-  shutdown or close with unread data can reset the socket and discard the
+  [browsers.rs](../../src/test/browsers.rs) (`test_browser_slots`: a quarter of
+  logical CPUs, minimum 2), held from `launch_browser` until the handler ends.
+  Unbounded launches, and even half the CPUs (~250 Chromium processes on 22
+  threads, ~90% CPU, heavy paging), failed 6–10 `--ignored` tests per run; check
+  `Get-Counter` before blaming waits. Wrap the handler in its abort guard before
+  `tokio::spawn`, or an early abort detaches a still-running browser. The cap is
+  per process: `current_exe()` child re-runs get their own semaphore.
+- tiny_http 0.12 (current upstream) can starve connections: its pool notifies only
+  when a worker counts as waiting, so tasks queued while four workers serve
+  Chromium's idle keep-alive sockets hung forever under load. The browser fixture
+  `Site` in [browser_tests.rs](../../src/test/browser_tests.rs) reads each
+  connection on its own thread, keeping tiny_http only for response serialization
+  (`site_serves_every_concurrent_keep_alive_connection`). The desktop landing
+  preview still uses tiny_http (see [OUTSTANDING_ISSUES.md](../../OUTSTANDING_ISSUES.md)).
+- `Site` shutdown joins the acceptor before shutting down registered connections.
+  On `Connection: close`, it shuts down writes before a bounded (1 s) body drain:
+  draining first blocks on a client that stopped uploading after an early
+  response, and closing with unread data can reset the socket and lose the
   response (`site_closes_after_an_early_response_without_waiting_for_the_body`).
+  Workers drop their registry reference on exit, and sockets are shared via
+  `Connection(Arc<TcpStream>)`, never `try_clone`: Windows clones are inheritable
+  (`HANDLE_FLAG_INHERIT`, verified), so a child spawned by a concurrent test kept
+  a closed connection open, then reset it (10054). The regression test
+  `site_closes_connections_whose_worker_exited` spawns a sleeper mid-connection.
 - Long tail: `workspace_files_scroll_within_sidebar_at_both_window_sizes` opens
   20 editors one after another. Many `desktop::git::tests` take longer than 60 s
   under full parallel load, which is expected and not a hang.
@@ -108,7 +109,8 @@ Verified: 2026-11-03
 - Serial `gui-tests` lib: about 26 min. Parallel lib: about 490–575 s.
 - After the fixes, `cargo test --locked --features gui-tests --all-targets
   --no-fail-fast` passed three consecutive times on Windows with default threads
-  (1345 lib passed each; 8–10.5 min wall time including builds).
+  (1351 lib passed each; 6.3–7.3 min wall time), and the `--ignored` gate passed
+  three consecutive times (35 lib + 2 worker tests, about 2 min each).
 - A recurring `CompletionCleanup ... OsErrorCode=32` warning (Windows sharing
   violation) appears in passing runs; it does not fail tests and is not yet
   investigated.
