@@ -695,6 +695,12 @@ mod tests {
                         "{tag} screenshot contains caret pixels"
                     );
                     if let Some(previous) = &previous_pixels {
+                        anyhow::ensure!(
+                            previous.len() == image.buffer.len(),
+                            "{tag} screenshot size changed across the caret blink interval: {} -> {} pixels",
+                            previous.len(),
+                            image.buffer.len()
+                        );
                         let changed: Vec<(usize, usize)> = previous
                             .iter()
                             .zip(&image.buffer)

@@ -348,11 +348,7 @@ impl Runtime {
             match self.evaluate_in_context(realm, expression, by_value).await {
                 // Navigation can destroy the cached world before its event arrives; the
                 // expression never ran, so re-resolving the context is safe.
-                Err(error)
-                    if retries > 0
-                        && format!("{error:#}")
-                            .contains("Cannot find context with specified id") =>
-                {
+                Err(error) if retries > 0 && is_stale_context(&error) => {
                     retries -= 1;
                     self.cache
                         .lock()
@@ -551,6 +547,13 @@ fn check_evaluation(result: &Value) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Matches only the protocol rejection; page exceptions with the same text already ran.
+fn is_stale_context(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.to_string() == "CDP command failed: Cannot find context with specified id"
+    })
 }
 
 impl Target {
@@ -1302,6 +1305,12 @@ mod tests {
                 .await?
                 .into_value()?;
             anyhow::ensure!(found, "evaluation did not reach the navigated document");
+            let thrown = root
+                .evaluate("(window.__runs = (window.__runs || 0) + 1, (() => { throw new Error('Cannot find context with specified id'); })())")
+                .await;
+            anyhow::ensure!(thrown.is_err(), "the page exception was not reported");
+            let runs: u32 = root.evaluate("window.__runs").await?.into_value()?;
+            anyhow::ensure!(runs == 1, "a page exception was retried: {runs} runs");
             Ok(())
         }
         .await;
@@ -1309,6 +1318,21 @@ mod tests {
         handler.await?;
         let _ = std::fs::remove_dir_all(directory);
         result
+    }
+
+    #[test]
+    fn only_protocol_stale_context_errors_are_retryable() {
+        let protocol = anyhow!("CDP command failed: Cannot find context with specified id");
+        assert!(is_stale_context(&protocol));
+        assert!(is_stale_context(&protocol.context("evaluating")));
+        let page = check_evaluation(&json!({"exceptionDetails": {"exception": {
+            "description": "CDP command failed: Cannot find context with specified id"
+        }}}))
+        .expect_err("exceptionDetails must fail");
+        assert!(!is_stale_context(&page));
+        assert!(!is_stale_context(&anyhow!(
+            "CDP command failed: Execution context was destroyed."
+        )));
     }
 
     #[tokio::test]
