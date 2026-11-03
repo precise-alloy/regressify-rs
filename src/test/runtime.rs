@@ -343,6 +343,34 @@ impl Runtime {
     }
 
     async fn evaluate(&self, realm: &Realm, expression: &str, by_value: bool) -> Result<Value> {
+        let mut retries = 2;
+        loop {
+            match self.evaluate_in_context(realm, expression, by_value).await {
+                // Navigation can destroy the cached world before its event arrives; the
+                // expression never ran, so re-resolving the context is safe.
+                Err(error)
+                    if retries > 0
+                        && format!("{error:#}")
+                            .contains("Cannot find context with specified id") =>
+                {
+                    retries -= 1;
+                    self.cache
+                        .lock()
+                        .await
+                        .frames
+                        .remove(&(realm.session.clone(), realm.frame.clone()));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn evaluate_in_context(
+        &self,
+        realm: &Realm,
+        expression: &str,
+        by_value: bool,
+    ) -> Result<Value> {
         let (session, context) = self.context(realm).await?;
         let key = (session.clone(), context);
         let installed = self.cache.lock().await.installed.contains(&key);
@@ -1241,6 +1269,47 @@ mod tests {
         assert!(cache.frames.is_empty());
     }
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires managed Chromium; run regressify install"]
+    async fn evaluation_recovers_when_navigation_destroys_a_cached_context() -> Result<()> {
+        let site = super::super::browser_tests::Site::new(|request| {
+            let _ = request.respond(
+                tiny_http::Response::from_string("<body><div id='ready'>data</div></body>")
+                    .with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "text/html").unwrap(),
+                    ),
+            );
+        })?;
+        let (mut browser, handler, directory) =
+            super::super::browser_tests::launch_browser("runtime-context", Default::default())
+                .await?;
+        let result: Result<()> = async {
+            let page = browser.new_page(site.origin.as_str()).await?;
+            let runtime = Runtime::new(&browser, &page).await?;
+            let root = runtime.target(&None, Duration::from_secs(5)).await?;
+            root.evaluate("true").await?;
+            // Suppress invalidation events so the cache keeps the world navigation destroys.
+            for method in ["Page.disable", "Runtime.disable"] {
+                runtime
+                    .client
+                    .call(Some(&runtime.main_session), method, json!({}))
+                    .await?;
+            }
+            page.goto(format!("{}/next", site.origin)).await?;
+            let found: bool = root
+                .evaluate("!!document.querySelector('#ready')")
+                .await?
+                .into_value()?;
+            anyhow::ensure!(found, "evaluation did not reach the navigated document");
+            Ok(())
+        }
+        .await;
+        browser.close().await?;
+        handler.await?;
+        let _ = std::fs::remove_dir_all(directory);
+        result
+    }
 
     #[tokio::test]
     #[ignore = "requires managed Chromium; run regressify install"]
