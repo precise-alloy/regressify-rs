@@ -42,37 +42,70 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  windows:
-    name: Windows Desktop and CLI
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  smoke-harness:
+    name: Headless smoke harness
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
       - name: Headless smoke harness checks
         shell: pwsh
         run: ./ci/test-desktop-smoke.ps1
+
+  windows-cli:
+    name: Windows default CLI tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Formatting
-        run: cargo fmt --check
+        with:
+          shared-key: win-cli
       - name: Default CLI regression tests
         run: cargo test --locked --all-targets
+
+  windows-gui:
+    name: Windows desktop tests and build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: win-gui
       - name: Desktop models and native interaction tests
         run: cargo test --locked --features gui-tests --all-targets
-      - name: Production library lint
-        run: cargo clippy --locked --features gui --lib -- -D warnings
       - name: Build standalone desktop
         run: cargo build --locked --features gui --bin regressify-desktop
+
+  windows-clippy:
+    name: Windows desktop lint
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: win-clippy
+      - name: Production library lint
+        run: cargo clippy --locked --features gui --lib -- -D warnings
 
   models:
     name: Linux Headless Models
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Headless smoke harness checks
-        shell: pwsh
-        run: ./ci/test-desktop-smoke.ps1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Shared library and desktop models

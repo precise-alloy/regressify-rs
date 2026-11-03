@@ -280,8 +280,27 @@ jobs:
           path: ${{ runner.temp }}/downloads/*
           if-no-files-found: error
 
+  mcp-catalog:
+    name: Build MCP catalog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release MCP catalog
+        env:
+          REGRESSIFY_DISABLE_DIAGNOSTIC_ARCHIVE: 'true'
+        run: cargo run --locked --features mcp-catalog --bin regressify-mcp-catalog > mcp-catalog.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mcp-catalog
+          path: mcp-catalog.json
+          if-no-files-found: error
+
   deploy:
-    needs: [set-matrix, publish]
+    needs: [set-matrix, publish, mcp-catalog]
     name: Deploy website and MCP after release verification
     runs-on: ubuntu-latest
     steps:
@@ -312,10 +331,11 @@ jobs:
         with:
           bun-version-file: website/.bun-version
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Build release MCP catalog
-        run: cargo run --locked --features mcp-catalog --bin regressify-mcp-catalog > "$RUNNER_TEMP/mcp-catalog.json"
+      - name: Download MCP catalog
+        uses: actions/download-artifact@v8
+        with:
+          name: mcp-catalog
+          path: ${{ runner.temp }}
 
       - name: Deploy Cloudflare Worker
         env:
