@@ -571,7 +571,10 @@ mod tests {
     #[ignore = "requires managed Chromium; run regressify install"]
     async fn screenshot_preparation_hides_carets_without_blurring_inputs() -> Result<()> {
         use chromiumoxide::{
-            cdp::browser_protocol::page::CaptureScreenshotFormat, page::ScreenshotParams,
+            cdp::browser_protocol::{
+                emulation::SetDeviceMetricsOverrideParams, page::CaptureScreenshotFormat,
+            },
+            page::ScreenshotParams,
         };
 
         let (mut browser, handler, directory) =
@@ -586,6 +589,18 @@ mod tests {
                 (true, "div"),
             ] {
                 let page = browser.new_page("about:blank").await?;
+                // Scenario captures always set device metrics. Without them, a fresh tab under
+                // parallel load can return a surface sized before the headless window settled.
+                page.execute(
+                    SetDeviceMetricsOverrideParams::builder()
+                        .width(800)
+                        .height(200)
+                        .device_scale_factor(1.0)
+                        .mobile(false)
+                        .build()
+                        .map_err(|error| anyhow::anyhow!("{error:?}"))?,
+                )
+                .await?;
                 page.evaluate(format!(
                     "window.fixtureTag = {}",
                     serde_json::to_string(tag)?
@@ -627,7 +642,7 @@ mod tests {
                     settle_timeout_ms: 0,
                     ..Default::default()
                 };
-                let mut previous_pixels = None;
+                let mut previous_pixels: Option<Vec<lodepng::RGBA>> = None;
                 for capture_index in 0..2 {
                     if capture_index > 0 {
                         tokio::time::sleep(Duration::from_millis(350)).await;
@@ -680,9 +695,19 @@ mod tests {
                         "{tag} screenshot contains caret pixels"
                     );
                     if let Some(previous) = &previous_pixels {
+                        let changed: Vec<(usize, usize)> = previous
+                            .iter()
+                            .zip(&image.buffer)
+                            .enumerate()
+                            .filter(|(_, (before, after))| before != after)
+                            .map(|(index, _)| (index % image.width, index / image.width))
+                            .collect();
                         anyhow::ensure!(
-                            previous == &image.buffer,
-                            "{tag} screenshots changed across the caret blink interval"
+                            changed.is_empty(),
+                            "{tag} screenshots changed across the caret blink interval (freezeAnimations={freeze_animations}): {} pixels in x {:?}, y {:?}",
+                            changed.len(),
+                            changed.iter().map(|point| point.0).min().zip(changed.iter().map(|point| point.0).max()),
+                            changed.iter().map(|point| point.1).min().zip(changed.iter().map(|point| point.1).max()),
                         );
                     }
                     previous_pixels = Some(image.buffer);

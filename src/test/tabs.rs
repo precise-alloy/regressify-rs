@@ -594,10 +594,8 @@ mod tests {
         .await?;
         let result: Result<()> = async {
             let page = browser.new_page("about:blank").await?;
-            let config = ResolvedConfig {
-                element_timeout_ms: 5000,
-                ..Default::default()
-            };
+            // Success paths keep the default budget; popup loads are slow under parallel load.
+            let config = ResolvedConfig::default();
             let viewport = ViewportDef {
                 label: "popup".into(),
                 width: 420,
@@ -697,16 +695,14 @@ mod tests {
             launch_browser("tab-history", Default::default()).await?;
         let result: Result<()> = async {
             let page = browser.new_page("about:blank").await?;
-            let config = ResolvedConfig {
-                element_timeout_ms: 5000,
-                ..Default::default()
-            };
+            // Success paths keep the default budget; popup loads are slow under parallel load.
+            let config = ResolvedConfig::default();
             let storage =
                 Arc::new(StorageState::install(&browser, &page, None, &site.origin).await?);
             let mut tabs = Tabs::install(&page, storage.clone(), &config, None, false).await?;
             page.goto(site.origin.as_str()).await?;
             page.find_element("#both").await?.click().await?;
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(Duration::from_millis(config.element_timeout_ms), async {
                 loop {
                     let response = tabs
                         .client

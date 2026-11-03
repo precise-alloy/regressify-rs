@@ -3,6 +3,28 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Landing Preview tiny_http Connection Starvation (2026-11-03)
+
+- Open hypothesis: the desktop landing preview in
+  [preview.rs](src/desktop/landing/preview.rs) uses tiny_http 0.12, whose pool
+  can queue a newly accepted connection without waking a worker while its four
+  workers hold idle keep-alive connections. The browser test fixture hung this way
+  under parallel load and was replaced. The preview was not observed failing; a
+  stalled asset would leave the preview partly loaded until the browser closes a
+  connection.
+
+## Stale Managed Chromium Worker Test (2026-11-03)
+
+- Open: the opt-in `capture_workspaces_share_managed_chromium` test in
+  [desktop_worker.rs](tests/desktop_worker.rs) fails when run alone, so the failure
+  does not depend on parallel test runs. It asserts that the worker's output contains
+  "Checking Chromium cache", "Shared Chromium cache:" and "Managed Chromium
+  executable:". When diagnostics are active, [browser status](src/test/browsers.rs)
+  now sends these as progress phases rather than printing them. The last two
+  messages no longer exist anywhere in the source.
+- The test needs to check progress phases and find the browser path some other way.
+  Until then, opt-in runs skip it with `--skip capture_workspaces_share_managed_chromium`.
+
 ## Frontend Asset Build Race (2026-11-02)
 
 - Open: [CodeQL alert 3](https://github.com/precise-alloy/regressify-rs/security/code-scanning/3)

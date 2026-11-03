@@ -356,7 +356,13 @@ mod tests {
                     for (path, script) in scripts {
                         std::fs::write(workspace.path().join(path), if path == failing_path { failing_script } else { script })?;
                     }
-                    let bounded = ResolvedConfig { element_timeout_ms: 300, ..config.clone() };
+                    // Only the never-settling script needs a short deadline; bounding the
+                    // others too lets parallel test load turn their real error into a timeout.
+                    let bounded = if expected == "time" {
+                        ResolvedConfig { element_timeout_ms: 300, ..config.clone() }
+                    } else {
+                        config.clone()
+                    };
                     let failing = DocumentHooks::load(workspace.path(), &scenario, &bounded)?;
                     let identifier = failing.install_before(&page).await?;
                     page.goto(site.origin.as_str()).await?;

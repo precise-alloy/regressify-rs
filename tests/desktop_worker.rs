@@ -2,12 +2,22 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, Output, Stdio},
+    sync::{PoisonError, RwLock, RwLockReadGuard},
 };
 
 use regressify::desktop::{
     runner::{RunCommand, RunOptions, RunRequest},
     worker::{WORKER_FLAG, WorkerRequest},
 };
+
+// The installer test holds the session-wide Windows setup mutex, which makes every
+// regressify-desktop process refuse to start. Desktop launches share this lock so
+// they run in parallel with each other but never while that test holds the mutex.
+static SETUP_MUTEX: RwLock<()> = RwLock::new(());
+
+fn desktop_launches() -> RwLockReadGuard<'static, ()> {
+    SETUP_MUTEX.read().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -387,6 +397,7 @@ fn invoke(executable: &Path, request: &RunRequest) -> Output {
 #[cfg(windows)]
 #[test]
 fn snapshot_worker_reports_locked_output_path() {
+    let _setup = desktop_launches();
     use std::os::windows::fs::OpenOptionsExt;
 
     let executable = Path::new(env!("CARGO_BIN_EXE_regressify-desktop"));
@@ -430,6 +441,7 @@ fn snapshot_worker_reports_locked_output_path() {
 #[cfg(windows)]
 #[test]
 fn snapshot_worker_warns_for_blocked_empty_directory() {
+    let _setup = desktop_launches();
     use std::os::windows::fs::OpenOptionsExt;
 
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -482,6 +494,7 @@ fn snapshot_worker_warns_for_blocked_empty_directory() {
 #[test]
 #[ignore = "requires cached managed Chromium and no running installer"]
 fn installer_browser_mode_reuses_cache_without_network_during_setup() {
+    let _exclusive = SETUP_MUTEX.write().unwrap_or_else(PoisonError::into_inner);
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use windows_sys::Win32::{
         Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
@@ -574,6 +587,7 @@ fn installer_browser_mode_reuses_cache_without_network_during_setup() {
 #[test]
 #[ignore = "requires managed Chromium; run regressify install"]
 fn capture_workspaces_share_managed_chromium() {
+    let _setup = desktop_launches();
     let executable = Path::new(env!("CARGO_BIN_EXE_regressify-desktop"));
     let shared_cache = directories::BaseDirs::new()
         .unwrap()
@@ -679,6 +693,7 @@ fn capture_workspaces_share_managed_chromium() {
 
 #[test]
 fn deploy_missing_token_fails_before_snapshot_modifies_output() {
+    let _setup = desktop_launches();
     use regressify::desktop::deployment::{DeployTarget, DeploymentJob};
     let executable = Path::new(env!("CARGO_BIN_EXE_regressify-desktop"));
     let root = tempfile::tempdir().unwrap();
@@ -721,6 +736,7 @@ fn deploy_missing_token_fails_before_snapshot_modifies_output() {
 #[cfg(windows)]
 #[test]
 fn deploy_worker_reads_machine_local_credentials_without_exposing_tokens() {
+    let _setup = desktop_launches();
     use regressify::desktop::deployment::{
         DeployTarget, DeployTargets, DeploymentJob, credentials::DeploymentCredential,
     };
@@ -861,6 +877,7 @@ fn invoke_with_events(
 
 #[test]
 fn duplicate_workspace_launches_activate_the_owner_without_starting_another_gui() {
+    let _setup = desktop_launches();
     use regressify::desktop::{
         instance::{DesktopInstance, OpenInstance},
         workspace::Preferences,
@@ -914,6 +931,7 @@ fn duplicate_workspace_launches_activate_the_owner_without_starting_another_gui(
 
 #[test]
 fn standalone_desktop_runs_shared_engine_without_a_cli_binary() {
+    let _setup = desktop_launches();
     use regressify::{
         desktop::logs::{LogQuery, load_run_page},
         diagnostics::{journal::ArchiveState, record::*},
@@ -964,6 +982,7 @@ fn standalone_desktop_runs_shared_engine_without_a_cli_binary() {
 
 #[test]
 fn bundled_worker_reports_live_outcomes_for_multiple_suites() {
+    let _setup = desktop_launches();
     let workspace = tempfile::tempdir().unwrap();
     for (suite, changed) in [("shop", false), ("account", true)] {
         let root = workspace.path().join(".regressify").join(suite);
@@ -1017,6 +1036,7 @@ fn bundled_worker_reports_live_outcomes_for_multiple_suites() {
 
 #[test]
 fn mixed_report_outcomes_match_html_saved_results_and_live_totals() {
+    let _setup = desktop_launches();
     let workspace = tempfile::tempdir().unwrap();
     let output = workspace.path().join(".regressify");
     let suite = output.join("alloy");
@@ -1104,6 +1124,7 @@ fn mixed_report_outcomes_match_html_saved_results_and_live_totals() {
 
 #[test]
 fn filtered_snapshot_stages_only_selected_suites_and_their_public_dependencies() {
+    let _setup = desktop_launches();
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(
         workspace.path().join("regressify.yaml"),
@@ -1247,6 +1268,7 @@ fn filtered_snapshot_stages_only_selected_suites_and_their_public_dependencies()
 
 #[test]
 fn bundled_worker_scopes_scenarios_and_preflights_all_approvals() {
+    let _setup = desktop_launches();
     let workspace = tempfile::tempdir().unwrap();
     let executable = Path::new(env!("CARGO_BIN_EXE_regressify-desktop"));
     let reference = lodepng::encode32(&[10_u8, 20, 30, 255], 1, 1).unwrap();
@@ -1341,6 +1363,7 @@ fn bundled_worker_scopes_scenarios_and_preflights_all_approvals() {
 
 #[test]
 fn bundled_worker_approves_one_report_viewport_and_recalculates_full_scope() {
+    let _setup = desktop_launches();
     let workspace = tempfile::tempdir().unwrap();
     let executable = Path::new(env!("CARGO_BIN_EXE_regressify-desktop"));
     let output = workspace.path().join("review-output/shop");

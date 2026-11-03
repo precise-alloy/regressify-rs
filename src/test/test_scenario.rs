@@ -1884,10 +1884,9 @@ mod tests {
         )?;
         let scenario = TestScenario::default();
         let suite = TestSuite::default();
-        let resolved = ResolvedConfig {
-            element_timeout_ms: 250,
-            ..Default::default()
-        };
+        // Skipped actions are bounded by the 200 ms timeouts below; the matching click
+        // keeps the default element timeout so parallel load cannot fail it.
+        let resolved = ResolvedConfig::default();
         let hooks =
             super::super::hooks::DocumentHooks::load(workspace.path(), &scenario, &resolved)?;
         let (mut browser, handler, directory) =
