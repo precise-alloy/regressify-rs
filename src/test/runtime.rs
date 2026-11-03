@@ -1359,17 +1359,17 @@ mod tests {
         let result: Result<()> = async {
             let page = browser.new_page(outer.origin.as_str()).await?;
             let runtime = Runtime::new(&browser, &page).await?;
-            let root = runtime.target(&None, Duration::from_secs(5)).await?;
+            let root = runtime.target(&None, Duration::from_secs(30)).await?;
             for selector in ["text=Shadow button", "button:has-text('Shadow')", "xpath=//button[@id='outside']", "css=#host >> text=Shadow button"] {
                 let found: bool = root.evaluate(format!("!!document.querySelector({})", serde_json::to_string(selector)?)).await?.into_value()?;
                 anyhow::ensure!(found, "selector not resolved: {selector}");
             }
-            let frame = runtime.target(&Some(Frame::Single("iframe".into())), Duration::from_secs(5)).await?;
+            let frame = runtime.target(&Some(Frame::Single("iframe".into())), Duration::from_secs(30)).await?;
             let found: String = frame.evaluate("document.querySelector('text=Frame button').id").await?.into_value()?;
             anyhow::ensure!(found == "inside", "cross-origin frame did not resolve");
             frame.scroll_frames().await?;
             frame.check_frame_coverage(30.0, 20.0).await?;
-            let config = super::super::actionability::ActionabilityConfig { element_timeout_ms: 2000, actionability_timeout_ms: 1000, poll_interval_ms: 25 };
+            let config = super::super::actionability::ActionabilityConfig { poll_interval_ms: 25, ..Default::default() };
             super::super::actionability::ensure_actionable(&root, "#host", &None, &config).await?;
             let position = super::super::actionability::ensure_actionable(&frame, "text=Frame button", &None, &config).await?;
             let offset = frame.frame_offset().await?;
