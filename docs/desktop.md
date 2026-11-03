@@ -867,12 +867,12 @@ requires a configured target and is not performed by the test suite.
 
 Optional non-publishing API checks use `AZURE_STATIC_WEB_APPS_API_TOKEN`,
 `NETLIFY_PAT`, and `NETLIFY_SITE_ID` from the process environment:
-`cargo test --locked --features desktop --lib live_deployment_ -- --ignored --nocapture --test-threads=1`.
+`cargo test --locked --features desktop --lib live_deployment_ -- --ignored --nocapture`.
 These tests validate the Azure tier and Netlify site access without creating a deploy.
 
 An explicitly publishing Netlify smoke test is also available after setting
 `NETLIFY_PAT` and `NETLIFY_SITE_ID` in the process environment:
-`cargo test --locked --features desktop --lib live_publish_netlify_digest -- --ignored --nocapture --test-threads=1`.
+`cargo test --locked --features desktop --lib live_publish_netlify_digest -- --ignored --nocapture`.
 Use a dedicated test site: this replaces its current content with a tiny
 synthetic report, publishes twice to exercise content reuse, and checks the
 public page and stylesheet. It is excluded from the `live_deployment_` preflight
@@ -1063,7 +1063,7 @@ The opt-in native Jump List test uses a unique application ID, temporary workspa
 history and automatic cleanup without modifying the installed app's Jump List:
 
 ```powershell
-cargo test --features gui-tests --lib desktop::jump_list::tests -- --include-ignored --test-threads=1
+cargo test --features gui-tests --lib desktop::jump_list::tests -- --include-ignored
 ```
 
 Release tests run alongside the build matrix. To run them locally, install
@@ -2240,7 +2240,7 @@ their own arrow-key navigation.
 cargo fmt --check
 cargo test --all-targets
 cargo test --features desktop --lib desktop::
-cargo test --features gui-tests --all-targets -- --test-threads=1
+cargo test --features gui-tests --all-targets
 cargo clippy --features gui --lib -- -D warnings
 cargo build --features gui --bin regressify-desktop
 ```

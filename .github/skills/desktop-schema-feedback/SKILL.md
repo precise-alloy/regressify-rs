@@ -32,10 +32,10 @@ description: 'Use when changing generated JSON Schema, desktop validation messag
 cargo test --features desktop --lib desktop::schema::tests
 cargo test --features desktop --lib desktop::validation::tests
 cargo test --features desktop --lib desktop::completion::tests
-cargo test --features gui-tests --lib desktop::ui::tests::source_ -- --test-threads=1
-cargo test --features gui-tests --lib source_validation_ -- --test-threads=1
-cargo test --features gui-tests --lib source_assistance_ -- --test-threads=1
-cargo test --features gui-tests --lib source_feedback_ -- --test-threads=1
+cargo test --features gui-tests --lib desktop::ui::tests::source_
+cargo test --features gui-tests --lib source_validation_
+cargo test --features gui-tests --lib source_assistance_
+cargo test --features gui-tests --lib source_feedback_
 ```
 
 Cover YAML and JSON, incomplete/unknown keys, ambiguous actions, numeric limits, Unicode replacement ranges, secret-free help, and preservation of adjacent text. Keyboard/focus changes also require the [native UI checks](../desktop-native-ui/SKILL.md), including `-SchemaFlows` on an isolated unlocked Windows desktop.

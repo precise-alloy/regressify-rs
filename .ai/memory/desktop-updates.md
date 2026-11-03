@@ -32,7 +32,7 @@ Verified: 2026-10-22
   takeover, without overriding an already requested pause. Clear expired local
   retry timers when a peer owns the cycle; rescheduling a due timer can spin.
 - Checks: `cargo test --features desktop --lib desktop::updates::tests` and
-  `cargo test --features gui-tests --lib desktop::ui::updates::tests -- --test-threads=1`.
+  `cargo test --features gui-tests --lib desktop::ui::updates::tests`.
   Fixtures cover fake-clock scheduling, child-process contention/release,
   startup inside a recent check interval, one-transfer reuse, takeover/pause,
   and two windows showing the ready banner.

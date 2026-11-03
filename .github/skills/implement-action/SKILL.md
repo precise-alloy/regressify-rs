@@ -37,7 +37,7 @@ Utilities (save, persist, hide/remove) and waits/navigation do not require the i
 cargo test --lib types::actions::tests
 cargo test --lib test::test_action::tests
 cargo test --lib test::actionability::tests
-cargo test --lib expanded_actions_ -- --include-ignored --test-threads=1
+cargo test --lib expanded_actions_ -- --include-ignored
 ```
 
 With managed Chromium, run `cargo test --lib test::tabs::tests -- --include-ignored` and `cargo test --lib test::test_scenario::tests::popup_actions_and_captures_follow_the_selected_tab -- --ignored --exact` for `_blank`/`noopener`, JavaScript and iframe popups, selection errors, and capture pixels.

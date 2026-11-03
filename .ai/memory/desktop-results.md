@@ -69,7 +69,7 @@ Verified: 2026-10-21
 - [Compare completion](../../src/desktop/ui/mod.rs) replaces stale Results run and
   saved-report pins with the completed request's output root/run and compared
   suite IDs, without changing tabs. `cargo test --features gui-tests --lib
-  comparison_completion_ -- --test-threads=1` covers both pin types, custom
+  comparison_completion_` covers both pin types, custom
   outputs, shared run names, intermediate mismatches, errors, and cancellation
   in [Results tests](../../src/desktop/ui/reports.rs).
 - [Results approval](../../src/desktop/ui/reports.rs) confirms inline, clears pending
@@ -81,7 +81,7 @@ Verified: 2026-10-21
   reads `.report-pixel-thresholds.json` and stores the value on report pairs.
   Approval retains reviewed values; missing fields on legacy reports mean 10
   (their original normalized 0.1), while a fresh comparison without metadata uses 5.
-  `cargo test --features gui-tests --lib pixel_match_threshold -- --test-threads=1`
+  `cargo test --features gui-tests --lib pixel_match_threshold`
   covers the cascade, reports, validation, and native editing/reset.
 - Regression evidence: `suite_panel_restores_all_saved_statuses_and_keeps_them_during_other_runs`
   and `approval_completion_preserves_comparison_and_updates_suite_counts`, run with

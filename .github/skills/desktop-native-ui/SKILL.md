@@ -67,16 +67,16 @@ For smoke harness edits, run `./ci/test-desktop-smoke.ps1` in PowerShell 7 first
 
 ```sh
 cargo test --features desktop --lib desktop::vscode::tests
-cargo test --features gui-tests --lib workspace_external_menus_ -- --test-threads=1
-cargo test --features gui-tests --lib suite_name_dialog_ -- --test-threads=1
-cargo test --features gui-tests --lib root_overlay_ -- --test-threads=1
-cargo test --features gui-tests --lib value_selector_ -- --test-threads=1
-cargo test --features gui-tests --lib choice_combobox_ -- --test-threads=1
-cargo test --features gui-tests --lib source_line_commands -- --test-threads=1
-cargo test --features gui-tests --lib external_reload -- --test-threads=1
-cargo test --features gui-tests --lib deployment_activity_ -- --test-threads=1
-cargo test --features gui-tests --lib runs_open_site_ -- --test-threads=1
-cargo test --features gui-tests --lib desktop::ui -- --test-threads=1
+cargo test --features gui-tests --lib workspace_external_menus_
+cargo test --features gui-tests --lib suite_name_dialog_
+cargo test --features gui-tests --lib root_overlay_
+cargo test --features gui-tests --lib value_selector_
+cargo test --features gui-tests --lib choice_combobox_
+cargo test --features gui-tests --lib source_line_commands
+cargo test --features gui-tests --lib external_reload
+cargo test --features gui-tests --lib deployment_activity_
+cargo test --features gui-tests --lib runs_open_site_
+cargo test --features gui-tests --lib desktop::ui
 ```
 
 Run the relevant `./ci/desktop-smoke.ps1` switch, such as `-SchemaFlows`, `-ComparisonFlows`, or `-GitFlows`; the default flow includes pointer-focused suite/scenario/checklist shortcuts. `-SchemaFlows` also covers source line commands, the Edit menu, automatic external reload after Source saves, and conflict cancellation/confirmation with compact/large light/dark screenshots. Use `-SkipBuild` only with a current binary. Capture flows may require managed Chromium. Do not use browser automation as a substitute for this native UI's tests.

@@ -97,7 +97,7 @@ cargo test --features desktop --lib
 Run full GUI and lint gates:
 
 ```bash
-cargo test --features gui-tests --all-targets -- --test-threads=1
+cargo test --features gui-tests --all-targets
 cargo clippy --features gui --lib -- -D warnings
 ```
 

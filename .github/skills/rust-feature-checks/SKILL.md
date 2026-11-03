@@ -21,6 +21,12 @@ description: 'Use when choosing Rust validation gates, changing Cargo features/d
    Do not run an all-features build as a substitute for supported feature boundaries.
 1. Read ignored-test prerequisites before enabling live Chromium cases. Never
    silently install browsers, contact production websites, or change credentials.
+1. All gates, including `gui-tests`, run with the default parallel test threads.
+   Keep tests isolated rather than serializing them: use temporary directories
+   and injected paths (`Workbench::new` preferences path, `*_in` path helpers),
+   never real user settings. Tests that set process-global `OnceLock`s re-run
+   `current_exe()` with `--exact` in a child process. GPUI `wait_for` timeouts
+   use simulated time, so wait on observable completion, not wall-clock delays.
 
 ## Current CI Gates
 
@@ -28,7 +34,7 @@ Windows runs:
 
 ```sh
 cargo test --locked --all-targets
-cargo test --locked --features gui-tests --all-targets -- --test-threads=1
+cargo test --locked --features gui-tests --all-targets
 cargo clippy --locked --features gui --lib -- -D warnings
 cargo build --locked --features gui --bin regressify-desktop
 ```

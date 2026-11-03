@@ -32,8 +32,8 @@ description: 'Use when changing desktop Git status/diffs, selected commit/discar
 ```sh
 cargo test --features desktop --lib desktop::git::tests
 cargo test --features desktop --lib desktop::git::review::tests
-cargo test --features gui-tests --lib desktop::ui::git::tests -- --test-threads=1
-cargo test --features gui-tests --lib git_tree_ -- --test-threads=1
+cargo test --features gui-tests --lib desktop::ui::git::tests
+cargo test --features gui-tests --lib git_tree_
 ```
 
 Reuse temporary repositories and local bare remotes. Set fixture-local `core.autocrlf=false` for byte-exact Windows assertions. Cover malformed source on either side, comments, line endings, empty files, scrolling/copy/navigation, staged/untracked, renamed/deleted, conflicts, stale review, unsafe paths, and cancelled confirmation. `git_text_diff` covers the native split view in compact/wide layouts and light/dark themes.

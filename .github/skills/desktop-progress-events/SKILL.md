@@ -32,8 +32,8 @@ description: 'Use when changing structured run events, scenario counts, UI polli
 ```sh
 cargo test --lib progress::tests
 cargo test --features desktop --lib desktop::runner::tests
-cargo test --features gui-tests --lib run_poll_ -- --test-threads=1
-cargo test --features gui-tests --lib run_log_ -- --test-threads=1
+cargo test --features gui-tests --lib run_poll_
+cargo test --features gui-tests --lib run_log_
 ```
 
 Cover partial/invalid events, unchanged polling, contended locks, overflow/omission, late writes, reload without rerun, absent suites, and legacy metadata.

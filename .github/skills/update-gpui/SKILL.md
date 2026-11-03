@@ -90,7 +90,7 @@ Run the [feature gates](../rust-feature-checks/SKILL.md) and [native UI checks](
 ./ci/test-desktop-smoke.ps1
 cargo fmt --all -- --check
 cargo clippy --locked --features gui --lib -- -D warnings
-cargo test --locked --features gui-tests --all-targets -- --test-threads=1
+cargo test --locked --features gui-tests --all-targets
 cargo test --locked --all-targets
 cargo build --locked --features gui --bin regressify-desktop
 ```

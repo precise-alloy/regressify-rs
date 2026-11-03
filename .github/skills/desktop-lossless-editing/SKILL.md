@@ -29,9 +29,9 @@ description: 'Use when changing desktop YAML/JSON or plain-text document edits, 
 ```sh
 cargo test --features desktop --lib desktop::document::tests
 cargo test --features desktop --lib desktop::session::tests
-cargo test --features gui-tests --lib source_line_commands -- --test-threads=1
-cargo test --features gui-tests --lib source_history_ -- --test-threads=1
-cargo test --features gui-tests --lib external_reload -- --test-threads=1
+cargo test --features gui-tests --lib source_line_commands
+cargo test --features gui-tests --lib source_history_
+cargo test --features gui-tests --lib external_reload
 ```
 
 Cover invalid drafts, Unicode/comments/line endings, plain selectors, anchors, empty collections, list bounds, undo/redo, all shipped suites, and late save results. Use native UI tests when changing tab/navigation behavior.

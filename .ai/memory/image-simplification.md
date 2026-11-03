@@ -115,6 +115,6 @@ Reported by the approved 2026-10-23 experiments on real pages, not re-measured:
 ## Evidence
 
 Unit tests: `cargo test --lib image_simplification`, also with `--features desktop`.
-Live fixtures with cached Chromium: `cargo test --lib test::browser_tests::image_simplification_ -- --ignored --test-threads=1`.
+Live fixtures with cached Chromium: `cargo test --lib test::browser_tests::image_simplification_ -- --ignored`.
 Temporary mutations (guard allows all, no selector refresh or `save` restore,
 dilation chain at 67 px, each sharp-case check reverted) failed the fixtures.

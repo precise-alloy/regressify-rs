@@ -81,7 +81,7 @@ Verified: 2026-10-21
   indents the following parent key into the scenario in the starter suite.
   `pixel_match_threshold_reset_preserves_suite_override` reproduced the semantic
   guard failure; document tests and native threshold-reset interactions now pass.
-- `cargo test --locked --features gui-tests --lib source_line_commands -- --test-threads=1`
+- `cargo test --locked --features gui-tests --lib source_line_commands`
   covers text boundaries, CRLF/Unicode, reverse selections, keyboard undo/redo,
   disabled/read-only/focus guards, strict JSON, and actual menu clicks.
 - [Schema smoke](../../ci/desktop-smoke/flows/schema.ps1) includes line shortcuts
@@ -95,7 +95,7 @@ Verified: 2026-10-21
   ordinary dot-prefixed helpers remain allowed.
 - Editor diagnostics describe the draft; suite catalog errors describe the saved
   file and refresh after Save succeeds. The `corrected_invalid_source` filter in
-  `cargo test --locked --features gui-tests --lib corrected_invalid_source -- --test-threads=1`
+  `cargo test --locked --features gui-tests --lib corrected_invalid_source`
   covers YAML/JSON repairs, conflicts, and the native Save interaction.
 - Non-YAML/JSON UTF-8 files use `Format::Text`, not YAML parsing. Workspace
   discovery checks content within the 4 MiB limit, and open rechecks the bytes;

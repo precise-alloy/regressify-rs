@@ -69,6 +69,8 @@ assistant's private memory store. Keep this directory out of ignore rules.
 - [Image simplification](image-simplification.md): opt-in pixelation keys and
   cascade, exact block filter, paint-order guard, flag lifecycle, per-capture
   setting records, mismatch warnings, measured savings, and rejected alternatives.
+- [Test parallelism](test-parallelism.md): default-thread test runs, per-test
+  state isolation, and wall-clock child-process readiness pitfalls.
 
 ## Checks
 

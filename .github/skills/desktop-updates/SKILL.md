@@ -25,7 +25,7 @@ description: 'Use when changing desktop update feeds, manifest/version validatio
 
 ```sh
 cargo test --features desktop --lib desktop::updates::tests
-cargo test --features gui-tests --lib desktop::ui::updates::tests -- --test-threads=1
+cargo test --features gui-tests --lib desktop::ui::updates::tests
 ```
 
 Use existing fake feeds/local responses. Cover URL/version/hash/size mismatch, truncated downloads, cancellation, retry deadlines, cache corruption, and launch guards. Ordinary tests must not fetch or execute a real application update. Cover startup inside the eight-hour window, success/failure rescheduling, preserved retry limits, the eight-hour boundary, restart/clock rollback, simultaneous owners, pending startup takeover, cross-process lock release, one-transfer cache reuse, two-window notification, newer releases after a ready banner, owner shutdown versus pause, and expired retries while a peer owns preparation. Use injected time, fake feeds, local servers, and temporary caches; GUI tests can shorten only the local poll interval.
