@@ -23,7 +23,7 @@ description: 'Use when changing CSS overrides, hideSelectors/removeSelectors doc
 ## Checks
 
 ```sh
-cargo test --locked --lib test::hooks::tests -- --include-ignored --test-threads=1
+cargo test --locked --lib test::hooks::tests -- --include-ignored
 cargo test --locked --lib test::browser_tests::reference_and_test_inject_ready_scripts_without_node -- --ignored --exact
 ```
 

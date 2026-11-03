@@ -40,10 +40,10 @@ description: 'Use when changing desktop comparison reports, image previews, nami
 ```sh
 cargo test --features desktop --lib desktop::results::tests
 cargo test --features desktop --lib snapshot::capture_report::tests
-cargo test --features gui-tests --lib comparison_completion_ -- --test-threads=1
-cargo test --features gui-tests --lib crosshairs_ -- --test-threads=1
-cargo test --features gui-tests --lib -- image_previews_ side_by_side_scrolls --test-threads=1
-cargo test --features gui-tests --lib desktop::ui::tests -- --test-threads=1
+cargo test --features gui-tests --lib comparison_completion_
+cargo test --features gui-tests --lib crosshairs_
+cargo test --features gui-tests --lib -- image_previews_ side_by_side_scrolls
+cargo test --features gui-tests --lib desktop::ui::tests
 ```
 
 Use native comparison smoke for changed menus/layouts. Cover corrupt/oversized images, escaped paths, missing metadata, renamed suites, signed offsets, selection changes, context-menu dismissal, and approval of only selected successful captures.

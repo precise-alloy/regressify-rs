@@ -35,10 +35,10 @@ cargo test --features desktop --lib desktop::deployment::tests
 cargo test --features desktop --lib desktop::deployment::tokens::tests
 cargo test --features desktop --lib completed_deployments_persist_urls
 cargo test --features desktop --lib published_report_sites_
-cargo test --features gui-tests --lib saved_deployment_urls_reopen_and_copy -- --test-threads=1
-cargo test --features gui-tests --lib runs_open_site_ -- --test-threads=1
-cargo test --features gui-tests --lib desktop::ui::tokens::tests -- --test-threads=1
-cargo test --features gui-tests --lib desktop::ui::deployment::tests -- --test-threads=1
+cargo test --features gui-tests --lib saved_deployment_urls_reopen_and_copy
+cargo test --features gui-tests --lib runs_open_site_
+cargo test --features gui-tests --lib desktop::ui::tokens::tests
+cargo test --features gui-tests --lib desktop::ui::deployment::tests
 ```
 
 Cover workspace isolation, create/edit/delete, blank/missing tokens, provider changes, failed saves, corrupt target files, and errors that omit synthetic secrets. Run `./ci/desktop-smoke.ps1 -PublishingFlows` for named-token and landing controls; run the smoke harness self-tests first and preserve the interactive-desktop guards.

@@ -59,7 +59,7 @@ jobs:
       - name: Default CLI regression tests
         run: cargo test --locked --all-targets
       - name: Desktop models and native interaction tests
-        run: cargo test --locked --features gui-tests --all-targets -- --test-threads=1
+        run: cargo test --locked --features gui-tests --all-targets
       - name: Production library lint
         run: cargo clippy --locked --features gui --lib -- -D warnings
       - name: Build standalone desktop

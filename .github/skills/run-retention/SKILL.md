@@ -67,7 +67,7 @@ cargo test --lib suite_run_completion_
 cargo test --features desktop --lib completed_run_
 cargo test --features desktop --lib run_retention_
 cargo test --features desktop --lib staging_includes_only_selected_report_dependencies
-cargo test --features gui-tests --lib cleanup_dialog_ -- --test-threads=1
+cargo test --features gui-tests --lib cleanup_dialog_
 ./ci/test-desktop-smoke.ps1
 ./ci/desktop-smoke.ps1 -CleanupFlows
 ```

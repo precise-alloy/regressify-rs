@@ -84,7 +84,7 @@ Verified: 2026-10-15
   dependency and preserves the existing safe HEAD/saved-file loader without
   YAML/JSON parsing. Native virtual lists share a scroll handle and equal row
   geometry; copy controls use source lines rather than numbered/padded UI text.
-- `cargo test --locked --features gui-tests --lib git_text_diff -- --test-threads=1`
+- `cargo test --locked --features gui-tests --lib git_text_diff`
   covers malformed source, binary fallback, exact copying, change navigation,
   aligned two-axis scrolling, and compact/wide light/dark layouts. Native wheel
   tests send horizontal and vertical gestures separately because mixed deltas

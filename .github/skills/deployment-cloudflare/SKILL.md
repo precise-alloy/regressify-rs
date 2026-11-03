@@ -31,7 +31,7 @@ description: 'Use when changing Cloudflare Workers report deployment, static ass
 cargo test --features desktop --lib desktop::deployment::cloudflare::tests
 cargo test --features desktop --lib desktop::deployment::optimization::tests
 cargo test --features desktop --lib desktop::deployment::tests
-cargo test --features gui-tests --lib desktop::ui::deployment::tests -- --test-threads=1
+cargo test --features gui-tests --lib desktop::ui::deployment::tests
 ```
 
 Use synthetic tokens and loopback servers. Cover manifest limits, mutation, symlinks, bucket validation, cached deployments, MIME/policy metadata, retry exhaustion, deadlines, redaction, rejected redirects, failed publication, routing defaults/preservation, raw uploads, and completion-token ordering. Cover oversized reports, unchanged fitting reports, source preservation, temporary cleanup, excluded files, and cascading snapshot cache versions after compression.

@@ -40,9 +40,9 @@ cargo test --lib test::test_action::tests
 cargo test --lib snapshot::logs::tests
 cargo test --features desktop --lib desktop::logs::tests
 cargo test --features desktop --lib desktop::deployment::
-cargo test --features gui-tests --lib run_log_ -- --test-threads=1
-cargo test --features gui-tests --lib log_health_warning_ -- --test-threads=1
-cargo test --features gui-tests --lib log_pagination_ -- --test-threads=1
+cargo test --features gui-tests --lib run_log_
+cargo test --features gui-tests --lib log_health_warning_
+cargo test --features gui-tests --lib log_pagination_
 ```
 
 Run frontend `bun run test:e2e --grep 'capture log'` and the explicit cached-browser CLI regression from the [verification document](../../../docs/logging-verification.md). The [benchmark](../../../docs/logging-benchmark.md) documents the confirmed 10% mean wall-time budget, five-pair workload, and archive-off baseline limitations.

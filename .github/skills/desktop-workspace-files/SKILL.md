@@ -34,10 +34,10 @@ cargo test --features desktop --lib desktop::workspace::tests
 cargo test --features desktop --lib desktop::workspace::artifacts::tests
 cargo test --features desktop --lib desktop::session::tests
 cargo test --features desktop --lib init::tests
-cargo test --features gui-tests --lib workspace_files_ -- --test-threads=1
-cargo test --features gui-tests --lib external_reload -- --test-threads=1
-cargo test --features gui-tests --lib corrected_invalid_source -- --test-threads=1
-cargo test --features gui-tests --lib suite_name_dialog_ -- --test-threads=1
+cargo test --features gui-tests --lib workspace_files_
+cargo test --features gui-tests --lib external_reload
+cargo test --features gui-tests --lib corrected_invalid_source
+cargo test --features gui-tests --lib suite_name_dialog_
 ```
 
 Cover repairs of existing syntax/schema errors, suite status refresh after saving, external edits/deletion, existing destinations, path traversal/symlinks, reserved names, duplicate/shadowed suites, read-only paths, and concurrent settings.

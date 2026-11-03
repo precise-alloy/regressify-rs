@@ -24,8 +24,8 @@ description: 'Use when changing desktop landing apps, automatic landing storage,
 
 ```sh
 cargo test --features desktop --lib desktop::landing
-cargo test --features gui-tests --lib desktop::ui::landing::tests -- --test-threads=1
-cargo test --features gui-tests --lib saved_deployment_urls_reopen_and_copy -- --test-threads=1
+cargo test --features gui-tests --lib desktop::ui::landing::tests
+cargo test --features gui-tests --lib saved_deployment_urls_reopen_and_copy
 ./ci/test-desktop-smoke.ps1
 ./ci/desktop-smoke.ps1 -PublishingFlows
 ```
