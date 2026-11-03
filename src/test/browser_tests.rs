@@ -1,14 +1,17 @@
 use std::{
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
+    net::{Shutdown, TcpListener, TcpStream},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     time::Duration,
 };
 
-use anyhow::{Context, Result, anyhow};
-use tiny_http::{Header, Request, Response, Server, StatusCode};
+use anyhow::{Context, Result, anyhow, ensure};
+use tiny_http::{HTTPVersion, Header, Method, Response, StatusCode};
 
 use crate::types::BasicAuth;
 
@@ -27,31 +30,171 @@ pub(crate) async fn launch_browser(
         .map_err(|error| anyhow!("{error}"))
 }
 
+/// A fixture request with the subset of `tiny_http::Request` the handlers use.
+/// Like tiny_http, the body streams from the socket on demand, the unread
+/// remainder is drained after responding, and unanswered requests get a 500.
+pub(crate) struct Request {
+    url: String,
+    method: Method,
+    headers: Vec<Header>,
+    version: HTTPVersion,
+    body: Option<Body>,
+    reply: Option<mpsc::Sender<(Vec<u8>, Option<Body>)>>,
+}
+
+impl Request {
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn method(&self) -> &Method {
+        &self.method
+    }
+
+    pub fn headers(&self) -> &[Header] {
+        &self.headers
+    }
+
+    pub fn as_reader(&mut self) -> &mut dyn Read {
+        self.body
+            .as_mut()
+            .expect("the body is owned by the request until it responds")
+    }
+
+    pub fn respond<R: Read>(mut self, response: Response<R>) -> std::io::Result<()> {
+        self.send(response)
+    }
+
+    fn send<R: Read>(&mut self, response: Response<R>) -> std::io::Result<()> {
+        let mut bytes = Vec::new();
+        response.raw_print(
+            &mut bytes,
+            self.version.clone(),
+            &self.headers,
+            self.method == Method::Head,
+            None,
+        )?;
+        if let Some(reply) = self.reply.take() {
+            let _ = reply.send((bytes, self.body.take()));
+        }
+        Ok(())
+    }
+}
+
+/// Request body framed by `Content-Length` or chunked transfer encoding.
+struct Body {
+    reader: BufReader<TcpStream>,
+    remaining: u64,
+    chunked: bool,
+    started: bool,
+    done: bool,
+}
+
+impl Read for Body {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 && self.chunked && !self.done {
+            let mut line = String::new();
+            if self.started {
+                self.reader.read_line(&mut line)?;
+                line.clear();
+            }
+            self.started = true;
+            self.reader.read_line(&mut line)?;
+            let size = line.split(';').next().unwrap_or_default().trim();
+            self.remaining = u64::from_str_radix(size, 16)
+                .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "bad chunk size"))?;
+            if self.remaining == 0 {
+                // Trailer section, terminated by an empty line.
+                while {
+                    line.clear();
+                    self.reader.read_line(&mut line)? > 0 && !line.trim_end().is_empty()
+                } {}
+                self.done = true;
+            }
+        }
+        if self.remaining == 0 {
+            return Ok(0);
+        }
+        let limit = buffer
+            .len()
+            .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
+        let read = self.reader.read(&mut buffer[..limit])?;
+        if read == 0 {
+            return Err(ErrorKind::UnexpectedEof.into());
+        }
+        self.remaining -= read as u64;
+        Ok(read)
+    }
+}
+
+impl Drop for Request {
+    fn drop(&mut self) {
+        if self.reply.is_some() {
+            let _ = self.send(Response::empty(500));
+        }
+    }
+}
+
+/// Local HTTP fixture with one reader thread per connection.
+///
+/// tiny_http 0.12 (still current upstream) serves each keep-alive connection
+/// on a 4-thread pool whose `spawn` only notifies when a worker counts as
+/// waiting; a notified worker keeps counting until it wakes, so connections
+/// accepted in that window are queued without a wakeup and starve behind
+/// Chromium's idle keep-alive sockets. Under parallel test load that hung
+/// subresource requests indefinitely. Handlers still run one at a time on a
+/// single thread because several fixtures rely on serialized dispatch.
 pub(crate) struct Site {
     pub origin: String,
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
+    address: std::net::SocketAddr,
+    connections: Arc<Mutex<Vec<TcpStream>>>,
+    threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl Site {
     pub fn new(handler: impl Fn(Request) + Send + 'static) -> Result<Self> {
-        let server = Server::http("127.0.0.1:0").map_err(|error| anyhow!("{error}"))?;
-        let origin = format!("http://{}", server.server_addr());
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
         let stop = Arc::new(AtomicBool::new(false));
+        let connections = Arc::new(Mutex::new(Vec::<TcpStream>::new()));
+        let (requests, received) = mpsc::channel::<Request>();
+
+        let accepting = stop.clone();
+        let open = connections.clone();
+        let acceptor = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if accepting.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Ok(stream) = stream else { continue };
+                if let Ok(clone) = stream.try_clone() {
+                    open.lock().unwrap_or_else(|e| e.into_inner()).push(clone);
+                }
+                let requests = requests.clone();
+                std::thread::spawn(move || {
+                    let _ = serve_connection(stream, &requests);
+                });
+            }
+        });
+
         let stopped = stop.clone();
-        let thread = std::thread::spawn(move || {
+        let dispatcher = std::thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
-                match server.recv_timeout(Duration::from_millis(100)) {
-                    Ok(Some(request)) => handler(request),
-                    Ok(None) => {}
-                    Err(_) => break,
+                match received.recv_timeout(Duration::from_millis(100)) {
+                    Ok(request) => handler(request),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
         });
+
         Ok(Self {
-            origin,
+            origin: format!("http://{address}"),
             stop,
-            thread: Some(thread),
+            address,
+            connections,
+            threads: vec![acceptor, dispatcher],
         })
     }
 }
@@ -59,9 +202,110 @@ impl Site {
 impl Drop for Site {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
+        // Wake the blocking accept so the acceptor observes `stop`.
+        let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
+        for connection in self
+            .connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            let _ = connection.shutdown(Shutdown::Both);
+        }
+        for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
+    }
+}
+
+fn serve_connection(stream: TcpStream, requests: &mpsc::Sender<Request>) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut writer = stream;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        let mut parts = line.split_whitespace();
+        let (Some(method), Some(url), Some(version)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let version = if version == "HTTP/1.0" {
+            HTTPVersion(1, 0)
+        } else {
+            HTTPVersion(1, 1)
+        };
+        let Ok(method) = method.parse::<Method>() else {
+            return Ok(());
+        };
+        let url = url.to_owned();
+
+        let mut headers = Vec::new();
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header)? == 0 {
+                return Ok(());
+            }
+            let header = header.trim_end();
+            if header.is_empty() {
+                break;
+            }
+            if let Ok(header) = header.parse::<Header>() {
+                headers.push(header);
+            }
+        }
+        let value = |name: &'static str| {
+            headers
+                .iter()
+                .find(|header| header.field.equiv(name))
+                .map(|header| header.value.as_str().to_ascii_lowercase())
+        };
+        let chunked = value("Transfer-Encoding").is_some_and(|coding| coding.contains("chunked"));
+        let remaining = if chunked {
+            0
+        } else {
+            value("Content-Length").map_or(Ok(0), |length| {
+                length
+                    .trim()
+                    .parse()
+                    .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "bad length"))
+            })?
+        };
+        let close = version == HTTPVersion(1, 0)
+            || value("Connection").is_some_and(|connection| connection.contains("close"));
+
+        let (reply, response) = mpsc::channel();
+        let request = Request {
+            url,
+            method,
+            headers,
+            version,
+            body: Some(Body {
+                reader,
+                remaining,
+                chunked,
+                started: false,
+                done: false,
+            }),
+            reply: Some(reply),
+        };
+        if requests.send(request).is_err() {
+            return Ok(());
+        }
+        let Ok((response, body)) = response.recv() else {
+            return Ok(());
+        };
+        writer.write_all(&response)?;
+        writer.flush()?;
+        let Some(mut body) = body else {
+            return Ok(());
+        };
+        std::io::copy(&mut body, &mut std::io::sink())?;
+        if close {
+            return writer.shutdown(Shutdown::Both);
+        }
+        reader = body.reader;
     }
 }
 
@@ -168,6 +412,98 @@ get('unload').onclick = () => window.onbeforeunload = () => '';
         .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap()));
 }
 
+#[test]
+fn site_serves_every_concurrent_keep_alive_connection() -> Result<()> {
+    // Saturate the CPUs so freshly notified workers wake late, as they do under
+    // a parallel test run; that is the window in which connections were lost.
+    let busy = Arc::new(AtomicBool::new(true));
+    let burners = (0..std::thread::available_parallelism().map_or(4, usize::from))
+        .map(|_| {
+            let busy = busy.clone();
+            std::thread::spawn(move || {
+                while busy.load(Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let result = (0..25).try_for_each(|round| -> Result<()> {
+        let site = Site::new(|request| {
+            let path = request.url().to_owned();
+            let _ = request.respond(Response::from_string(path));
+        })?;
+        let address = site.origin.trim_start_matches("http://").to_owned();
+        // Chromium opens several idle keep-alive sockets at once; open more
+        // than tiny_http's four pooled workers before any request is sent.
+        let mut connections = (0..12)
+            .map(|_| std::net::TcpStream::connect(&address))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        for (index, connection) in connections.iter_mut().enumerate().rev() {
+            connection.set_read_timeout(Some(Duration::from_secs(5)))?;
+            write!(
+                connection,
+                "GET /{index} HTTP/1.1\r\nHost: {address}\r\n\r\n"
+            )?;
+        }
+        for (index, connection) in connections.iter().enumerate() {
+            let mut status = String::new();
+            BufReader::new(connection)
+                .read_line(&mut status)
+                .with_context(|| format!("round {round}: connection {index} was never served"))?;
+            ensure!(
+                status.starts_with("HTTP/1.1 200"),
+                "round {round}: connection {index}: {status:?}"
+            );
+        }
+        Ok(())
+    });
+    busy.store(false, Ordering::Relaxed);
+    for burner in burners {
+        let _ = burner.join();
+    }
+    result
+}
+
+#[test]
+fn site_answers_dropped_requests_and_honours_connection_close() -> Result<()> {
+    let site = Site::new(|mut request| {
+        if request.url() == "/echo" {
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body).unwrap();
+            let reply = format!("{} {body}", request.method().as_str());
+            let _ = request.respond(Response::from_string(reply));
+        }
+    })?;
+    let mut connection = TcpStream::connect(site.origin.trim_start_matches("http://"))?;
+    connection.set_read_timeout(Some(Duration::from_secs(5)))?;
+    // An unread chunked body is drained after the 500, then a lazily read
+    // chunked body and a Content-Length body follow on the same connection.
+    write!(
+        connection,
+        "POST /dropped HTTP/1.1\r\nHost: fixture\r\nTransfer-Encoding: chunked\r\n\r\n\
+         3\r\nabc\r\n0\r\n\r\n\
+         PUT /echo HTTP/1.1\r\nHost: fixture\r\nTransfer-Encoding: chunked\r\n\r\n\
+         2;ext=1\r\nhe\r\n3\r\nllo\r\n0\r\nTrailer: x\r\n\r\n\
+         POST /echo HTTP/1.1\r\nHost: fixture\r\nContent-Length: 5\r\nConnection: close\r\n\r\nworld"
+    )?;
+    let mut transcript = String::new();
+    connection.read_to_string(&mut transcript)?;
+    let dropped = transcript
+        .find("HTTP/1.1 500")
+        .context("dropped request unanswered")?;
+    let chunked = transcript
+        .find("PUT hello")
+        .context("chunked body not echoed")?;
+    let sized = transcript
+        .find("POST world")
+        .context("sized body not echoed")?;
+    ensure!(
+        dropped < chunked && chunked < sized && transcript.ends_with("POST world"),
+        "{transcript:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires managed Chromium; isolated child owns fixture paths"]
 async fn expanded_actions_dispatch_trusted_events_and_preserve_frames() -> Result<()> {
@@ -230,17 +566,19 @@ async fn expanded_actions_dispatch_trusted_events_and_preserve_frames() -> Resul
         let page = browser.new_page("about:blank").await?;
         let runtime = Runtime::new(&browser, &page).await?;
         let storage = Arc::new(StorageState::install_with_client(runtime.client(), &page, None, &outer.origin).await?);
-        let touch_config = ResolvedConfig { element_timeout_ms: 4000, ..Default::default() };
+        // Positive-path bounds are hang guards: frame loads and tab setup can exceed
+        // a few seconds under parallel browser tests. Timeout behavior uses `short` below.
+        let touch_config = ResolvedConfig { element_timeout_ms: 30_000, ..Default::default() };
         let touch_tabs = super::tabs::Tabs::install(&page, storage.clone(), &touch_config, None, true).await?;
         page.goto(outer.origin.as_str()).await?;
         let child = inner.origin.replace("127.0.0.1", "localhost");
         super::runtime::evaluate_main_document(&page, format!("(() => {{ const frame = document.createElement('iframe'); frame.id = 'frame'; frame.width = 1000; frame.height = 600; frame.src = {}; document.body.append(frame); }})()", serde_json::to_string(&child)?)).await?;
-        let child_target = runtime.target(&Some(Frame::Single("#frame".into())), Duration::from_secs(4)).await?;
-        super::actionability::wait_for_selector(&child_target, "body[data-initial-touch]", &None, &super::actionability::ActionabilityConfig { element_timeout_ms: 4000, ..Default::default() }, crate::diagnostics::record::Stage::Navigation).await?;
+        let child_target = runtime.target(&Some(Frame::Single("#frame".into())), Duration::from_secs(30)).await?;
+        super::actionability::wait_for_selector(&child_target, "body[data-initial-touch]", &None, &super::actionability::ActionabilityConfig { element_timeout_ms: 30_000, ..Default::default() }, crate::diagnostics::record::Stage::Navigation).await?;
         child_target.evaluate(format!("(() => {{ const frame = document.createElement('iframe'); frame.id = 'nested'; frame.width = 950; frame.height = 580; frame.src = {}; document.body.append(frame); }})()", serde_json::to_string(&outer.origin)?)).await?;
         let suite = TestSuite::default();
         let scenario = TestScenario { url: outer.origin.clone(), ..Default::default() };
-        let config = ResolvedConfig { element_timeout_ms: 4000, actionability_timeout_ms: 2000, ..Default::default() };
+        let config = ResolvedConfig { element_timeout_ms: 30_000, actionability_timeout_ms: 10_000, ..Default::default() };
         let context = || ActionExecutionContext { page: &page, runtime: &runtime, storage: &storage, test_suite: &suite, scenario: &scenario, config: &config, url_replacements: &[], viewport_label: None, log_prefix: "expanded" };
         for frame in [None, Some(Frame::Single("#frame".into())), Some(Frame::Multiple(vec!["#frame".into(), "#nested".into()]))] {
             touch_tabs.check().await?;
@@ -281,7 +619,7 @@ async fn expanded_actions_dispatch_trusted_events_and_preserve_frames() -> Resul
                 let action: TestAction = serde_json::from_value(value.clone())?;
                 exec_test_action(context(), &action).await.with_context(|| format!("expanded action {}", value.as_object().unwrap().keys().filter(|key| *key != "frame").cloned().collect::<Vec<_>>().join(",")))?;
             }
-            let target = runtime.target(&frame, Duration::from_secs(4)).await?;
+            let target = runtime.target(&frame, Duration::from_secs(30)).await?;
             exec_test_action(context(), &serde_json::from_value(json!({"dialog":"accept","kind":"confirm"}))?).await?;
             exec_test_action(context(), &serde_json::from_value(json!({"click":"#confirm","frame":frame}))?).await?;
             let values: Value = target.evaluate("({...document.body.dataset, first:document.querySelector('#first').value, second:document.querySelector('#second').value, typed:document.querySelector('#typed').value, scrollLeft:document.querySelector('#scroller').scrollLeft, scrollTop:document.querySelector('#scroller').scrollTop})").await?.into_value()?;

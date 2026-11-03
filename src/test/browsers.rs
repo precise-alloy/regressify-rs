@@ -264,12 +264,60 @@ fn resolve_executable(exe_path: &Option<PathBuf>) -> anyhow::Result<PathBuf> {
 
 pub(super) const MAX_LAUNCH_RETRIES: u32 = 2;
 
+/// Bounds live Chromium instances per test process. Browser tests deliberately
+/// check short real-time deadlines, and each Chromium runs ~20 processes: half
+/// the logical CPUs (11 browsers, ~250 processes on a 22-thread host) saturated
+/// CPU and paging until CDP requests timed out, so allow one per four CPUs.
+/// Each caller holds at most one browser at a time (product
+/// scenarios run `needs` inline), so waiting for a slot cannot deadlock. Tests that
+/// re-run the test binary as a child get a separate semaphore, so the bound is
+/// per process, not global.
+#[cfg(test)]
+fn test_browser_slots() -> std::sync::Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| {
+            let cores = std::thread::available_parallelism().map_or(2, usize::from);
+            std::sync::Arc::new(tokio::sync::Semaphore::new((cores / 4).max(2)))
+        })
+        .clone()
+}
+
+/// Keeps the slot until the browser handler finishes. Aborting the returned
+/// handle aborts the real handler, as callers expect.
+#[cfg(test)]
+fn hold_test_browser_slot(
+    handler: JoinHandle<()>,
+    slot: tokio::sync::OwnedSemaphorePermit,
+) -> JoinHandle<()> {
+    struct AbortOnDrop(JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    // Wrap before spawning: an abort that lands before the first poll drops
+    // the captured state, and a bare JoinHandle would only detach the handler.
+    let mut handler = AbortOnDrop(handler);
+    tokio::spawn(async move {
+        let _slot = slot;
+        if let Err(error) = (&mut handler.0).await
+            && error.is_panic()
+        {
+            std::panic::resume_unwind(error.into_panic());
+        }
+    })
+}
+
 pub async fn launch_browser(
     exe_path: &Option<PathBuf>,
     log_prefix: &str,
     options: LaunchOptions,
 ) -> Result<(Browser, JoinHandle<()>, PathBuf), Box<dyn std::error::Error>> {
-    diagnostics::stage(
+    #[cfg(test)]
+    let slot = test_browser_slots().acquire_owned().await?;
+    let launched = diagnostics::stage(
         Stage::QueueSetup,
         [
             (Field::Endpoint, FieldValue::Kind(SafeValue::Browser)),
@@ -286,7 +334,14 @@ pub async fn launch_browser(
         },
     )
     .await
-    .map_err(Into::into)
+    .map_err(Box::<dyn std::error::Error>::from)?;
+    #[cfg(test)]
+    let launched = (
+        launched.0,
+        hold_test_browser_slot(launched.1, slot),
+        launched.2,
+    );
+    Ok(launched)
 }
 
 async fn launch_browser_inner(
@@ -456,9 +511,40 @@ async fn launch_browser_inner(
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_cache_dir, lock_browser_cache, lock_browser_cache_with_timeout, managed_browser,
-        prepare_browser_in, resolve_executable,
+        browser_cache_dir, hold_test_browser_slot, lock_browser_cache,
+        lock_browser_cache_with_timeout, managed_browser, prepare_browser_in, resolve_executable,
     };
+
+    #[tokio::test]
+    async fn test_browser_slot_is_released_with_the_handler_and_abort_reaches_it() {
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let handler = tokio::spawn(async move {
+            let _ = finished.await;
+        });
+        let wrapped = hold_test_browser_slot(handler, slots.clone().acquire_owned().await.unwrap());
+        assert_eq!(slots.available_permits(), 0);
+        finish.send(()).unwrap();
+        wrapped.await.unwrap();
+        assert_eq!(slots.available_permits(), 1);
+
+        let (dropped, observed) = tokio::sync::oneshot::channel::<()>();
+        let handler = tokio::spawn(async move {
+            let _dropped = dropped;
+            std::future::pending::<()>().await;
+        });
+        let wrapped = hold_test_browser_slot(handler, slots.clone().acquire_owned().await.unwrap());
+        wrapped.abort();
+        assert!(wrapped.await.unwrap_err().is_cancelled());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), observed)
+                .await
+                .expect("aborting the wrapper must abort the handler")
+                .is_err(),
+            "aborting the wrapper must drop the handler"
+        );
+        assert_eq!(slots.available_permits(), 1);
+    }
 
     #[test]
     fn managed_chromium_uses_the_os_user_cache() {
