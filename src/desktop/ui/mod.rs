@@ -189,7 +189,13 @@ pub struct Workbench {
 }
 
 impl Workbench {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `preferences_path` is injected so tests can run in parallel against
+    /// per-test settings and never read the user's real preferences file.
+    pub fn new(
+        preferences_path: anyhow::Result<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let source = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("yaml")
@@ -244,7 +250,10 @@ impl Workbench {
         let field_search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a setting"));
         let field_search_subscription =
             cx.subscribe(&field_search, |_, _, _: &InputEvent, cx| cx.notify());
-        let preferences = Preferences::path().and_then(|path| Preferences::load(&path));
+        let preferences = preferences_path
+            .as_ref()
+            .map_err(|error| anyhow!("{error:#}"))
+            .and_then(|path| Preferences::load(path));
         let status = preferences
             .as_ref()
             .err()
@@ -507,7 +516,7 @@ impl Workbench {
             source_font_size: f32::from(preferences.source_font_size),
             source_font_size_input,
             preferences,
-            preferences_path: Preferences::path().ok(),
+            preferences_path: preferences_path.ok(),
             preferences_saving: false,
             preferences_pending: false,
             close_after_preferences: false,
@@ -3322,7 +3331,7 @@ pub fn launch(instance: Option<DesktopInstance>) {
                         },
                         cx,
                         |window, cx| {
-                            let view = cx.new(|cx| Workbench::new(window, cx));
+                            let view = cx.new(|cx| Workbench::new(Preferences::path(), window, cx));
                             #[cfg(target_os = "windows")]
                             match super::jump_list::initialize_window(window) {
                                 Ok(taskbar) => {

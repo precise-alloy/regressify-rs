@@ -1691,6 +1691,57 @@ async fn preference_write_failures_do_not_lock_the_editor_and_can_be_retried(
 }
 
 #[gpui_kit::test]
+fn workbench_loads_only_the_injected_preferences_path(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let valid = directory.path().join("valid-settings.json");
+    std::fs::write(&valid, r#"{"sourceFontSize":19,"navigatorHidden":true}"#).unwrap();
+    let invalid = directory.path().join("invalid-settings.json");
+    std::fs::write(&invalid, "{").unwrap();
+    cx.update(gpui_kit::init);
+    cx.update(|cx| super::design::apply_theme(false, None, cx));
+    let open = |path: anyhow::Result<std::path::PathBuf>, cx: &mut TestAppContext| {
+        let (_, view) = cx
+            .update(|cx| {
+                gpui_kit::open_window(WindowOptions::default(), cx, |window, cx| {
+                    cx.new(|cx| Workbench::new(path, window, cx))
+                })
+            })
+            .unwrap();
+        view
+    };
+
+    let loaded = open(Ok(valid.clone()), cx);
+    cx.update(|cx| {
+        let workbench = loaded.read(cx);
+        assert_eq!(workbench.preferences_path.as_deref(), Some(valid.as_path()));
+        assert_eq!(workbench.preferences.source_font_size, 19);
+        assert!(workbench.preferences.navigator_hidden);
+        assert_eq!(workbench.status, "Ready");
+    });
+
+    let rejected = open(Ok(invalid.clone()), cx);
+    cx.update(|cx| {
+        let workbench = rejected.read(cx);
+        assert_eq!(
+            workbench.preferences_path.as_deref(),
+            Some(invalid.as_path())
+        );
+        assert_eq!(
+            workbench.preferences.source_font_size,
+            crate::desktop::workspace::Preferences::default().source_font_size
+        );
+        assert!(workbench.status.contains("Invalid desktop preferences"));
+    });
+
+    let unavailable = open(Err(anyhow::anyhow!("no settings directory")), cx);
+    cx.update(|cx| {
+        let workbench = unavailable.read(cx);
+        assert!(workbench.preferences_path.is_none());
+        assert!(workbench.status.contains("no settings directory"));
+    });
+}
+
+#[gpui_kit::test]
 async fn source_font_size_accepts_direct_integer_entry(cx: &mut TestAppContext) {
     let directory = tempfile::tempdir().unwrap();
     let (handle, view) = editor(cx, directory.path());
@@ -10367,10 +10418,11 @@ pub(super) fn editor_at_size(
                 },
                 cx,
                 |window, cx| {
-                    let view = cx.new(|cx| Workbench::new(window, cx));
+                    let view = cx.new(|cx| {
+                        Workbench::new(Ok(root.join("desktop-preferences.json")), window, cx)
+                    });
                     view.update(cx, |this, cx| {
                         this.preferences = crate::desktop::workspace::Preferences::default();
-                        this.preferences_path = Some(root.join("desktop-preferences.json"));
                         this.apply_editor_display(window, cx);
                         this.session.connect(root).unwrap();
                         this.runs.update(cx, |panel, cx| {
