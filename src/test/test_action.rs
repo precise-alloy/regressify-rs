@@ -1262,43 +1262,12 @@ async fn exec_test_action_inner(
             if let Some(url) = url {
                 let target_url = apply_action_url_replacements(url, url_replacements)?;
                 let matcher = UrlMatcher::compile(&target_url)?;
-
-                // Poll-based URL check to avoid race condition with wait_for_navigation
                 let timeout = std::time::Duration::from_millis(ac.element_timeout_ms);
-                let start = std::time::Instant::now();
 
                 actionability::diagnostic_condition(
                     crate::diagnostics::record::SafeValue::Navigate,
                     &target_url,
-                    async {
-                        loop {
-                            let remaining = timeout.saturating_sub(start.elapsed());
-                            if remaining.is_zero() {
-                                anyhow::bail!("Timeout waiting for URL '{}'", target_url);
-                            }
-                            let current_url = actionability::cdp_with_timeout(
-                                remaining,
-                                "reading current URL",
-                                page.url(),
-                            )
-                            .await?
-                            .ok_or_else(|| anyhow!("Failed to get current URL"))?;
-
-                            if matcher.matches(&current_url) {
-                                return Ok(());
-                            }
-
-                            if start.elapsed() > timeout {
-                                anyhow::bail!(
-                                    "Timeout waiting for URL '{}', current URL is '{}'",
-                                    target_url,
-                                    current_url
-                                );
-                            }
-
-                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        }
-                    },
+                    wait_for_url(&target_url, &matcher, timeout, || page.url()),
                 )
                 .await?;
             }
@@ -1337,6 +1306,42 @@ async fn exec_test_action_inner(
 
 fn apply_action_url_replacements(url: &str, replacements: &[UrlReplacement]) -> Result<String> {
     config::replacements::apply_replacements(url, replacements)
+}
+
+/// Polls the current URL instead of awaiting navigation events, which may have already fired.
+async fn wait_for_url<F, R>(
+    target_url: &str,
+    matcher: &UrlMatcher,
+    timeout: Duration,
+    mut read_url: F,
+) -> Result<()>
+where
+    F: FnMut() -> R,
+    R: std::future::Future<Output = Result<Option<String>>>,
+{
+    let start = std::time::Instant::now();
+    let mut current_url = None;
+    loop {
+        let remaining = timeout.saturating_sub(start.elapsed());
+        // A read that outlives the remaining budget still means the URL wait expired.
+        let read = match tokio::time::timeout(remaining, read_url()).await {
+            Ok(read) if !remaining.is_zero() => read,
+            _ => match current_url {
+                Some(current_url) => anyhow::bail!(
+                    "Timeout waiting for URL '{target_url}', current URL is '{current_url}'"
+                ),
+                None => anyhow::bail!("Timeout waiting for URL '{target_url}'"),
+            },
+        };
+        let url = read
+            .map_err(|error| anyhow!("reading current URL: {error}"))?
+            .ok_or_else(|| anyhow!("Failed to get current URL"))?;
+        if matcher.matches(&url) {
+            return Ok(());
+        }
+        current_url = Some(url);
+        tokio::time::sleep(Duration::from_millis(100).min(remaining)).await;
+    }
 }
 
 async fn set_native_input_value(
@@ -2336,6 +2341,47 @@ mod tests {
         assert!(!matcher.matches("https://example.com/settings?tab=one"));
         assert!(!matcher.matches("https://example.com/loginXtab=one"));
         assert!(UrlMatcher::compile("**/{login,dashboard").is_err());
+    }
+
+    #[tokio::test]
+    async fn url_wait_reports_its_deadline_when_a_slow_read_consumes_it() {
+        let matcher = UrlMatcher::compile("**/never").unwrap();
+        let mut reads = 0;
+        let error = wait_for_url("**/never", &matcher, Duration::from_millis(300), || {
+            reads += 1;
+            let delay = if reads == 1 { 0 } else { 5_000 };
+            async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                Ok(Some("https://example.com/other".to_string()))
+            }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Timeout waiting for URL '**/never', current URL is 'https://example.com/other'"
+        );
+
+        let error = wait_for_url("**/never", &matcher, Duration::from_millis(50), || async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok(Some("https://example.com/never".to_string()))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "Timeout waiting for URL '**/never'");
+
+        let error = wait_for_url("**/never", &matcher, Duration::from_secs(5), || async {
+            Err(anyhow!("CDP failed"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "reading current URL: CDP failed");
+
+        wait_for_url("**/never", &matcher, Duration::from_secs(5), || async {
+            Ok(Some("https://example.com/never".to_string()))
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

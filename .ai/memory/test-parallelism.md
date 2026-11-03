@@ -55,12 +55,14 @@ Verified: 2026-11-03
   Bound them generously (30 s); keep short bounds only on tested behavior, such as
   the hooks deadline in [hooks.rs](../../src/test/hooks.rs) or the unmet/extra
   dialog cases of `expanded_actions_dialogs_and_history_are_strict` (under a 30 s
-  guard). `element_timeout_ms` overrides on actions expected to succeed (5 s
-  `switchTab` in [tabs.rs](../../src/test/tabs.rs) and the popup test, 250 ms
-  viewport-gate click in [test_scenario.rs](../../src/test/test_scenario.rs))
-  failed under load and now use the 30 s default. Popup probes showed paused-tab
-  replies arriving together after up to 5 s, in the same millisecond across
-  browsers: Chromium/OS renderer stalls, not chromiumoxide or `Tabs`.
+  guard). Success-path `element_timeout_ms`/`elementTimeout` overrides (5 s
+  `switchTab`, 250 ms viewport gate, 1.5 s hook fixtures, which also bound
+  ready hooks) and the 5 s per-command `actionability_timeout_ms` in OOPIF setup
+  waits failed under load; they now use defaults or 30 s. Popup probes showed
+  paused-tab replies arriving together after up to 5 s, in the same millisecond
+  across browsers: Chromium/OS renderer stalls, not chromiumoxide or `Tabs`.
+- `wait` + `url` (`wait_for_url` in [test_action.rs](../../src/test/test_action.rs))
+  reports its own URL timeout when a slow CDP read consumes the remaining budget.
 - Interrupt a held gesture only after the page observes it: a fixed 800 ms
   `longPress` abort could land before `TouchStart`, so no `touchcancel` fired;
   `expanded_actions_dispatch_trusted_events_and_preserve_frames` polls first.
@@ -97,24 +99,22 @@ Verified: 2026-11-03
   (`HANDLE_FLAG_INHERIT`, verified), so a child spawned by a concurrent test kept
   a closed connection open, then reset it (10054). The regression test
   `site_closes_connections_whose_worker_exited` spawns a sleeper mid-connection.
-- Long tail: `workspace_files_scroll_within_sidebar_at_both_window_sizes` opens
-  20 editors one after another. Many `desktop::git::tests` take longer than 60 s
-  under full parallel load, which is expected and not a hang.
-- Parallel linking of all `gui-tests` targets can exhaust the Windows page file
-  (OS error 1455) on memory-constrained machines. Prebuild with
-  `cargo test --locked --features gui-tests --all-targets --no-run -j 2`, then run.
+- Long tail: `workspace_files_scroll_within_sidebar_at_both_window_sizes` opens 20
+  editors serially; many `desktop::git::tests` exceed 60 s under load (not hangs).
+- Default cargo jobs built and linked all `gui-tests` targets on a 47.5 GB host.
+  On memory-constrained machines parallel linking can exhaust the page file (OS
+  error 1455); then prebuild with `--all-targets --no-run -j 2` before running.
 
 ## Evidence
 
 - Serial `gui-tests` lib: about 26 min. Parallel lib: about 490–575 s.
 - After the fixes, `cargo test --locked --features gui-tests --all-targets
   --no-fail-fast` passed three consecutive times on Windows with default threads
-  (1351 lib passed each; 6.3–7.3 min wall time), and the `--ignored` gate passed
+  and jobs (1353 lib passed each; 6.1–7.1 min), and the `--ignored` gate passed
   three consecutive times (35 lib + 2 worker tests, about 2 min each).
 - A recurring `CompletionCleanup ... OsErrorCode=32` warning (Windows sharing
-  violation) appears in passing runs; it does not fail tests and is not yet
-  investigated.
-- Live `live_deployment_` Azure/Netlify preflights passed in parallel.
-  Mutating Cloudflare/Netlify publish tests were not run.
+  violation) appears in passing runs; it does not fail tests (not investigated).
+- Live `live_deployment_` Azure/Netlify preflights passed in parallel; mutating
+  Cloudflare/Netlify publish tests were not run.
 - `capture_workspaces_share_managed_chromium` is stale independent of threading;
   see [OUTSTANDING_ISSUES.md](../../OUTSTANDING_ISSUES.md).

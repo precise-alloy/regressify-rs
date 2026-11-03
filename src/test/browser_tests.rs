@@ -115,6 +115,9 @@ struct Body {
 
 impl Read for Body {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
         if self.remaining == 0 && self.chunked && !self.done {
             let mut line = String::new();
             if self.started {
@@ -232,11 +235,18 @@ impl Site {
 impl Drop for Site {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        // Wake the blocking accept so the acceptor observes `stop`.
-        let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
         // Join before the sweep so no accepted connection registers after it.
         if let Some(acceptor) = self.acceptor.take() {
-            let _ = acceptor.join();
+            // Wake the blocking accept so the acceptor observes `stop`; retry because a
+            // single connect can fail, and stay bounded so teardown cannot hang.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !acceptor.is_finished() && std::time::Instant::now() < deadline {
+                let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if acceptor.is_finished() {
+                let _ = acceptor.join();
+            }
         }
         for (_, connection) in self
             .connections
@@ -568,6 +578,43 @@ fn site_answers_dropped_requests_and_honours_connection_close() -> Result<()> {
 }
 
 #[test]
+fn site_body_empty_reads_return_zero_without_consuming() -> Result<()> {
+    let site = Site::new(|mut request| {
+        let method = request.method().as_str().to_owned();
+        let reader = request.as_reader();
+        let mut body = Vec::new();
+        let reply = loop {
+            match reader.read(&mut []) {
+                Ok(0) => {}
+                other => break format!("empty read returned {other:?}"),
+            }
+            let mut pair = [0; 2];
+            match reader.read(&mut pair) {
+                Ok(0) => break format!("{method} {}", String::from_utf8_lossy(&body)),
+                Ok(read) => body.extend_from_slice(&pair[..read]),
+                Err(error) => break format!("read failed: {error}"),
+            }
+        };
+        let _ = request.respond(Response::from_string(reply));
+    })?;
+    let mut connection = TcpStream::connect(site.origin.trim_start_matches("http://"))?;
+    connection.set_read_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        connection,
+        "PUT /chunked HTTP/1.1\r\nHost: fixture\r\nTransfer-Encoding: chunked\r\n\r\n\
+         2;ext=1\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n\
+         POST /sized HTTP/1.1\r\nHost: fixture\r\nContent-Length: 5\r\nConnection: close\r\n\r\nworld"
+    )?;
+    let mut transcript = String::new();
+    connection.read_to_string(&mut transcript)?;
+    ensure!(
+        transcript.contains("PUT hello") && transcript.ends_with("POST world"),
+        "{transcript:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn site_closes_after_an_early_response_without_waiting_for_the_body() -> Result<()> {
     let site = Site::new(|request| {
         let _ = request.respond(Response::from_string("early"));
@@ -727,7 +774,7 @@ async fn expanded_actions_dispatch_trusted_events_and_preserve_frames() -> Resul
         let child = inner.origin.replace("127.0.0.1", "localhost");
         super::runtime::evaluate_main_document(&page, format!("(() => {{ const frame = document.createElement('iframe'); frame.id = 'frame'; frame.width = 1000; frame.height = 600; frame.src = {}; document.body.append(frame); }})()", serde_json::to_string(&child)?)).await?;
         let child_target = runtime.target(&Some(Frame::Single("#frame".into())), Duration::from_secs(30)).await?;
-        super::actionability::wait_for_selector(&child_target, "body[data-initial-touch]", &None, &super::actionability::ActionabilityConfig { element_timeout_ms: 30_000, ..Default::default() }, crate::diagnostics::record::Stage::Navigation).await?;
+        super::actionability::wait_for_selector(&child_target, "body[data-initial-touch]", &None, &super::actionability::ActionabilityConfig { element_timeout_ms: 30_000, actionability_timeout_ms: 30_000, ..Default::default() }, crate::diagnostics::record::Stage::Navigation).await?;
         child_target.evaluate(format!("(() => {{ const frame = document.createElement('iframe'); frame.id = 'nested'; frame.width = 950; frame.height = 580; frame.src = {}; document.body.append(frame); }})()", serde_json::to_string(&outer.origin)?)).await?;
         let suite = TestSuite::default();
         let scenario = TestScenario { url: outer.origin.clone(), ..Default::default() };
@@ -883,9 +930,9 @@ async fn expanded_actions_dialogs_and_history_are_strict() -> Result<()> {
         };
         // Short budgets only for actions expected to fail; dialog-opening clicks hold
         // their CDP input call until the dialog is handled, which can exceed them under load.
+        // Actionability keeps its default so a slow click hits the dialog deadline first.
         let strict = ResolvedConfig {
             element_timeout_ms: 2500,
-            actionability_timeout_ms: 1500,
             ..Default::default()
         };
         let config = ResolvedConfig::default();
@@ -928,35 +975,48 @@ async fn expanded_actions_dialogs_and_history_are_strict() -> Result<()> {
                 && values["alert"] == "handled",
             "Dialog outcomes were incorrect"
         );
-        for (expectation, trigger) in [
+        const MISMATCH: &str = "Unexpected, extra, or mismatched JavaScript dialog";
+        for (expectation, trigger, missing) in [
             (
                 json!({"dialog":"accept","kind":"prompt"}),
                 json!({"click":"#confirm"}),
+                false,
             ),
             (
                 json!({"dialog":"accept","kind":"confirm","message":"Wrong message"}),
                 json!({"click":"#confirm"}),
+                false,
             ),
             (
                 json!({"dialog":"accept","kind":"confirm"}),
                 json!({"click":"#extra"}),
+                false,
             ),
             (
                 json!({"dialog":"accept","kind":"confirm"}),
                 json!({"click":"#noop"}),
+                true,
             ),
         ] {
             exec_test_action(context(), &serde_json::from_value(expectation)?).await?;
-            // Hang guard only: element_timeout_ms bounds the dialog wait and each dialog command.
+            // Only the missing dialog needs a short deadline; mismatches fail as soon as
+            // the dialog opens. The outer timeout is a hang guard.
+            let (config, expected) = if missing {
+                (&strict, "Expected JavaScript dialog did not appear")
+            } else {
+                (&config, MISMATCH)
+            };
+            let error = tokio::time::timeout(
+                Duration::from_secs(30),
+                exec_test_action(with(config), &serde_json::from_value(trigger.clone())?),
+            )
+            .await
+            .with_context(|| format!("{trigger} hung"))?
+            .err()
+            .with_context(|| format!("Unmet/extra dialog expectation succeeded: {trigger}"))?;
             anyhow::ensure!(
-                tokio::time::timeout(
-                    Duration::from_secs(30),
-                    exec_test_action(with(&strict), &serde_json::from_value(trigger.clone())?)
-                )
-                .await
-                .with_context(|| format!("{trigger} hung"))?
-                .is_err(),
-                "Unmet/extra dialog expectation succeeded: {trigger}"
+                format!("{error:#}").contains(expected),
+                "{trigger} failed before the dialog expectation: {error:#}"
             );
         }
         for value in [
@@ -1061,10 +1121,8 @@ if (window.beforeObserved && (window.sharedCalls || 0) === expectedShared &&
             ),
         )?;
     }
-    std::fs::write(
-        root.join("regressify.yaml"),
-        "elementTimeout: 1500\npostInteractionWait: 0\n",
-    )?;
+    // Keep the default element budget: it also bounds hooks, which stall under parallel load.
+    std::fs::write(root.join("regressify.yaml"), "postInteractionWait: 0\n")?;
     let mut scenarios = Vec::new();
     for id in ["js-path", "scenario-ready", "both"] {
         let mut scenario = json!({
@@ -1116,7 +1174,9 @@ if (window.beforeObserved && (window.sharedCalls || 0) === expectedShared &&
         let baseline = suite_dir
             .join("bitmaps_reference")
             .join(format!("{key}.png"));
-        baselines.push((baseline.clone(), std::fs::read(&baseline)?));
+        let bytes =
+            std::fs::read(&baseline).with_context(|| format!("reference/{id} was not captured"))?;
+        baselines.push((baseline, bytes));
         for mode in ["reference", "test"] {
             let path = suite_dir
                 .join("bitmaps_test")
@@ -1248,7 +1308,6 @@ target.onclick = async () => {
         root.join("common/_viewports.yaml"),
         "- label: desktop\n  width: 960\n  height: 300\n- label: mobile\n  width: 390\n  height: 300\n",
     )?;
-    std::fs::write(root.join("regressify.yaml"), "elementTimeout: 1500\n")?;
     let suite = json!({ "scenarios": [{
         "id": "products-submenu", "url": site.origin, "viewportNames": ["desktop", "mobile"],
         "delay": 0, "noScrollTop": true, "selectors": ["viewport"],
@@ -1636,7 +1695,7 @@ async fn action_keyboard_selection_and_navigation_work_in_frames() -> Result<()>
         page.evaluate(format!("(() => {{ const child = document.createElement('iframe'); child.src = {}; document.body.append(child); }})()", serde_json::to_string(&inner.origin.replace("127.0.0.1", "localhost"))?)).await?;
         let suite = TestSuite::default();
         let scenario = TestScenario { url: outer.origin.clone(), ..Default::default() };
-        let config = ResolvedConfig { element_timeout_ms: 4000, actionability_timeout_ms: 2000, ..Default::default() };
+        let config = ResolvedConfig::default();
         let context = || ActionExecutionContext { page: &page, runtime: &runtime, storage: &storage, test_suite: &suite, scenario: &scenario, config: &config, url_replacements: &[], viewport_label: None, log_prefix: "fixture" };
         for frame in [None, Some(Frame::Single("iframe".into()))] {
             for action in [
@@ -1646,7 +1705,7 @@ async fn action_keyboard_selection_and_navigation_work_in_frames() -> Result<()>
                 let action: TestAction = serde_json::from_value(action)?;
                 exec_test_action(context(), &action).await?;
             }
-            let target = runtime.target(&frame, Duration::from_secs(4)).await?;
+            let target = runtime.target(&frame, Duration::from_secs(30)).await?;
             let expected_url = if frame.is_some() {
                 format!("{}/", inner.origin.replace("127.0.0.1", "localhost"))
             } else {
@@ -1731,11 +1790,7 @@ async fn url_waits_follow_delayed_redirects_and_same_document_navigation() -> Re
             url: source.origin.clone(),
             ..Default::default()
         };
-        let config = ResolvedConfig {
-            element_timeout_ms: 6000,
-            actionability_timeout_ms: 2000,
-            ..Default::default()
-        };
+        let config = ResolvedConfig::default();
         let context = || ActionExecutionContext {
             page: &page,
             runtime: &runtime,
@@ -1757,7 +1812,7 @@ async fn url_waits_follow_delayed_redirects_and_same_document_navigation() -> Re
             let action: TestAction = serde_json::from_value(action)?;
             exec_test_action(context(), &action).await?;
         }
-        let target = runtime.target(&None, Duration::from_secs(5)).await?;
+        let target = runtime.target(&None, Duration::from_secs(30)).await?;
         target
             .evaluate("history.pushState({}, '', '?flow=spa#ready')")
             .await?;
@@ -2711,7 +2766,7 @@ async fn image_simplification_ref_and_test_cover_saves_finals_and_popups() -> Re
     // The second exclusion matches nothing; its text must never reach a journal.
     let workspace_config = |block_size: u32| {
         format!(
-            "elementTimeout: 5000\npostInteractionWait: 0\ndelay: 0\nimageSimplification: pixelate\n\
+            "postInteractionWait: 0\ndelay: 0\nimageSimplification: pixelate\n\
              imageSimplificationBlockSize: {block_size}\nimageSimplificationExcludeSelectors:\n  \
              - '.keep-zone'\n  - 'img[data-secret=\"exclusion-marker\"]'\n"
         )
