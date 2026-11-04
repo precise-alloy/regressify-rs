@@ -1351,6 +1351,7 @@ test("suite previews avoid full-resolution downloads until opening image review"
   await expect(images).toHaveCount(1);
   await expect(images).toHaveAttribute("width", "640");
   await expect(images).toHaveAttribute("height", "400");
+  await expect(images).toHaveAttribute("src", /diff-thumbnail/);
   await expect
     .poll(() => images.evaluate((element: HTMLImageElement) => element.naturalWidth))
     .toBeGreaterThan(0);
@@ -1381,6 +1382,49 @@ test("suite previews avoid full-resolution downloads until opening image review"
       original.pathname + original.search,
     );
   }
+});
+
+test("short suite grid thumbnails span full width at the top of the thumbnail area", async ({
+  page,
+}) => {
+  const shortPng = PNG.sync.write(new PNG({ width: 640, height: 120 }));
+  let gridPath = "";
+  await page.route("**/_snapshot/data/suites/**", async (route) => {
+    const response = await route.fetch();
+    const suite = await response.json();
+    gridPath = suite.tests[0].previews?.grid || suite.tests[0].test;
+    await route.fulfill({ response, json: suite });
+  });
+  await page.route("**/_snapshot/images/**", async (route) => {
+    if (gridPath && route.request().url().endsWith(`/${gridPath}`)) {
+      await route.fulfill({ status: 200, contentType: "image/png", body: shortPng });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.goto("/suites/workspace-overview");
+  const container = page.locator(".capture-thumbnail").first();
+  const image = container.locator("img");
+  await expect(image).toBeVisible();
+  await expect
+    .poll(() => image.evaluate((element: HTMLImageElement) => element.naturalHeight))
+    .toBe(120);
+  const geometry = await container.evaluate((box) => {
+    const img = box.querySelector("img") as HTMLImageElement;
+    const boxRect = box.getBoundingClientRect();
+    const imgRect = img.getBoundingClientRect();
+    return {
+      topDelta: Math.abs(imgRect.top - boxRect.top),
+      widthDelta: Math.abs(imgRect.width - boxRect.width),
+      imgHeight: imgRect.height,
+      boxHeight: boxRect.height,
+      bottomGap: boxRect.bottom - imgRect.bottom,
+    };
+  });
+  expect(geometry.topDelta).toBeLessThan(1);
+  expect(geometry.widthDelta).toBeLessThan(1);
+  expect(geometry.imgHeight).toBeLessThan(geometry.boxHeight * 0.5);
+  expect(geometry.bottomGap).toBeGreaterThan(geometry.boxHeight * 0.5);
 });
 
 test("legacy suite reports without previews remain readable", async ({ page }) => {

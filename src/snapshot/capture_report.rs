@@ -33,9 +33,45 @@ fn encode_preview(preview: image::DynamicImage) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+const DIFF_CONTEXT_DIVISOR: u32 = 8;
+
+fn is_diff_pixel(pixel: [u8; 4]) -> bool {
+    let [r, g, b, a] = pixel;
+    a > 0 && r == 255 && g == 0 && (b == 255 || b == 0)
+}
+
+fn first_diff_row(decoded: &image::DynamicImage) -> Option<u32> {
+    let width = decoded.width();
+    if width == 0 {
+        return None;
+    }
+    let find = |raw: &[u8]| {
+        raw.as_chunks::<4>()
+            .0
+            .iter()
+            .position(|&pixel| is_diff_pixel(pixel))
+            .map(|index| (index as u32) / width)
+    };
+    if let Some(rgba) = decoded.as_rgba8() {
+        find(rgba.as_raw())
+    } else {
+        find(decoded.to_rgba8().as_raw())
+    }
+}
+
+fn is_error_placeholder(source: &Path) -> bool {
+    if crate::test::capture::read_error_marker(source).is_some() {
+        return true;
+    }
+    let placeholder = crate::test::capture::error_icon_png();
+    std::fs::metadata(source).is_ok_and(|meta| meta.len() == placeholder.len() as u64)
+        && std::fs::read(source).is_ok_and(|bytes| bytes == placeholder)
+}
+
 fn preview_images(
     bytes: &[u8],
     include_grid: bool,
+    crop_diff: bool,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>, ImageSize)> {
     let decoded = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png)
         .decode()
@@ -44,12 +80,22 @@ fn preview_images(
     let preview = encode_preview(decoded.thumbnail(width.min(640), height.min(480)))?;
     let grid = include_grid
         .then(|| {
-            let crop_width = width.min(height.saturating_mul(8) / 5).max(1);
+            // Grid thumbnails always span the full horizontal width and crop vertically when taller than 16:10.
             let crop_height = height.min(width.saturating_mul(5) / 8).max(1);
+            let crop_y = if crop_diff && height > crop_height {
+                first_diff_row(&decoded)
+                    .map(|row| {
+                        row.saturating_sub(crop_height / DIFF_CONTEXT_DIVISOR)
+                            .min(height - crop_height)
+                    })
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             encode_preview(
                 decoded
-                    .crop_imm((width - crop_width) / 2, 0, crop_width, crop_height)
-                    .thumbnail(crop_width.min(640), crop_height.min(400)),
+                    .crop_imm(0, crop_y, width, crop_height)
+                    .thumbnail(width.min(640), crop_height.min(400)),
             )
         })
         .transpose()?;
@@ -152,27 +198,32 @@ fn normalize_image(path: &str) -> String {
 }
 
 fn capture_paths(report: &RawReport) -> Result<Vec<String>> {
-    report
-        .tests
-        .iter()
-        .map(|test| {
-            let path = normalize_image(
-                test.pair
-                    .test
-                    .as_deref()
-                    .context("Snapshot capture has no test image path")?,
-            );
-            let rest = path
-                .strip_prefix("../bitmaps_test/")
-                .context("Snapshot test image must be inside bitmaps_test")?;
-            let components: Vec<_> = rest.split('/').collect();
+    let mut paths = Vec::with_capacity(report.tests.len());
+    for test in &report.tests {
+        let Some(raw_path) = test
+            .pair
+            .test
+            .as_deref()
+            .or(test.pair.diff_image.as_deref())
+        else {
             ensure!(
-                components.len() == 2 && components.iter().all(|part| valid_segment(part)),
-                "Invalid snapshot capture run path"
+                test.pair.reference.is_some(),
+                "Snapshot capture has no test image path"
             );
-            Ok(path)
-        })
-        .collect()
+            continue;
+        };
+        let path = normalize_image(raw_path);
+        let rest = path
+            .strip_prefix("../bitmaps_test/")
+            .context("Snapshot test image must be inside bitmaps_test")?;
+        let components: Vec<_> = rest.split('/').collect();
+        ensure!(
+            components.len() == 2 && components.iter().all(|part| valid_segment(part)),
+            "Invalid snapshot capture run path"
+        );
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 struct PendingImage<'a> {
@@ -189,7 +240,7 @@ fn resolve_image_source<'a>(
     run_id: &str,
     path: Option<&str>,
     role: &'static str,
-    grid_paths: &BTreeSet<String>,
+    test_paths: &BTreeSet<String>,
 ) -> Result<Option<PendingImage<'a>>> {
     let Some(path) = path else {
         return Ok(None);
@@ -236,14 +287,17 @@ fn resolve_image_source<'a>(
     else {
         return Ok(None);
     };
-    let include_grid = grid_paths.contains(&normalized);
-    let role = if include_grid { "test" } else { role };
+    let role = if role == "diff" && test_paths.contains(&normalized) {
+        "test"
+    } else {
+        role
+    };
     Ok(Some(PendingImage {
         source,
         suite,
         role,
         name,
-        include_grid,
+        include_grid: false,
     }))
 }
 
@@ -257,12 +311,14 @@ fn decode_pending_image(pending: &PendingImage<'_>) -> Result<DecodedImage> {
         pending.source.display()
     );
     let (preview, grid, size) =
-        preview_images(&bytes, pending.include_grid).with_context(|| {
-            format!(
-                "Failed to create snapshot previews for '{}'",
-                pending.source.display()
-            )
-        })?;
+        preview_images(&bytes, pending.include_grid, pending.role == "diff").with_context(
+            || {
+                format!(
+                    "Failed to create snapshot previews for '{}'",
+                    pending.source.display()
+                )
+            },
+        )?;
     Ok((bytes, preview, grid, size))
 }
 
@@ -400,7 +456,12 @@ pub(super) fn load_suite(
         );
         report
     };
-    let grid_paths = paths.into_iter().collect();
+    let test_paths: BTreeSet<String> = report
+        .tests
+        .iter()
+        .filter_map(|test| test.pair.test.as_deref())
+        .map(normalize_image)
+        .collect();
     let mut tests = Vec::with_capacity(report.tests.len());
     let mut identifiers = BTreeSet::new();
     let names = scenario_names(
@@ -413,9 +474,10 @@ pub(super) fn load_suite(
     let mut prepared_tests = Vec::with_capacity(report.tests.len());
     let mut pending_images = Vec::new();
     let mut queued_sources = BTreeSet::new();
+    let mut grid_sources = BTreeSet::new();
     let mut role_names = BTreeMap::new();
     for (test, scenario) in report.tests.into_iter().zip(names) {
-        let pair = test.pair;
+        let mut pair = test.pair;
         ensure!(
             matches!(test.status.as_str(), "pass" | "fail")
                 && (pair.engine_error_msg.is_none() || test.status == "fail"),
@@ -431,6 +493,7 @@ pub(super) fn load_suite(
         let capture_path = normalize_image(
             pair.test
                 .as_deref()
+                .or(pair.reference.as_deref())
                 .context("Snapshot capture has no test image")?,
         );
         let capture_id = if pair.file_name.is_empty() {
@@ -477,18 +540,65 @@ pub(super) fn load_suite(
             &run_id,
             pair.reference.as_deref(),
             "reference",
-            &grid_paths,
+            &test_paths,
         )?;
         let current =
-            resolve_image_source(root, id, &run_id, pair.test.as_deref(), "test", &grid_paths)?;
+            resolve_image_source(root, id, &run_id, pair.test.as_deref(), "test", &test_paths)?;
         let diff = resolve_image_source(
             root,
             id,
             &run_id,
             pair.diff_image.as_deref(),
             "diff",
-            &grid_paths,
+            &test_paths,
         )?;
+        ensure!(
+            current.is_some() || reference.is_some(),
+            "Snapshot capture has no image"
+        );
+        // Legacy reports also put comparison diagnostics in engineErrorMsg.
+        let (error, comparison_error) = match pair.engine_error_msg.take() {
+            Some(message)
+                if mismatch.is_some()
+                    || message == "Reference image not found"
+                    || message.starts_with("Comparison error: ") =>
+            {
+                (None, Some(message))
+            }
+            error => (error, None),
+        };
+        let test_failed_to_capture = error
+            .as_deref()
+            .is_some_and(|msg| !msg.starts_with("Reference scenario failed to capture:"));
+        let ref_failed_to_capture = error.as_deref().is_some_and(|msg| {
+            msg.starts_with("Reference scenario failed to capture:")
+                || msg.starts_with("Both reference and test scenarios failed to capture")
+        });
+        let has_captured_test = !test_failed_to_capture
+            && current
+                .as_ref()
+                .is_some_and(|img| !is_error_placeholder(&img.source));
+        let has_captured_reference = !ref_failed_to_capture
+            && reference
+                .as_ref()
+                .is_some_and(|img| !is_error_placeholder(&img.source));
+        // Prefer the diff thumbnail when a captured test produced a diff; when no test image
+        // was captured, fall back to the top of the reference image rather than an unmeaningful diff.
+        let grid_src = if has_captured_test {
+            diff.as_ref()
+                .or(current.as_ref())
+                .map(|pending| pending.source.clone())
+        } else if has_captured_reference {
+            reference.as_ref().map(|pending| pending.source.clone())
+        } else {
+            current
+                .as_ref()
+                .or(reference.as_ref())
+                .map(|pending| pending.source.clone())
+        };
+        if let Some(source) = &grid_src {
+            grid_sources.insert(source.clone());
+        }
         for pending in [&reference, &current, &diff].into_iter().flatten() {
             let previous_name = role_names
                 .entry((pending.role, pending.name.to_ascii_lowercase()))
@@ -497,15 +607,13 @@ pub(super) fn load_suite(
                 *previous_name == pending.name,
                 "Conflicting case for snapshot image path"
             );
-            if !images.contains_key(&pending.source)
-                && queued_sources.insert(pending.source.clone())
-            {
+            if queued_sources.insert(pending.source.clone()) {
                 pending_images.push(PendingImage {
                     source: pending.source.clone(),
                     suite: pending.suite,
                     role: pending.role,
                     name: pending.name.clone(),
-                    include_grid: pending.include_grid,
+                    include_grid: false,
                 });
             }
         }
@@ -515,11 +623,20 @@ pub(super) fn load_suite(
             scenario,
             capture_id,
             mismatch,
+            error,
+            comparison_error,
             reference.map(|item| item.source),
             current.map(|item| item.source),
             diff.map(|item| item.source),
+            grid_src,
         ));
     }
+    pending_images.retain_mut(|pending| {
+        pending.include_grid = grid_sources.contains(&pending.source);
+        images
+            .get(&pending.source)
+            .is_none_or(|asset| pending.include_grid && asset.grid.is_none())
+    });
     let total_images = pending_images.len();
     if total_images > 0 {
         super::site::snapshot_phase(&format!(
@@ -585,8 +702,19 @@ pub(super) fn load_suite(
             "Publishing capture diagnostic logs for suite '{id}'"
         ));
     }
-    for (status, pair, scenario, capture_id, mismatch, reference_src, current_src, diff_src) in
-        prepared_tests
+    for (
+        status,
+        pair,
+        scenario,
+        capture_id,
+        mismatch,
+        error,
+        comparison_error,
+        reference_src,
+        current_src,
+        diff_src,
+        grid_src,
+    ) in prepared_tests
     {
         let reference = reference_src
             .as_ref()
@@ -611,17 +739,6 @@ pub(super) fn load_suite(
                 .join(" / ")
         } else {
             pair.label
-        };
-        // Legacy reports also put comparison diagnostics in engineErrorMsg.
-        let (error, comparison_error) = match pair.engine_error_msg {
-            Some(message)
-                if mismatch.is_some()
-                    || message == "Reference image not found"
-                    || message.starts_with("Comparison error: ") =>
-            {
-                (None, Some(message))
-            }
-            error => (error, None),
         };
         tests.push(Capture {
             logs: if pair.reference_log.is_some() || pair.test_log.is_some() {
@@ -655,7 +772,10 @@ pub(super) fn load_suite(
                 reference: reference.as_ref().map(|asset| asset.preview.clone()),
                 test: current.as_ref().map(|asset| asset.preview.clone()),
                 diff: diff.as_ref().map(|asset| asset.preview.clone()),
-                grid: current.as_ref().and_then(|asset| asset.grid.clone()),
+                grid: grid_src
+                    .as_ref()
+                    .and_then(|source| images.get(source))
+                    .and_then(|asset| asset.grid.clone()),
             }),
             reference_url: pair.reference_url,
             test_url: pair.url,
@@ -1130,11 +1250,11 @@ mod tests {
             ]);
         }
         let source = lodepng::encode32(&pixels, 800, 1600).unwrap();
-        let expected = preview_images(&source, true).unwrap();
+        let expected = preview_images(&source, true, false).unwrap();
         for _ in 0..3 {
-            assert_eq!(preview_images(&source, true).unwrap(), expected);
+            assert_eq!(preview_images(&source, true, false).unwrap(), expected);
         }
-        let (list_only, grid, size) = preview_images(&source, false).unwrap();
+        let (list_only, grid, size) = preview_images(&source, false, false).unwrap();
         assert_eq!(list_only, expected.0);
         assert!(grid.is_none());
         assert_eq!(
@@ -1148,11 +1268,30 @@ mod tests {
 
     #[test]
     fn preview_images_preserve_alpha_and_bound_extreme_aspect_ratios() {
-        for (width, height) in [(1, 1), (2048, 4), (4, 2048), (800, 800)] {
-            let pixels = vec![rgb::RGBA8::new(30, 60, 90, 64); width * height];
+        for (width, height) in [(1, 1), (2048, 4), (1280, 300), (4, 2048), (800, 800)] {
+            let mut pixels = vec![rgb::RGBA8::new(30, 60, 90, 64); width * height];
+            if width >= 4 {
+                for row in 0..height {
+                    for col in 0..2 {
+                        pixels[row * width + col] = rgb::RGBA8::new(220, 40, 40, 64);
+                        pixels[row * width + width - 1 - col] = rgb::RGBA8::new(40, 220, 40, 64);
+                    }
+                }
+            }
             let source = lodepng::encode32(&pixels, width, height).unwrap();
-            let (preview, grid, size) = preview_images(&source, true).unwrap();
+            let (preview, grid, size) = preview_images(&source, true, false).unwrap();
             assert_eq!((size.width as usize, size.height as usize), (width, height));
+            let grid_image = lodepng::decode32(grid.as_ref().unwrap()).unwrap();
+            assert_eq!(grid_image.width, width.min(640));
+            assert!(grid_image.height <= height.min(400));
+            if (width, height) == (1280, 300) {
+                assert_eq!((grid_image.width, grid_image.height), (640, 150));
+                assert_eq!(grid_image.buffer[0], rgb::RGBA8::new(220, 40, 40, 64));
+                assert_eq!(
+                    grid_image.buffer[grid_image.width - 1],
+                    rgb::RGBA8::new(40, 220, 40, 64)
+                );
+            }
             for bytes in [preview, grid.unwrap()] {
                 let image = lodepng::decode32(&bytes).unwrap();
                 assert!(image.width <= width.min(640));
@@ -1160,7 +1299,110 @@ mod tests {
                 assert_eq!(image.buffer[0].a, 64);
             }
         }
-        assert!(preview_images(b"\x89PNG\r\n\x1a\ncorrupt", true).is_err());
+        assert!(preview_images(b"\x89PNG\r\n\x1a\ncorrupt", true, false).is_err());
+    }
+
+    #[test]
+    fn grid_thumbnails_use_first_diff_area_and_fallback_to_reference_when_test_missing() {
+        let (width, height) = (320usize, 1000usize);
+        let mut diff_pixels = vec![rgb::RGBA8::new(40, 40, 40, 255); width * height];
+        for row in 600..650 {
+            for col in 0..width {
+                diff_pixels[row * width + col] = rgb::RGBA8::new(255, 0, 255, 200);
+            }
+        }
+        let diff_source = lodepng::encode32(&diff_pixels, width, height).unwrap();
+        let (_, grid_bytes, _) = preview_images(&diff_source, true, true).unwrap();
+        let grid = lodepng::decode32(&grid_bytes.unwrap()).unwrap();
+        assert_eq!((grid.width, grid.height), (320, 200));
+        // crop_height = 200, top context margin = 200 / 8 = 25 -> crop_y = 575.
+        // Rows 0..25 in the thumbnail are context (40,40,40,255); rows 25..75 are the diff band.
+        assert_eq!(grid.buffer[24 * width], rgb::RGBA8::new(40, 40, 40, 255));
+        assert_eq!(grid.buffer[25 * width], rgb::RGBA8::new(255, 0, 255, 200));
+
+        // Diff near the bottom clamps crop_y to height - crop_height (800).
+        let mut bottom_diff = vec![rgb::RGBA8::new(40, 40, 40, 255); width * height];
+        for col in 0..width {
+            bottom_diff[980 * width + col] = rgb::RGBA8::new(255, 0, 255, 200);
+        }
+        let bottom_source = lodepng::encode32(&bottom_diff, width, height).unwrap();
+        let (_, bottom_grid_bytes, _) = preview_images(&bottom_source, true, true).unwrap();
+        let bottom_grid = lodepng::decode32(&bottom_grid_bytes.unwrap()).unwrap();
+        assert_eq!((bottom_grid.width, bottom_grid.height), (320, 200));
+        assert_eq!(
+            bottom_grid.buffer[180 * width],
+            rgb::RGBA8::new(255, 0, 255, 200)
+        );
+
+        let (temp, mut report) = fixture();
+        let mut ref_pixels = vec![rgb::RGBA8::new(10, 200, 30, 255); width * height];
+        for row in 200..height {
+            for col in 0..width {
+                ref_pixels[row * width + col] = rgb::RGBA8::new(10, 20, 200, 255);
+            }
+        }
+        fs::write(
+            temp.path().join("suite/bitmaps_reference/home.png"),
+            lodepng::encode32(&ref_pixels, width, height).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("suite/bitmaps_test/current/home_diff.png"),
+            &diff_source,
+        )
+        .unwrap();
+        report["tests"][0]["pair"]["diffImage"] = json!("../bitmaps_test/current/home_diff.png");
+        write_fixture(temp.path(), &report);
+        let with_diff = load(temp.path()).unwrap().unwrap();
+        assert!(
+            with_diff.tests[0]
+                .previews
+                .as_ref()
+                .unwrap()
+                .grid
+                .as_deref()
+                .unwrap()
+                .starts_with("_snapshot/images/suite/diff-thumbnail/home_diff.png?v=")
+        );
+
+        // When test capture failed (or has no captured test image), use reference at the top, not diff.
+        report["tests"][0]["pair"]["engineErrorMsg"] =
+            json!("Test scenario failed to capture: navigation timed out");
+        report["tests"][0]["pair"]["diff"] = serde_json::Value::Null;
+        write_fixture(temp.path(), &report);
+        let failed_test = load(temp.path()).unwrap().unwrap();
+        let ref_grid_url = failed_test.tests[0]
+            .previews
+            .as_ref()
+            .unwrap()
+            .grid
+            .as_deref()
+            .unwrap();
+        assert!(ref_grid_url.starts_with("_snapshot/images/suite/reference-thumbnail/home.png?v="));
+        let (ref_grid_path, _) = ref_grid_url.split_once("?v=").unwrap();
+        let ref_grid =
+            lodepng::decode32(&fs::read(temp.path().join(ref_grid_path)).unwrap()).unwrap();
+        assert_eq!((ref_grid.width, ref_grid.height), (320, 200));
+        assert_eq!(ref_grid.buffer[0], rgb::RGBA8::new(10, 200, 30, 255));
+        assert_eq!(
+            ref_grid.buffer.last().unwrap(),
+            &rgb::RGBA8::new(10, 200, 30, 255)
+        );
+
+        // Also when pair.test is null and only reference exists:
+        report["tests"][0]["pair"]["test"] = serde_json::Value::Null;
+        write_fixture(temp.path(), &report);
+        let null_test = load(temp.path()).unwrap().unwrap();
+        assert!(
+            null_test.tests[0]
+                .previews
+                .as_ref()
+                .unwrap()
+                .grid
+                .as_deref()
+                .unwrap()
+                .starts_with("_snapshot/images/suite/reference-thumbnail/home.png?v=")
+        );
     }
 
     #[test]
