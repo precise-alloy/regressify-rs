@@ -24,12 +24,23 @@ enum GridThumbnailMode {
     ErrorIconContain,
 }
 
+impl GridThumbnailMode {
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::TopCrop => "top",
+            Self::DiffCrop => "diff",
+            Self::DimmedErrorOverlay => "error-overlay",
+            Self::ErrorIconContain => "error-icon",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ImageAsset {
     full: String,
     preview: String,
-    grid: Option<String>,
-    grid_mode: GridThumbnailMode,
+    grids: BTreeMap<GridThumbnailMode, String>,
     size: ImageSize,
 }
 
@@ -154,30 +165,26 @@ fn is_error_placeholder(root: &Path, relative_image: &Path, source: &Path) -> Re
     Ok(read_bounded(source, placeholder.len())? == placeholder)
 }
 
-fn preview_images(
-    bytes: &[u8],
+fn encode_grid_preview(
+    decoded: &image::DynamicImage,
     grid_mode: GridThumbnailMode,
-) -> Result<(Vec<u8>, Option<Vec<u8>>, ImageSize)> {
-    let decoded = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png)
-        .decode()
-        .context("Failed to decode PNG capture")?;
+) -> Result<Option<Vec<u8>>> {
     let (width, height) = (decoded.width(), decoded.height());
-    let preview = encode_preview(decoded.thumbnail(width.min(640), height.min(480)))?;
-    let grid = match grid_mode {
-        GridThumbnailMode::None => None,
+    match grid_mode {
+        GridThumbnailMode::None => Ok(None),
         GridThumbnailMode::TopCrop => {
             // Grid thumbnails always span the full horizontal width and crop vertically when taller than 16:10.
             let crop_height = height.min(width.saturating_mul(5) / 8).max(1);
-            Some(encode_preview(
+            Ok(Some(encode_preview(
                 decoded
                     .crop_imm(0, 0, width, crop_height)
                     .thumbnail(width.min(640), crop_height.min(400)),
-            )?)
+            )?))
         }
         GridThumbnailMode::DiffCrop => {
             let crop_height = height.min(width.saturating_mul(5) / 8).max(1);
             let crop_y = if height > crop_height {
-                first_diff_row(&decoded)
+                first_diff_row(decoded)
                     .map(|row| {
                         row.saturating_sub(crop_height / DIFF_CONTEXT_DIVISOR)
                             .min(height - crop_height)
@@ -186,11 +193,11 @@ fn preview_images(
             } else {
                 0
             };
-            Some(encode_preview(
+            Ok(Some(encode_preview(
                 decoded
                     .crop_imm(0, crop_y, width, crop_height)
                     .thumbnail(width.min(640), crop_height.min(400)),
-            )?)
+            )?))
         }
         GridThumbnailMode::DimmedErrorOverlay => {
             let crop_height = height.min(width.saturating_mul(5) / 8).max(1);
@@ -204,13 +211,28 @@ fn preview_images(
                 pixel.0[2] /= 3;
             }
             overlay_error_icon(&mut canvas)?;
-            Some(encode_preview(image::DynamicImage::ImageRgba8(canvas))?)
+            Ok(Some(encode_preview(image::DynamicImage::ImageRgba8(
+                canvas,
+            ))?))
         }
         GridThumbnailMode::ErrorIconContain => {
             let icon = error_icon_image()?;
-            Some(encode_preview(icon.thumbnail(640, 400))?)
+            Ok(Some(encode_preview(icon.thumbnail(640, 400))?))
         }
-    };
+    }
+}
+
+#[cfg(test)]
+fn preview_images(
+    bytes: &[u8],
+    grid_mode: GridThumbnailMode,
+) -> Result<(Vec<u8>, Option<Vec<u8>>, ImageSize)> {
+    let decoded = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png)
+        .decode()
+        .context("Failed to decode PNG capture")?;
+    let (width, height) = (decoded.width(), decoded.height());
+    let preview = encode_preview(decoded.thumbnail(width.min(640), height.min(480)))?;
+    let grid = encode_grid_preview(&decoded, grid_mode)?;
     Ok((preview, grid, ImageSize { width, height }))
 }
 
@@ -344,7 +366,7 @@ struct PendingImage<'a> {
     role: &'static str,
     name: String,
     is_placeholder: bool,
-    grid_mode: GridThumbnailMode,
+    grid_modes: BTreeSet<GridThumbnailMode>,
 }
 
 fn resolve_image_source<'a>(
@@ -408,11 +430,16 @@ fn resolve_image_source<'a>(
         role,
         name,
         is_placeholder,
-        grid_mode: GridThumbnailMode::None,
+        grid_modes: BTreeSet::new(),
     }))
 }
 
-type DecodedImage = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, ImageSize);
+type DecodedImage = (
+    Vec<u8>,
+    Vec<u8>,
+    BTreeMap<GridThumbnailMode, Vec<u8>>,
+    ImageSize,
+);
 
 fn decode_pending_image(pending: &PendingImage<'_>) -> Result<DecodedImage> {
     let bytes = read_bounded(&pending.source, MAX_IMAGE_BYTES)?;
@@ -421,31 +448,61 @@ fn decode_pending_image(pending: &PendingImage<'_>) -> Result<DecodedImage> {
         "Snapshot capture is not a PNG image: {}",
         pending.source.display()
     );
-    let (preview, grid, size) = preview_images(&bytes, pending.grid_mode).with_context(|| {
+    let (preview, grids, size) = (|| -> Result<_> {
+        let decoded = image::ImageReader::with_format(Cursor::new(&bytes), image::ImageFormat::Png)
+            .decode()
+            .context("Failed to decode PNG capture")?;
+        let (width, height) = (decoded.width(), decoded.height());
+        let preview = encode_preview(decoded.thumbnail(width.min(640), height.min(480)))?;
+        let mut grids = BTreeMap::new();
+        for &mode in &pending.grid_modes {
+            if let Some(grid_bytes) = encode_grid_preview(&decoded, mode)? {
+                grids.insert(mode, grid_bytes);
+            }
+        }
+        Ok((preview, grids, ImageSize { width, height }))
+    })()
+    .with_context(|| {
         format!(
             "Failed to create snapshot previews for '{}'",
             pending.source.display()
         )
     })?;
-    Ok((bytes, preview, grid, size))
+    Ok((bytes, preview, grids, size))
 }
 
 fn store_pending_image(
     output: &Path,
     pending: &PendingImage<'_>,
-    encoded: (Vec<u8>, Vec<u8>, Option<Vec<u8>>, ImageSize),
+    encoded: DecodedImage,
 ) -> Result<ImageAsset> {
-    let (bytes, preview, grid, size) = encoded;
+    let (bytes, preview, grids, size) = encoded;
     let PendingImage {
-        suite,
-        role,
-        name,
-        grid_mode,
-        ..
+        suite, role, name, ..
     } = pending;
+    let primary_mode = if pending.grid_modes.len() == 1 {
+        pending.grid_modes.first().copied()
+    } else if *role == "diff" && pending.grid_modes.contains(&GridThumbnailMode::DiffCrop) {
+        Some(GridThumbnailMode::DiffCrop)
+    } else if pending.grid_modes.contains(&GridThumbnailMode::TopCrop) {
+        Some(GridThumbnailMode::TopCrop)
+    } else {
+        pending.grid_modes.first().copied()
+    };
+    let mut stored_grids = BTreeMap::new();
+    for (mode, grid_bytes) in grids {
+        let relative = if Some(mode) == primary_mode {
+            format!("_snapshot/images/{suite}/{role}-thumbnail/{name}")
+        } else {
+            format!(
+                "_snapshot/images/{suite}/{role}-{}-thumbnail/{name}",
+                mode.suffix()
+            )
+        };
+        stored_grids.insert(mode, store_asset(output, &relative, &grid_bytes)?);
+    }
     Ok(ImageAsset {
         size,
-        grid_mode: *grid_mode,
         full: store_asset(
             output,
             &format!("_snapshot/images/{suite}/{role}/{name}"),
@@ -456,15 +513,7 @@ fn store_pending_image(
             &format!("_snapshot/images/{suite}/{role}-preview/{name}"),
             &preview,
         )?,
-        grid: grid
-            .map(|bytes| {
-                store_asset(
-                    output,
-                    &format!("_snapshot/images/{suite}/{role}-thumbnail/{name}"),
-                    &bytes,
-                )
-            })
-            .transpose()?,
+        grids: stored_grids,
     })
 }
 
@@ -587,7 +636,7 @@ pub(super) fn load_suite(
     let mut prepared_tests = Vec::with_capacity(report.tests.len());
     let mut pending_images = Vec::new();
     let mut queued_sources = BTreeSet::new();
-    let mut grid_modes = BTreeMap::<PathBuf, GridThumbnailMode>::new();
+    let mut grid_modes = BTreeMap::<PathBuf, BTreeSet<GridThumbnailMode>>::new();
     let mut role_names = BTreeMap::new();
     for (test, scenario) in report.tests.into_iter().zip(names) {
         let mut pair = test.pair;
@@ -694,39 +743,32 @@ pub(super) fn load_suite(
         // Prefer the diff thumbnail when a captured test produced a diff; when no test image
         // was captured, use a dimmed top-cropped reference thumbnail overlaid with the error icon,
         // or the contained error icon alone when neither image was captured.
-        let (grid_src, grid_mode) = if has_captured_test {
-            if has_captured_reference && let Some(diff) = &diff {
-                let mode = if diff.role == "diff" {
-                    GridThumbnailMode::DiffCrop
-                } else {
-                    GridThumbnailMode::TopCrop
-                };
-                (Some(diff.source.clone()), mode)
+        let grid_target = if has_captured_test {
+            if let Some(diff) = &diff {
+                Some((diff.source.clone(), GridThumbnailMode::DiffCrop))
             } else {
-                (
-                    current.as_ref().map(|pending| pending.source.clone()),
-                    GridThumbnailMode::TopCrop,
-                )
-            }
-        } else if has_captured_reference {
-            (
-                reference.as_ref().map(|pending| pending.source.clone()),
-                GridThumbnailMode::DimmedErrorOverlay,
-            )
-        } else {
-            (
                 current
                     .as_ref()
-                    .or(reference.as_ref())
-                    .map(|pending| pending.source.clone()),
-                GridThumbnailMode::ErrorIconContain,
-            )
+                    .map(|pending| (pending.source.clone(), GridThumbnailMode::TopCrop))
+            }
+        } else if has_captured_reference {
+            reference.as_ref().map(|pending| {
+                (
+                    pending.source.clone(),
+                    GridThumbnailMode::DimmedErrorOverlay,
+                )
+            })
+        } else {
+            current
+                .as_ref()
+                .or(reference.as_ref())
+                .map(|pending| (pending.source.clone(), GridThumbnailMode::ErrorIconContain))
         };
-        if let Some(source) = &grid_src {
+        if let Some((source, grid_mode)) = &grid_target {
             grid_modes
                 .entry(source.clone())
-                .and_modify(|prev| *prev = (*prev).max(grid_mode))
-                .or_insert(grid_mode);
+                .or_default()
+                .insert(*grid_mode);
         }
         for pending in [&reference, &current, &diff].into_iter().flatten() {
             let previous_name = role_names
@@ -743,7 +785,7 @@ pub(super) fn load_suite(
                     role: pending.role,
                     name: pending.name.clone(),
                     is_placeholder: pending.is_placeholder,
-                    grid_mode: GridThumbnailMode::None,
+                    grid_modes: BTreeSet::new(),
                 });
             }
         }
@@ -758,17 +800,18 @@ pub(super) fn load_suite(
             reference.map(|item| item.source),
             current.map(|item| item.source),
             diff.map(|item| item.source),
-            grid_src,
+            grid_target,
         ));
     }
     pending_images.retain_mut(|pending| {
-        pending.grid_mode = grid_modes
-            .get(&pending.source)
-            .copied()
-            .unwrap_or(GridThumbnailMode::None);
+        if let Some(modes) = grid_modes.get(&pending.source) {
+            pending.grid_modes = modes.clone();
+        }
         images.get(&pending.source).is_none_or(|asset| {
-            pending.grid_mode != GridThumbnailMode::None
-                && (asset.grid.is_none() || asset.grid_mode != pending.grid_mode)
+            pending
+                .grid_modes
+                .iter()
+                .any(|mode| !asset.grids.contains_key(mode))
         })
     });
     let total_images = pending_images.len();
@@ -825,7 +868,12 @@ pub(super) fn load_suite(
             .map(process_pending)
             .collect::<Result<Vec<_>>>()?
     };
-    for (pending, asset) in pending_images.into_iter().zip(stored_images) {
+    for (pending, mut asset) in pending_images.into_iter().zip(stored_images) {
+        if let Some(previous) = images.remove(&pending.source) {
+            for (mode, url) in previous.grids {
+                asset.grids.entry(mode).or_insert(url);
+            }
+        }
         images.insert(pending.source, asset);
     }
     if prepared_tests
@@ -847,7 +895,7 @@ pub(super) fn load_suite(
         reference_src,
         current_src,
         diff_src,
-        grid_src,
+        grid_target,
     ) in prepared_tests
     {
         let reference = reference_src
@@ -906,10 +954,12 @@ pub(super) fn load_suite(
                 reference: reference.as_ref().map(|asset| asset.preview.clone()),
                 test: current.as_ref().map(|asset| asset.preview.clone()),
                 diff: diff.as_ref().map(|asset| asset.preview.clone()),
-                grid: grid_src
-                    .as_ref()
-                    .and_then(|source| images.get(source))
-                    .and_then(|asset| asset.grid.clone()),
+                grid: grid_target.as_ref().and_then(|(source, mode)| {
+                    images
+                        .get(source)
+                        .and_then(|asset| asset.grids.get(mode))
+                        .cloned()
+                }),
             }),
             reference_url: pair.reference_url,
             test_url: pair.url,
@@ -1218,9 +1268,16 @@ mod tests {
         second["pair"]["test"] = json!("../bitmaps_test/current/shared.png");
         report["tests"][0]["pair"]["diffImage"] = second["pair"]["test"].clone();
         report["tests"].as_array_mut().unwrap().push(second);
+        let (width, height) = (320usize, 1000usize);
+        let mut shared_pixels = vec![rgb::RGBA8::new(40, 40, 40, 255); width * height];
+        for row in 600..650 {
+            for col in 0..width {
+                shared_pixels[row * width + col] = rgb::RGBA8::new(255, 0, 255, 200);
+            }
+        }
         fs::write(
             temp.path().join("suite/bitmaps_test/current/shared.png"),
-            png(120),
+            lodepng::encode32(&shared_pixels, width, height).unwrap(),
         )
         .unwrap();
         write_fixture(temp.path(), &report);
@@ -1233,15 +1290,37 @@ mod tests {
                 .unwrap()
                 .starts_with("_snapshot/images/suite/test/shared.png?v=")
         );
+        let first_grid_url = loaded.tests[0]
+            .previews
+            .as_ref()
+            .unwrap()
+            .grid
+            .as_deref()
+            .unwrap();
+        let second_grid_url = loaded.tests[1]
+            .previews
+            .as_ref()
+            .unwrap()
+            .grid
+            .as_deref()
+            .unwrap();
         assert!(
-            loaded.tests[1]
-                .previews
-                .as_ref()
-                .unwrap()
-                .grid
-                .as_deref()
-                .unwrap()
-                .starts_with("_snapshot/images/suite/test-thumbnail/shared.png?v=")
+            first_grid_url.starts_with("_snapshot/images/suite/test-diff-thumbnail/shared.png?v=")
+        );
+        assert!(second_grid_url.starts_with("_snapshot/images/suite/test-thumbnail/shared.png?v="));
+        let (first_grid_path, _) = first_grid_url.split_once("?v=").unwrap();
+        let (second_grid_path, _) = second_grid_url.split_once("?v=").unwrap();
+        let first_grid =
+            lodepng::decode32(&fs::read(temp.path().join(first_grid_path)).unwrap()).unwrap();
+        let second_grid =
+            lodepng::decode32(&fs::read(temp.path().join(second_grid_path)).unwrap()).unwrap();
+        assert_eq!(
+            first_grid.buffer[25 * width],
+            rgb::RGBA8::new(255, 0, 255, 200)
+        );
+        assert_eq!(
+            second_grid.buffer[25 * width],
+            rgb::RGBA8::new(40, 40, 40, 255)
         );
 
         report["tests"][1]["pair"]["fileName"] = json!("HOME.png");
@@ -1512,6 +1591,22 @@ mod tests {
                 .starts_with("_snapshot/images/suite/diff-thumbnail/home_diff.png?v=")
         );
 
+        // Even if the reference file is absent, a present diff with a captured test uses the diff thumbnail.
+        report["tests"][0]["pair"]["reference"] = json!("../bitmaps_reference/missing.png");
+        write_fixture(temp.path(), &report);
+        let missing_ref_with_diff = load(temp.path()).unwrap().unwrap();
+        assert!(
+            missing_ref_with_diff.tests[0]
+                .previews
+                .as_ref()
+                .unwrap()
+                .grid
+                .as_deref()
+                .unwrap()
+                .starts_with("_snapshot/images/suite/diff-thumbnail/home_diff.png?v=")
+        );
+        report["tests"][0]["pair"]["reference"] = json!("../bitmaps_reference/home.png");
+
         // When test capture failed (or has no captured test image), use dimmed top-of-reference
         // overlaid with the error icon at 25% opacity, not diff.
         report["tests"][0]["pair"]["engineErrorMsg"] =
@@ -1578,6 +1673,36 @@ mod tests {
         assert_eq!(err_grid_bytes, expected_error_grid);
         let err_grid = lodepng::decode32(&err_grid_bytes).unwrap();
         assert_eq!((err_grid.width, err_grid.height), (400, 400));
+
+        // When a passing capture and a failed capture share the same image file, each keeps its own grid mode.
+        let mut passing = report["tests"][0].clone();
+        passing["status"] = json!("pass");
+        passing["pair"]["fileName"] = json!("passing.png");
+        passing["pair"]["diffImage"] = serde_json::Value::Null;
+        passing["pair"]["engineErrorMsg"] = serde_json::Value::Null;
+        report["tests"].as_array_mut().unwrap().push(passing);
+        write_fixture(temp.path(), &report);
+        let mixed = load(temp.path()).unwrap().unwrap();
+        assert!(
+            mixed.tests[0]
+                .previews
+                .as_ref()
+                .unwrap()
+                .grid
+                .as_deref()
+                .unwrap()
+                .starts_with("_snapshot/images/suite/test-error-icon-thumbnail/home.png?v=")
+        );
+        assert!(
+            mixed.tests[1]
+                .previews
+                .as_ref()
+                .unwrap()
+                .grid
+                .as_deref()
+                .unwrap()
+                .starts_with("_snapshot/images/suite/test-thumbnail/home.png?v=")
+        );
     }
 
     #[test]
@@ -1618,6 +1743,39 @@ mod tests {
         let loaded = load(temp.path()).unwrap().unwrap();
         assert!(
             loaded.tests[0]
+                .previews
+                .as_ref()
+                .unwrap()
+                .grid
+                .as_deref()
+                .unwrap()
+                .starts_with("_snapshot/images/suite/reference-thumbnail/home.png?v=")
+        );
+
+        // An `error:false` sidecar does not mark the capture as a placeholder.
+        fs::write(&sidecar, r#"{"error":false,"message":"ok"}"#).unwrap();
+        let non_error = load(temp.path()).unwrap().unwrap();
+        assert!(
+            non_error.tests[0]
+                .previews
+                .as_ref()
+                .unwrap()
+                .grid
+                .as_deref()
+                .unwrap()
+                .starts_with("_snapshot/images/suite/test-thumbnail/home.png?v=")
+        );
+
+        // Without a sidecar, a PNG matching `error_icon_png()` is still detected as a placeholder.
+        fs::remove_file(&sidecar).unwrap();
+        fs::write(
+            temp.path().join("suite/bitmaps_test/current/home.png"),
+            crate::test::capture::error_icon_png(),
+        )
+        .unwrap();
+        let placeholder_bytes = load(temp.path()).unwrap().unwrap();
+        assert!(
+            placeholder_bytes.tests[0]
                 .previews
                 .as_ref()
                 .unwrap()
