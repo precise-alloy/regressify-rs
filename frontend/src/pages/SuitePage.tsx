@@ -135,10 +135,7 @@ export function SuitePage() {
               {!list && (
                 <div className="capture-thumbnail">
                   <ReportImage
-                    path={
-                      (capture.test || capture.reference) &&
-                      (capture.previews?.grid || capture.test || capture.reference)
-                    }
+                    path={capture.previews?.grid || capture.test || capture.reference}
                     alt={`${capture.label} preview`}
                     width={640}
                     height={400}
