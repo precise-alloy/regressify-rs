@@ -17,7 +17,6 @@ use super::site::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum GridThumbnailMode {
-    None,
     TopCrop,
     DiffCrop,
     DimmedErrorOverlay,
@@ -27,7 +26,6 @@ enum GridThumbnailMode {
 impl GridThumbnailMode {
     fn suffix(self) -> &'static str {
         match self {
-            Self::None => "none",
             Self::TopCrop => "top",
             Self::DiffCrop => "diff",
             Self::DimmedErrorOverlay => "error-overlay",
@@ -168,18 +166,17 @@ fn is_error_placeholder(root: &Path, relative_image: &Path, source: &Path) -> Re
 fn encode_grid_preview(
     decoded: &image::DynamicImage,
     grid_mode: GridThumbnailMode,
-) -> Result<Option<Vec<u8>>> {
+) -> Result<Vec<u8>> {
     let (width, height) = (decoded.width(), decoded.height());
     match grid_mode {
-        GridThumbnailMode::None => Ok(None),
         GridThumbnailMode::TopCrop => {
             // Grid thumbnails always span the full horizontal width and crop vertically when taller than 16:10.
             let crop_height = height.min(width.saturating_mul(5) / 8).max(1);
-            Ok(Some(encode_preview(
+            encode_preview(
                 decoded
                     .crop_imm(0, 0, width, crop_height)
                     .thumbnail(width.min(640), crop_height.min(400)),
-            )?))
+            )
         }
         GridThumbnailMode::DiffCrop => {
             let crop_height = height.min(width.saturating_mul(5) / 8).max(1);
@@ -193,11 +190,11 @@ fn encode_grid_preview(
             } else {
                 0
             };
-            Ok(Some(encode_preview(
+            encode_preview(
                 decoded
                     .crop_imm(0, crop_y, width, crop_height)
                     .thumbnail(width.min(640), crop_height.min(400)),
-            )?))
+            )
         }
         GridThumbnailMode::DimmedErrorOverlay => {
             let crop_height = height.min(width.saturating_mul(5) / 8).max(1);
@@ -211,13 +208,11 @@ fn encode_grid_preview(
                 pixel.0[2] /= 3;
             }
             overlay_error_icon(&mut canvas)?;
-            Ok(Some(encode_preview(image::DynamicImage::ImageRgba8(
-                canvas,
-            ))?))
+            encode_preview(image::DynamicImage::ImageRgba8(canvas))
         }
         GridThumbnailMode::ErrorIconContain => {
             let icon = error_icon_image()?;
-            Ok(Some(encode_preview(icon.thumbnail(640, 400))?))
+            encode_preview(icon.thumbnail(640, 400))
         }
     }
 }
@@ -225,14 +220,16 @@ fn encode_grid_preview(
 #[cfg(test)]
 fn preview_images(
     bytes: &[u8],
-    grid_mode: GridThumbnailMode,
+    grid_mode: Option<GridThumbnailMode>,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>, ImageSize)> {
     let decoded = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png)
         .decode()
         .context("Failed to decode PNG capture")?;
     let (width, height) = (decoded.width(), decoded.height());
     let preview = encode_preview(decoded.thumbnail(width.min(640), height.min(480)))?;
-    let grid = encode_grid_preview(&decoded, grid_mode)?;
+    let grid = grid_mode
+        .map(|mode| encode_grid_preview(&decoded, mode))
+        .transpose()?;
     Ok((preview, grid, ImageSize { width, height }))
 }
 
@@ -456,9 +453,7 @@ fn decode_pending_image(pending: &PendingImage<'_>) -> Result<DecodedImage> {
         let preview = encode_preview(decoded.thumbnail(width.min(640), height.min(480)))?;
         let mut grids = BTreeMap::new();
         for &mode in &pending.grid_modes {
-            if let Some(grid_bytes) = encode_grid_preview(&decoded, mode)? {
-                grids.insert(mode, grid_bytes);
-            }
+            grids.insert(mode, encode_grid_preview(&decoded, mode)?);
         }
         Ok((preview, grids, ImageSize { width, height }))
     })()
@@ -1311,9 +1306,9 @@ mod tests {
         let (first_grid_path, _) = first_grid_url.split_once("?v=").unwrap();
         let (second_grid_path, _) = second_grid_url.split_once("?v=").unwrap();
         let first_grid =
-            lodepng::decode32(&fs::read(temp.path().join(first_grid_path)).unwrap()).unwrap();
+            lodepng::decode32(fs::read(temp.path().join(first_grid_path)).unwrap()).unwrap();
         let second_grid =
-            lodepng::decode32(&fs::read(temp.path().join(second_grid_path)).unwrap()).unwrap();
+            lodepng::decode32(fs::read(temp.path().join(second_grid_path)).unwrap()).unwrap();
         assert_eq!(
             first_grid.buffer[25 * width],
             rgb::RGBA8::new(255, 0, 255, 200)
@@ -1463,10 +1458,10 @@ mod tests {
             ]);
         }
         let source = lodepng::encode32(&pixels, 800, 1600).unwrap();
-        let expected = preview_images(&source, GridThumbnailMode::TopCrop).unwrap();
+        let expected = preview_images(&source, Some(GridThumbnailMode::TopCrop)).unwrap();
         for _ in 0..3 {
             assert_eq!(
-                preview_images(&source, GridThumbnailMode::TopCrop).unwrap(),
+                preview_images(&source, Some(GridThumbnailMode::TopCrop)).unwrap(),
                 expected
             );
         }
@@ -1475,10 +1470,10 @@ mod tests {
             GridThumbnailMode::DimmedErrorOverlay,
             GridThumbnailMode::ErrorIconContain,
         ] {
-            let first = preview_images(&source, mode).unwrap();
-            assert_eq!(preview_images(&source, mode).unwrap(), first);
+            let first = preview_images(&source, Some(mode)).unwrap();
+            assert_eq!(preview_images(&source, Some(mode)).unwrap(), first);
         }
-        let (list_only, grid, size) = preview_images(&source, GridThumbnailMode::None).unwrap();
+        let (list_only, grid, size) = preview_images(&source, None).unwrap();
         assert_eq!(list_only, expected.0);
         assert!(grid.is_none());
         assert_eq!(
@@ -1504,7 +1499,7 @@ mod tests {
             }
             let source = lodepng::encode32(&pixels, width, height).unwrap();
             let (preview, grid, size) =
-                preview_images(&source, GridThumbnailMode::TopCrop).unwrap();
+                preview_images(&source, Some(GridThumbnailMode::TopCrop)).unwrap();
             assert_eq!((size.width as usize, size.height as usize), (width, height));
             let grid_image = lodepng::decode32(grid.as_ref().unwrap()).unwrap();
             assert_eq!(grid_image.width, width.min(640));
@@ -1524,7 +1519,13 @@ mod tests {
                 assert_eq!(image.buffer[0].a, 64);
             }
         }
-        assert!(preview_images(b"\x89PNG\r\n\x1a\ncorrupt", GridThumbnailMode::TopCrop).is_err());
+        assert!(
+            preview_images(
+                b"\x89PNG\r\n\x1a\ncorrupt",
+                Some(GridThumbnailMode::TopCrop)
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1537,8 +1538,9 @@ mod tests {
             }
         }
         let diff_source = lodepng::encode32(&diff_pixels, width, height).unwrap();
-        let (_, grid_bytes, _) = preview_images(&diff_source, GridThumbnailMode::DiffCrop).unwrap();
-        let grid = lodepng::decode32(&grid_bytes.unwrap()).unwrap();
+        let (_, grid_bytes, _) =
+            preview_images(&diff_source, Some(GridThumbnailMode::DiffCrop)).unwrap();
+        let grid = lodepng::decode32(grid_bytes.unwrap()).unwrap();
         assert_eq!((grid.width, grid.height), (320, 200));
         // crop_height = 200, top context margin = 200 / 8 = 25 -> crop_y = 575.
         // Rows 0..25 in the thumbnail are context (40,40,40,255); rows 25..75 are the diff band.
@@ -1552,8 +1554,8 @@ mod tests {
         }
         let bottom_source = lodepng::encode32(&bottom_diff, width, height).unwrap();
         let (_, bottom_grid_bytes, _) =
-            preview_images(&bottom_source, GridThumbnailMode::DiffCrop).unwrap();
-        let bottom_grid = lodepng::decode32(&bottom_grid_bytes.unwrap()).unwrap();
+            preview_images(&bottom_source, Some(GridThumbnailMode::DiffCrop)).unwrap();
+        let bottom_grid = lodepng::decode32(bottom_grid_bytes.unwrap()).unwrap();
         assert_eq!((bottom_grid.width, bottom_grid.height), (320, 200));
         assert_eq!(
             bottom_grid.buffer[180 * width],
@@ -1624,7 +1626,7 @@ mod tests {
         assert!(ref_grid_url.starts_with("_snapshot/images/suite/reference-thumbnail/home.png?v="));
         let (ref_grid_path, _) = ref_grid_url.split_once("?v=").unwrap();
         let ref_grid =
-            lodepng::decode32(&fs::read(temp.path().join(ref_grid_path)).unwrap()).unwrap();
+            lodepng::decode32(fs::read(temp.path().join(ref_grid_path)).unwrap()).unwrap();
         assert_eq!((ref_grid.width, ref_grid.height), (320, 200));
         // Corners outside the centered 200x200 error triangle are the dimmed top-of-reference color.
         let dimmed_ref = rgb::RGBA8::new(10 / 3, 200 / 3, 30 / 3, 255);
