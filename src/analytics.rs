@@ -257,7 +257,11 @@ mod tests {
             .with_subscriber(tracing_subscriber::registry().with(recorded.clone()))
             .await;
             assert_eq!(task.join().unwrap().len(), 1);
-            assert!(server.try_recv().unwrap().is_none());
+            let unexpected = server.try_recv().unwrap();
+            assert!(
+                unexpected.is_none(),
+                "Unexpected additional request after HTTP {status}: {unexpected:?}"
+            );
             assert_eq!(*recorded.0.lock().unwrap(), Vec::<String>::new());
         }
     }
