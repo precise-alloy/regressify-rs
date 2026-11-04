@@ -21,12 +21,23 @@ use crate::{
     vso::is_azure_devops,
 };
 
-/// Called by the CLI or an isolated desktop worker, never by the GUI thread.
-pub async fn execute(cli: Cli) -> Result<()> {
-    execute_identified(cli, None).await
+/// Engine settings chosen by the caller rather than exposed as CLI arguments.
+#[derive(Debug, Default)]
+pub(crate) struct EngineOptions {
+    pub(crate) operation_id: Option<OperationId>,
+    pub(crate) post_run_snapshot: test::PostRunSnapshot,
 }
 
-pub async fn execute_identified(cli: Cli, operation_id: Option<OperationId>) -> Result<()> {
+/// Called by the CLI or an isolated desktop worker, never by the GUI thread.
+pub async fn execute(cli: Cli) -> Result<()> {
+    execute_with(cli, EngineOptions::default()).await
+}
+
+pub(crate) async fn execute_with(cli: Cli, options: EngineOptions) -> Result<()> {
+    let EngineOptions {
+        operation_id,
+        post_run_snapshot,
+    } = options;
     set_root(&cli)?;
     set_global_vars(&cli)?;
     let (command, phase) = match &cli.command {
@@ -114,8 +125,8 @@ pub async fn execute_identified(cli: Cli, operation_id: Option<OperationId>) -> 
                     ),
                     Command::Compare(args) => compare::compare(args),
                     Command::Approve(args) => compare::approve(args),
-                    Command::Test(args) => test::exec_test_suites(args).await,
-                    Command::Ref(args) => test::exec_ref(args).await,
+                    Command::Test(args) => test::exec_test_suites(args, post_run_snapshot).await,
+                    Command::Ref(args) => test::exec_ref(args, post_run_snapshot).await,
                 }
             },
         ),

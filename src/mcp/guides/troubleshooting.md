@@ -91,8 +91,9 @@ regressify snapshot
 ```
 
 `compare` changes reports/diff images but does not recapture pages; `snapshot`
-builds report assets from existing comparisons, which `test` and `ref` already
-do. Neither repairs stale screenshot pixels, and `compare` reuses thresholds
+builds report assets from existing comparisons. `ref` and compared `test` runs
+already do this only when they cover every suite and scenario; desktop runs and
+`--skip-compare` never do. Neither repairs stale screenshot pixels, and `compare` reuses thresholds
 recorded at capture time. `ref` and `approve` change baselines and require
 explicit authorization; never use them as an automatic repair for a mismatch.
 

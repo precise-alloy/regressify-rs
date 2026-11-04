@@ -46,18 +46,18 @@ Omit the workspace argument to use the native folder picker. For distribution, b
 
 The default Cargo build produces the standalone CLI binary (`regressify`).
 
-| Command    | Purpose                                                                                                                                                     |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `init`     | Create missing starter files, schemas, editor associations, and `.ai/memory` guidance; configure the Regressify MCP endpoint without overwriting user data. |
-| `install`  | Fetch the pinned Chromium build into the shared per-user cache.                                                                                             |
-| `ref`      | Capture baseline screenshots and promote successful captures to references while preserving existing baselines on capture errors.                           |
-| `test`     | Capture screenshots for selected suites/scenarios, compare against references (unless `--skip-compare` is set), and generate the HTML snapshot report.      |
-| `compare`  | Re-run image comparisons against reference screenshots for the latest completed run or an explicit `--run-id`.                                              |
-| `approve`  | Promote successful test screenshots from the latest completed run (or `--run-id`) to references, optionally scoped by `--scenario`.                         |
-| `snapshot` | Generate the static HTML snapshot SPA from existing comparison reports, with optional `--test-suite` glob filters.                                          |
-| `optimize` | Losslessly or lossily compress PNG files across the project output tree.                                                                                    |
-| `clean`    | Preview and delete old completed test runs and unreferenced logs (`--keep-runs`, `--yes`) while protecting active baselines.                                |
-| `version`  | Print the CLI version and Git commit hash.                                                                                                                  |
+| Command    | Purpose                                                                                                                                                                                          |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `init`     | Create missing starter files, schemas, editor associations, and `.ai/memory` guidance; configure the Regressify MCP endpoint without overwriting user data.                                      |
+| `install`  | Fetch the pinned Chromium build into the shared per-user cache.                                                                                                                                  |
+| `ref`      | Capture baseline screenshots and promote successful captures to references while preserving existing baselines on capture errors. Whole-workspace runs also regenerate the HTML snapshot report. |
+| `test`     | Capture screenshots for selected suites/scenarios and compare against references (unless `--skip-compare` is set). Compared whole-workspace runs also regenerate the HTML snapshot report.       |
+| `compare`  | Re-run image comparisons against reference screenshots for the latest completed run or an explicit `--run-id`.                                                                                   |
+| `approve`  | Promote successful test screenshots from the latest completed run (or `--run-id`) to references, optionally scoped by `--scenario`.                                                              |
+| `snapshot` | Generate the static HTML snapshot SPA from existing comparison reports, with optional `--test-suite` glob filters.                                                                               |
+| `optimize` | Losslessly or lossily compress PNG files across the project output tree.                                                                                                                         |
+| `clean`    | Preview and delete old completed test runs and unreferenced logs (`--keep-runs`, `--yes`) while protecting active baselines.                                                                     |
+| `version`  | Print the CLI version and Git commit hash.                                                                                                                                                       |
 
 Key engine capabilities shared by CLI and Desktop:
 

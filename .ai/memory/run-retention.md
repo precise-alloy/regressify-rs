@@ -13,9 +13,10 @@ Verified: 2026-10-17
 - [Desktop catalogs](../../src/desktop/results.rs) separate existing-only reads
   from on-demand comparison. Background refresh/recovery must use existing-only
   loading. Partial completed runs stay in inventory for explicit IDs, not defaults.
-- Results Open HTML emits a viewed-output request to the workbench's background
-  snapshot path. `latest_html_report_` covers stale HTML after skipped comparison,
-  custom outputs, workspace titles, and disabled button routing.
+- Post-run snapshot scope (verified 2026-11-04): scoped and desktop runs no
+  longer rebuild the combined report; Results has no Open HTML action. Rules and
+  checks live in the [snapshot skill](../../.github/skills/snapshot-command/SKILL.md);
+  remaining gaps are in [outstanding issues](../../OUTSTANDING_ISSUES.md#post-run-snapshot-scope-2026-11-04).
 - Raw reports mark `captureInventoryComplete`; scoped comparisons no longer
   masquerade as full-run results. Default catalogs/snapshots repair them, explicit
   catalogs retain their scope, and suite shortcuts mark them not yet ready.

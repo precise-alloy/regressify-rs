@@ -171,18 +171,18 @@ integrity hashes remain unchanged. See [desktop Capture Log](desktop.md#reviewin
 
 ## Commands
 
-| Command    | Purpose                                                                                                                                                                                                        |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `init`     | Create missing starter files, schemas, and VS Code associations; add or refresh the Regressify MCP endpoint while preserving other settings. Copy missing legacy `data/` files without deleting their sources. |
-| `install`  | Fetch managed Chromium into the per-user cache shared by all CLI and Desktop workspaces.                                                                                                                       |
-| `version`  | Print the CLI package version. `regressify --version` is also supported by Clap.                                                                                                                               |
-| `ref`      | Capture baseline screenshots, promote successful captures to references, and record them as self-approved in the report. Failed page captures are skipped and existing references are preserved.               |
-| `test`     | Capture screenshots and stage comparisons unless `--skip-compare` is set. Finalize each suite independently after its jobs finish; generate the snapshot after compared tests complete.                        |
-| `compare`  | Compare the latest test run for each matching suite against reference screenshots.                                                                                                                             |
-| `approve`  | Promote latest successful test screenshots to references. Failed capture placeholders are skipped.                                                                                                             |
-| `snapshot` | Generate the static snapshot SPA from existing comparison data.                                                                                                                                                |
-| `optimize` | Optimize PNG files in the project output tree.                                                                                                                                                                 |
-| `clean`    | Preview old test runs and their artifacts for selected suites; add `--yes` to delete them.                                                                                                                     |
+| Command    | Purpose                                                                                                                                                                                                                                                   |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `init`     | Create missing starter files, schemas, and VS Code associations; add or refresh the Regressify MCP endpoint while preserving other settings. Copy missing legacy `data/` files without deleting their sources.                                            |
+| `install`  | Fetch managed Chromium into the per-user cache shared by all CLI and Desktop workspaces.                                                                                                                                                                  |
+| `version`  | Print the CLI package version. `regressify --version` is also supported by Clap.                                                                                                                                                                          |
+| `ref`      | Capture baseline screenshots, promote successful captures to references, and record them as self-approved in the report. Failed page captures are skipped and existing references are preserved. Regenerate the snapshot only after whole-workspace runs. |
+| `test`     | Capture screenshots and stage comparisons unless `--skip-compare` is set. Finalize each suite independently after its jobs finish; regenerate the snapshot only after compared whole-workspace runs.                                                      |
+| `compare`  | Compare the latest test run for each matching suite against reference screenshots.                                                                                                                                                                        |
+| `approve`  | Promote latest successful test screenshots to references. Failed capture placeholders are skipped.                                                                                                                                                        |
+| `snapshot` | Generate the static snapshot SPA from existing comparison data.                                                                                                                                                                                           |
+| `optimize` | Optimize PNG files in the project output tree.                                                                                                                                                                                                            |
+| `clean`    | Preview old test runs and their artifacts for selected suites; add `--yes` to delete them.                                                                                                                                                                |
 
 All suite filters accept exact names or glob patterns. Use `all`, `*`, or omit `--test-suite` to process every discovered suite, except `clean`, which requires an explicit filter. Invalid glob patterns, unreadable suite directories, and an explicit filter that matches no suite fail the command instead of silently reducing coverage.
 
@@ -192,8 +192,17 @@ All suite filters accept exact names or glob patterns. Use `all`, `*`, or omit `
 regressify snapshot --test-suite 'shop*' --test-suite account
 ```
 
-The summary contains only the selected suites. Excluded suite reports and
-capture directories are not rewritten or cleaned up.
+The summary contains only the selected suites, and generated `_snapshot` data
+for excluded suites is removed from the published site. Excluded suite reports
+and capture directories are not rewritten or cleaned up.
+
+`test` with comparisons and `ref` rebuild the combined report at
+`<output>/index.html` only after a whole-workspace run: every discovered suite
+was selected and ran all of its scenarios. Runs that skip any suite or scenario
+leave the published report unchanged instead of reprocessing unrelated suites,
+and print a reminder. Run `regressify snapshot`
+without a filter to refresh every suite. Desktop Run Test and Run Reference
+never rebuild it; use Build Report or Deploy.
 
 ## Run History and Cleanup
 
