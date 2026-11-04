@@ -1387,9 +1387,16 @@ test("suite previews avoid full-resolution downloads until opening image review"
 test("short suite grid thumbnails span full width at the top of the thumbnail area", async ({
   page,
 }) => {
-  const shortPng = PNG.sync.write(new PNG({ width: 640, height: 120 }));
+  const shortImage = new PNG({ width: 640, height: 120 });
+  for (let i = 0; i < shortImage.data.length; i += 4) {
+    shortImage.data[i] = 20;
+    shortImage.data[i + 1] = 140;
+    shortImage.data[i + 2] = 220;
+    shortImage.data[i + 3] = 255;
+  }
+  const shortPng = PNG.sync.write(shortImage);
   let gridPath = "";
-  await page.route("**/_snapshot/data/suites/**", async (route) => {
+  await page.route("**/suites/workspace-overview.json*", async (route) => {
     const response = await route.fetch();
     const suite = await response.json();
     gridPath = suite.tests[0].previews?.grid || suite.tests[0].test;
@@ -1406,25 +1413,41 @@ test("short suite grid thumbnails span full width at the top of the thumbnail ar
   const container = page.locator(".capture-thumbnail").first();
   const image = container.locator("img");
   await expect(image).toBeVisible();
+  await expect(image).toHaveCSS("object-fit", "contain");
+  await expect(image).toHaveCSS("object-position", "50% 0%");
   await expect
     .poll(() => image.evaluate((element: HTMLImageElement) => element.naturalHeight))
     .toBe(120);
-  const geometry = await container.evaluate((box) => {
-    const img = box.querySelector("img") as HTMLImageElement;
-    const boxRect = box.getBoundingClientRect();
-    const imgRect = img.getBoundingClientRect();
-    return {
-      topDelta: Math.abs(imgRect.top - boxRect.top),
-      widthDelta: Math.abs(imgRect.width - boxRect.width),
-      imgHeight: imgRect.height,
-      boxHeight: boxRect.height,
-      bottomGap: boxRect.bottom - imgRect.bottom,
-    };
-  });
-  expect(geometry.topDelta).toBeLessThan(1);
-  expect(geometry.widthDelta).toBeLessThan(1);
-  expect(geometry.imgHeight).toBeLessThan(geometry.boxHeight * 0.5);
-  expect(geometry.bottomGap).toBeGreaterThan(geometry.boxHeight * 0.5);
+  const shot = PNG.sync.read(await container.screenshot({ scale: "css", animations: "disabled" }));
+  const pixelAt = (x: number, y: number) => {
+    const idx = (y * shot.width + x) * 4;
+    return [shot.data[idx], shot.data[idx + 1], shot.data[idx + 2]] as const;
+  };
+  for (const x of [10, Math.floor(shot.width / 2), shot.width - 10]) {
+    const [r, g, b] = pixelAt(x, 6);
+    expect(r).toBeLessThan(50);
+    expect(g).toBeGreaterThan(100);
+    expect(b).toBeGreaterThan(180);
+  }
+  const [midR, midG, midB] = pixelAt(Math.floor(shot.width / 2), Math.floor(shot.height * 0.6));
+  const [botR, botG, botB] = pixelAt(Math.floor(shot.width / 2), shot.height - 10);
+  expect([midR, midG, midB]).toEqual([botR, botG, botB]);
+  expect(botB).not.toBe(220);
+
+  await page.goto("/suites/product-catalog");
+  const errorCard = page.locator(".capture-card").nth(3);
+  await errorCard.scrollIntoViewIfNeeded();
+  const errorThumb = errorCard.locator(".capture-thumbnail img");
+  await expect(errorThumb).toBeVisible();
+  await expect(errorThumb).toHaveCSS("object-fit", "contain");
+  await expect
+    .poll(() =>
+      errorThumb.evaluate((element: HTMLImageElement) => [
+        element.naturalWidth,
+        element.naturalHeight,
+      ]),
+    )
+    .toEqual([400, 400]);
 });
 
 test("legacy suite reports without previews remain readable", async ({ page }) => {

@@ -37,7 +37,11 @@ async function artifact(path: string, bytes: Uint8Array) {
 export async function createFixture() {
   await rm(join(fixtureRoot, "_snapshot"), { recursive: true, force: true });
   const html = await readFile(resolve(import.meta.dir, "../tests/fixtures/dashboard.html"), "utf8");
+  const errorIconBytes = await readFile(
+    resolve(import.meta.dir, "../../src/test/data/error-icon.png"),
+  );
   const browser = await chromium.launch({ executablePath: browserExecutable(), headless: true });
+  let errorThumbnailUrl = "";
   const captures: {
     reference: string;
     test: string;
@@ -52,6 +56,7 @@ export async function createFixture() {
       gridReference: string;
       gridTest: string;
       gridDiff: string;
+      gridError: string;
     };
   }[] = [];
   try {
@@ -76,8 +81,8 @@ export async function createFixture() {
         { threshold: 0.1 },
       );
       const diff = PNG.sync.write(difference);
-      const previews = await page.evaluate(
-        async (sources) => {
+      const { previews, errorGrid } = await page.evaluate(
+        async ({ sources, iconSource }) => {
           const results = [];
           for (const [sourceIndex, source] of sources.entries()) {
             const image = new Image();
@@ -124,10 +129,42 @@ export async function createFixture() {
             };
             results.push({ preview: render(false, false), grid: render(true, sourceIndex === 2) });
           }
-          return results;
+          const icon = new Image();
+          icon.src = `data:image/png;base64,${iconSource}`;
+          await icon.decode();
+          const iconScale = Math.min(1, 640 / icon.width, 400 / icon.height);
+          const iconCanvas = document.createElement("canvas");
+          iconCanvas.width = Math.max(1, Math.round(icon.width * iconScale));
+          iconCanvas.height = Math.max(1, Math.round(icon.height * iconScale));
+          const iconCtx = iconCanvas.getContext("2d");
+          if (!iconCtx) throw new Error("Preview canvas is unavailable");
+          iconCtx.drawImage(
+            icon,
+            0,
+            0,
+            icon.width,
+            icon.height,
+            0,
+            0,
+            iconCanvas.width,
+            iconCanvas.height,
+          );
+          return {
+            previews: results,
+            errorGrid: iconCanvas.toDataURL("image/png").split(",")[1] || "",
+          };
         },
-        [reference, changed, diff].map((bytes) => bytes.toString("base64")),
+        {
+          sources: [reference, changed, diff].map((bytes) => bytes.toString("base64")),
+          iconSource: errorIconBytes.toString("base64"),
+        },
       );
+      if (!errorThumbnailUrl) {
+        errorThumbnailUrl = await artifact(
+          "_snapshot/images/preview/error-thumbnail.png",
+          Buffer.from(errorGrid, "base64"),
+        );
+      }
       const previewUrls = [];
       for (const [index, role] of ["reference", "test", "diff"].entries()) {
         const preview = previews[index];
@@ -164,6 +201,7 @@ export async function createFixture() {
           gridReference: referencePreview.grid,
           gridTest: testPreview.grid,
           gridDiff: diffPreview.grid,
+          gridError: errorThumbnailUrl,
         },
       });
       await page.close();
@@ -243,12 +281,11 @@ export async function createFixture() {
           reference: error ? null : images.previews.reference,
           test: failed ? images.previews.test : images.previews.reference,
           diff: failed && !error ? images.previews.diff : null,
-          grid:
-            failed && !error
+          grid: error
+            ? images.previews.gridError
+            : failed
               ? images.previews.gridDiff
-              : failed
-                ? images.previews.gridTest
-                : images.previews.gridReference,
+              : images.previews.gridReference,
         },
         referenceUrl,
         testUrl: referenceUrl.replace("example.com", "staging.example.com"),

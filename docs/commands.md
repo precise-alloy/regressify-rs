@@ -424,9 +424,11 @@ scrolling; the Sort by selector and direction button preserve every sort option.
 Suite browsing uses generated PNG previews instead of downloading full-resolution
 captures: list previews fit within 640 x 480 pixels, and grid thumbnails span the
 full horizontal width within 640 x 400 (using the first diff area when a diff is
-present, the top of the test capture otherwise, or the top of the reference capture
-when no test image was captured; short pages stay aligned at the top of the thumbnail
-area). Only previews near the review viewport keep active image sources.
+present, the top of the test capture otherwise, a dimmed top-of-reference capture
+overlaid with the error icon at 25% opacity when only the reference was captured,
+or the contained error icon when neither was captured; short pages stay aligned at
+the top of the thumbnail area). Only previews near the review viewport keep active
+image sources.
 Generation prioritizes speed, uses fixed PNG encoding settings, and produces
 byte-identical previews from identical input. Full-resolution captures remain
 unchanged for comparison and download. Regenerate and redeploy existing reports

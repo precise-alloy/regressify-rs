@@ -15,11 +15,21 @@ use super::site::{
     SuiteReport, checked_file, read_bounded, store_asset, valid_segment, valid_suite_id,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum GridThumbnailMode {
+    None,
+    TopCrop,
+    DiffCrop,
+    DimmedErrorOverlay,
+    ErrorIconContain,
+}
+
 #[derive(Clone)]
 pub(super) struct ImageAsset {
     full: String,
     preview: String,
     grid: Option<String>,
+    grid_mode: GridThumbnailMode,
     size: ImageSize,
 }
 
@@ -34,6 +44,12 @@ fn encode_preview(preview: image::DynamicImage) -> Result<Vec<u8>> {
 }
 
 const DIFF_CONTEXT_DIVISOR: u32 = 8;
+const MAX_ERROR_MARKER_BYTES: usize = 64 * 1024;
+
+#[derive(Deserialize)]
+struct CaptureErrorMarker {
+    error: bool,
+}
 
 fn is_diff_pixel(pixel: [u8; 4]) -> bool {
     let [r, g, b, a] = pixel;
@@ -59,30 +75,108 @@ fn first_diff_row(decoded: &image::DynamicImage) -> Option<u32> {
     }
 }
 
-fn is_error_placeholder(source: &Path) -> bool {
-    if crate::test::capture::read_error_marker(source).is_some() {
-        return true;
+fn error_icon_image() -> Result<&'static image::DynamicImage> {
+    static ERROR_ICON: std::sync::OnceLock<image::DynamicImage> = std::sync::OnceLock::new();
+    if let Some(icon) = ERROR_ICON.get() {
+        return Ok(icon);
+    }
+    let decoded = image::ImageReader::with_format(
+        Cursor::new(crate::test::capture::error_icon_png()),
+        image::ImageFormat::Png,
+    )
+    .decode()
+    .context("Failed to decode embedded error icon PNG")?;
+    Ok(ERROR_ICON.get_or_init(|| decoded))
+}
+
+fn overlay_error_icon(canvas: &mut image::RgbaImage) -> Result<()> {
+    let icon = error_icon_image()?;
+    let (canvas_w, canvas_h) = (canvas.width(), canvas.height());
+    if canvas_w == 0 || canvas_h == 0 {
+        return Ok(());
+    }
+    let bound_w = canvas_w.min(icon.width()).max(1);
+    let bound_h = canvas_h.min(icon.height()).max(1);
+    let resized = icon.thumbnail(bound_w, bound_h).to_rgba8();
+    let (icon_w, icon_h) = (resized.width(), resized.height());
+    let offset_x = (canvas_w.saturating_sub(icon_w)) / 2;
+    let offset_y = (canvas_h.saturating_sub(icon_h)) / 2;
+    for (x, y, src) in resized.enumerate_pixels() {
+        let [sr, sg, sb, sa] = src.0;
+        if sa == 0 {
+            continue;
+        }
+        let dst = canvas.get_pixel_mut(offset_x + x, offset_y + y);
+        let [dr, dg, db, da] = dst.0;
+        // 25% opacity: effective source alpha is (sa / 255) * (1 / 4) = sa / 1020.
+        let sa_num = u32::from(sa);
+        let inv_sa = 1020 - sa_num;
+        let da_num = u32::from(da);
+        let out_a_scaled = sa_num * 255 + da_num * inv_sa;
+        if out_a_scaled == 0 {
+            continue;
+        }
+        let blend = |sc: u8, dc: u8| -> u8 {
+            let num = u32::from(sc) * sa_num * 255 + u32::from(dc) * da_num * inv_sa;
+            ((num + out_a_scaled / 2) / out_a_scaled) as u8
+        };
+        *dst = image::Rgba([
+            blend(sr, dr),
+            blend(sg, dg),
+            blend(sb, db),
+            ((out_a_scaled + 510) / 1020) as u8,
+        ]);
+    }
+    Ok(())
+}
+
+fn is_error_placeholder(root: &Path, relative_image: &Path, source: &Path) -> Result<bool> {
+    let mut marker_relative = relative_image.as_os_str().to_os_string();
+    marker_relative.push(".error.json");
+    if let Some(marker_path) = checked_file(root, Path::new(&marker_relative), true)? {
+        let bytes = read_bounded(&marker_path, MAX_ERROR_MARKER_BYTES)?;
+        let marker: CaptureErrorMarker = serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "Failed to parse snapshot capture error marker '{}'",
+                marker_path.display()
+            )
+        })?;
+        if marker.error {
+            return Ok(true);
+        }
     }
     let placeholder = crate::test::capture::error_icon_png();
-    std::fs::metadata(source).is_ok_and(|meta| meta.len() == placeholder.len() as u64)
-        && std::fs::read(source).is_ok_and(|bytes| bytes == placeholder)
+    let metadata = std::fs::metadata(source)
+        .with_context(|| format!("Failed to inspect snapshot artifact '{}'", source.display()))?;
+    if metadata.len() != placeholder.len() as u64 {
+        return Ok(false);
+    }
+    Ok(read_bounded(source, placeholder.len())? == placeholder)
 }
 
 fn preview_images(
     bytes: &[u8],
-    include_grid: bool,
-    crop_diff: bool,
+    grid_mode: GridThumbnailMode,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>, ImageSize)> {
     let decoded = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png)
         .decode()
         .context("Failed to decode PNG capture")?;
     let (width, height) = (decoded.width(), decoded.height());
     let preview = encode_preview(decoded.thumbnail(width.min(640), height.min(480)))?;
-    let grid = include_grid
-        .then(|| {
+    let grid = match grid_mode {
+        GridThumbnailMode::None => None,
+        GridThumbnailMode::TopCrop => {
             // Grid thumbnails always span the full horizontal width and crop vertically when taller than 16:10.
             let crop_height = height.min(width.saturating_mul(5) / 8).max(1);
-            let crop_y = if crop_diff && height > crop_height {
+            Some(encode_preview(
+                decoded
+                    .crop_imm(0, 0, width, crop_height)
+                    .thumbnail(width.min(640), crop_height.min(400)),
+            )?)
+        }
+        GridThumbnailMode::DiffCrop => {
+            let crop_height = height.min(width.saturating_mul(5) / 8).max(1);
+            let crop_y = if height > crop_height {
                 first_diff_row(&decoded)
                     .map(|row| {
                         row.saturating_sub(crop_height / DIFF_CONTEXT_DIVISOR)
@@ -92,13 +186,31 @@ fn preview_images(
             } else {
                 0
             };
-            encode_preview(
+            Some(encode_preview(
                 decoded
                     .crop_imm(0, crop_y, width, crop_height)
                     .thumbnail(width.min(640), crop_height.min(400)),
-            )
-        })
-        .transpose()?;
+            )?)
+        }
+        GridThumbnailMode::DimmedErrorOverlay => {
+            let crop_height = height.min(width.saturating_mul(5) / 8).max(1);
+            let mut canvas = decoded
+                .crop_imm(0, 0, width, crop_height)
+                .thumbnail(width.min(640), crop_height.min(400))
+                .to_rgba8();
+            for pixel in canvas.pixels_mut() {
+                pixel.0[0] /= 3;
+                pixel.0[1] /= 3;
+                pixel.0[2] /= 3;
+            }
+            overlay_error_icon(&mut canvas)?;
+            Some(encode_preview(image::DynamicImage::ImageRgba8(canvas))?)
+        }
+        GridThumbnailMode::ErrorIconContain => {
+            let icon = error_icon_image()?;
+            Some(encode_preview(icon.thumbnail(640, 400))?)
+        }
+    };
     Ok((preview, grid, ImageSize { width, height }))
 }
 
@@ -231,7 +343,8 @@ struct PendingImage<'a> {
     suite: &'a str,
     role: &'static str,
     name: String,
-    include_grid: bool,
+    is_placeholder: bool,
+    grid_mode: GridThumbnailMode,
 }
 
 fn resolve_image_source<'a>(
@@ -279,14 +392,11 @@ fn resolve_image_source<'a>(
     } else {
         "bitmaps_test"
     };
-    let Some(source) = checked_file(
-        root,
-        &Path::new(suite).join(folder).join(relative),
-        reference,
-    )?
-    else {
+    let relative_image = Path::new(suite).join(folder).join(relative);
+    let Some(source) = checked_file(root, &relative_image, reference)? else {
         return Ok(None);
     };
+    let is_placeholder = is_error_placeholder(root, &relative_image, &source)?;
     let role = if role == "diff" && test_paths.contains(&normalized) {
         "test"
     } else {
@@ -297,7 +407,8 @@ fn resolve_image_source<'a>(
         suite,
         role,
         name,
-        include_grid: false,
+        is_placeholder,
+        grid_mode: GridThumbnailMode::None,
     }))
 }
 
@@ -310,15 +421,12 @@ fn decode_pending_image(pending: &PendingImage<'_>) -> Result<DecodedImage> {
         "Snapshot capture is not a PNG image: {}",
         pending.source.display()
     );
-    let (preview, grid, size) =
-        preview_images(&bytes, pending.include_grid, pending.role == "diff").with_context(
-            || {
-                format!(
-                    "Failed to create snapshot previews for '{}'",
-                    pending.source.display()
-                )
-            },
-        )?;
+    let (preview, grid, size) = preview_images(&bytes, pending.grid_mode).with_context(|| {
+        format!(
+            "Failed to create snapshot previews for '{}'",
+            pending.source.display()
+        )
+    })?;
     Ok((bytes, preview, grid, size))
 }
 
@@ -329,10 +437,15 @@ fn store_pending_image(
 ) -> Result<ImageAsset> {
     let (bytes, preview, grid, size) = encoded;
     let PendingImage {
-        suite, role, name, ..
+        suite,
+        role,
+        name,
+        grid_mode,
+        ..
     } = pending;
     Ok(ImageAsset {
         size,
+        grid_mode: *grid_mode,
         full: store_asset(
             output,
             &format!("_snapshot/images/{suite}/{role}/{name}"),
@@ -474,7 +587,7 @@ pub(super) fn load_suite(
     let mut prepared_tests = Vec::with_capacity(report.tests.len());
     let mut pending_images = Vec::new();
     let mut queued_sources = BTreeSet::new();
-    let mut grid_sources = BTreeSet::new();
+    let mut grid_modes = BTreeMap::<PathBuf, GridThumbnailMode>::new();
     let mut role_names = BTreeMap::new();
     for (test, scenario) in report.tests.into_iter().zip(names) {
         let mut pair = test.pair;
@@ -574,30 +687,46 @@ pub(super) fn load_suite(
             msg.starts_with("Reference scenario failed to capture:")
                 || msg.starts_with("Both reference and test scenarios failed to capture")
         });
-        let has_captured_test = !test_failed_to_capture
-            && current
-                .as_ref()
-                .is_some_and(|img| !is_error_placeholder(&img.source));
-        let has_captured_reference = !ref_failed_to_capture
-            && reference
-                .as_ref()
-                .is_some_and(|img| !is_error_placeholder(&img.source));
+        let has_captured_test =
+            !test_failed_to_capture && current.as_ref().is_some_and(|img| !img.is_placeholder);
+        let has_captured_reference =
+            !ref_failed_to_capture && reference.as_ref().is_some_and(|img| !img.is_placeholder);
         // Prefer the diff thumbnail when a captured test produced a diff; when no test image
-        // was captured, fall back to the top of the reference image rather than an unmeaningful diff.
-        let grid_src = if has_captured_test {
-            diff.as_ref()
-                .or(current.as_ref())
-                .map(|pending| pending.source.clone())
+        // was captured, use a dimmed top-cropped reference thumbnail overlaid with the error icon,
+        // or the contained error icon alone when neither image was captured.
+        let (grid_src, grid_mode) = if has_captured_test {
+            if has_captured_reference && let Some(diff) = &diff {
+                let mode = if diff.role == "diff" {
+                    GridThumbnailMode::DiffCrop
+                } else {
+                    GridThumbnailMode::TopCrop
+                };
+                (Some(diff.source.clone()), mode)
+            } else {
+                (
+                    current.as_ref().map(|pending| pending.source.clone()),
+                    GridThumbnailMode::TopCrop,
+                )
+            }
         } else if has_captured_reference {
-            reference.as_ref().map(|pending| pending.source.clone())
+            (
+                reference.as_ref().map(|pending| pending.source.clone()),
+                GridThumbnailMode::DimmedErrorOverlay,
+            )
         } else {
-            current
-                .as_ref()
-                .or(reference.as_ref())
-                .map(|pending| pending.source.clone())
+            (
+                current
+                    .as_ref()
+                    .or(reference.as_ref())
+                    .map(|pending| pending.source.clone()),
+                GridThumbnailMode::ErrorIconContain,
+            )
         };
         if let Some(source) = &grid_src {
-            grid_sources.insert(source.clone());
+            grid_modes
+                .entry(source.clone())
+                .and_modify(|prev| *prev = (*prev).max(grid_mode))
+                .or_insert(grid_mode);
         }
         for pending in [&reference, &current, &diff].into_iter().flatten() {
             let previous_name = role_names
@@ -613,7 +742,8 @@ pub(super) fn load_suite(
                     suite: pending.suite,
                     role: pending.role,
                     name: pending.name.clone(),
-                    include_grid: false,
+                    is_placeholder: pending.is_placeholder,
+                    grid_mode: GridThumbnailMode::None,
                 });
             }
         }
@@ -632,10 +762,14 @@ pub(super) fn load_suite(
         ));
     }
     pending_images.retain_mut(|pending| {
-        pending.include_grid = grid_sources.contains(&pending.source);
-        images
+        pending.grid_mode = grid_modes
             .get(&pending.source)
-            .is_none_or(|asset| pending.include_grid && asset.grid.is_none())
+            .copied()
+            .unwrap_or(GridThumbnailMode::None);
+        images.get(&pending.source).is_none_or(|asset| {
+            pending.grid_mode != GridThumbnailMode::None
+                && (asset.grid.is_none() || asset.grid_mode != pending.grid_mode)
+        })
     });
     let total_images = pending_images.len();
     if total_images > 0 {
@@ -1250,11 +1384,22 @@ mod tests {
             ]);
         }
         let source = lodepng::encode32(&pixels, 800, 1600).unwrap();
-        let expected = preview_images(&source, true, false).unwrap();
+        let expected = preview_images(&source, GridThumbnailMode::TopCrop).unwrap();
         for _ in 0..3 {
-            assert_eq!(preview_images(&source, true, false).unwrap(), expected);
+            assert_eq!(
+                preview_images(&source, GridThumbnailMode::TopCrop).unwrap(),
+                expected
+            );
         }
-        let (list_only, grid, size) = preview_images(&source, false, false).unwrap();
+        for mode in [
+            GridThumbnailMode::DiffCrop,
+            GridThumbnailMode::DimmedErrorOverlay,
+            GridThumbnailMode::ErrorIconContain,
+        ] {
+            let first = preview_images(&source, mode).unwrap();
+            assert_eq!(preview_images(&source, mode).unwrap(), first);
+        }
+        let (list_only, grid, size) = preview_images(&source, GridThumbnailMode::None).unwrap();
         assert_eq!(list_only, expected.0);
         assert!(grid.is_none());
         assert_eq!(
@@ -1279,7 +1424,8 @@ mod tests {
                 }
             }
             let source = lodepng::encode32(&pixels, width, height).unwrap();
-            let (preview, grid, size) = preview_images(&source, true, false).unwrap();
+            let (preview, grid, size) =
+                preview_images(&source, GridThumbnailMode::TopCrop).unwrap();
             assert_eq!((size.width as usize, size.height as usize), (width, height));
             let grid_image = lodepng::decode32(grid.as_ref().unwrap()).unwrap();
             assert_eq!(grid_image.width, width.min(640));
@@ -1299,7 +1445,7 @@ mod tests {
                 assert_eq!(image.buffer[0].a, 64);
             }
         }
-        assert!(preview_images(b"\x89PNG\r\n\x1a\ncorrupt", true, false).is_err());
+        assert!(preview_images(b"\x89PNG\r\n\x1a\ncorrupt", GridThumbnailMode::TopCrop).is_err());
     }
 
     #[test]
@@ -1312,7 +1458,7 @@ mod tests {
             }
         }
         let diff_source = lodepng::encode32(&diff_pixels, width, height).unwrap();
-        let (_, grid_bytes, _) = preview_images(&diff_source, true, true).unwrap();
+        let (_, grid_bytes, _) = preview_images(&diff_source, GridThumbnailMode::DiffCrop).unwrap();
         let grid = lodepng::decode32(&grid_bytes.unwrap()).unwrap();
         assert_eq!((grid.width, grid.height), (320, 200));
         // crop_height = 200, top context margin = 200 / 8 = 25 -> crop_y = 575.
@@ -1326,7 +1472,8 @@ mod tests {
             bottom_diff[980 * width + col] = rgb::RGBA8::new(255, 0, 255, 200);
         }
         let bottom_source = lodepng::encode32(&bottom_diff, width, height).unwrap();
-        let (_, bottom_grid_bytes, _) = preview_images(&bottom_source, true, true).unwrap();
+        let (_, bottom_grid_bytes, _) =
+            preview_images(&bottom_source, GridThumbnailMode::DiffCrop).unwrap();
         let bottom_grid = lodepng::decode32(&bottom_grid_bytes.unwrap()).unwrap();
         assert_eq!((bottom_grid.width, bottom_grid.height), (320, 200));
         assert_eq!(
@@ -1365,7 +1512,8 @@ mod tests {
                 .starts_with("_snapshot/images/suite/diff-thumbnail/home_diff.png?v=")
         );
 
-        // When test capture failed (or has no captured test image), use reference at the top, not diff.
+        // When test capture failed (or has no captured test image), use dimmed top-of-reference
+        // overlaid with the error icon at 25% opacity, not diff.
         report["tests"][0]["pair"]["engineErrorMsg"] =
             json!("Test scenario failed to capture: navigation timed out");
         report["tests"][0]["pair"]["diff"] = serde_json::Value::Null;
@@ -1383,10 +1531,14 @@ mod tests {
         let ref_grid =
             lodepng::decode32(&fs::read(temp.path().join(ref_grid_path)).unwrap()).unwrap();
         assert_eq!((ref_grid.width, ref_grid.height), (320, 200));
-        assert_eq!(ref_grid.buffer[0], rgb::RGBA8::new(10, 200, 30, 255));
+        // Corners outside the centered 200x200 error triangle are the dimmed top-of-reference color.
+        let dimmed_ref = rgb::RGBA8::new(10 / 3, 200 / 3, 30 / 3, 255);
+        assert_eq!(ref_grid.buffer[0], dimmed_ref);
+        assert_eq!(ref_grid.buffer.last().unwrap(), &dimmed_ref);
+        // Center pixel inside the white triangle interior (160, 120) blends 25% white over 75% dimmed_ref.
         assert_eq!(
-            ref_grid.buffer.last().unwrap(),
-            &rgb::RGBA8::new(10, 200, 30, 255)
+            ref_grid.buffer[120 * width + 160],
+            rgb::RGBA8::new(66, 113, 71, 255)
         );
 
         // Also when pair.test is null and only reference exists:
@@ -1395,6 +1547,77 @@ mod tests {
         let null_test = load(temp.path()).unwrap().unwrap();
         assert!(
             null_test.tests[0]
+                .previews
+                .as_ref()
+                .unwrap()
+                .grid
+                .as_deref()
+                .unwrap()
+                .starts_with("_snapshot/images/suite/reference-thumbnail/home.png?v=")
+        );
+
+        // When neither reference nor test was captured, use the error icon fitted (contained) without cropping.
+        report["tests"][0]["pair"]["test"] = json!("../bitmaps_test/current/home.png");
+        report["tests"][0]["pair"]["engineErrorMsg"] = json!(
+            "Both reference and test scenarios failed to capture (reference: Timeout; test: Timeout)"
+        );
+        write_fixture(temp.path(), &report);
+        let failed_both = load(temp.path()).unwrap().unwrap();
+        let err_grid_url = failed_both.tests[0]
+            .previews
+            .as_ref()
+            .unwrap()
+            .grid
+            .as_deref()
+            .unwrap();
+        assert!(err_grid_url.starts_with("_snapshot/images/suite/test-thumbnail/home.png?v="));
+        let (err_grid_path, _) = err_grid_url.split_once("?v=").unwrap();
+        let err_grid_bytes = fs::read(temp.path().join(err_grid_path)).unwrap();
+        let expected_error_grid =
+            encode_preview(error_icon_image().unwrap().thumbnail(640, 400)).unwrap();
+        assert_eq!(err_grid_bytes, expected_error_grid);
+        let err_grid = lodepng::decode32(&err_grid_bytes).unwrap();
+        assert_eq!((err_grid.width, err_grid.height), (400, 400));
+    }
+
+    #[test]
+    fn error_marker_sidecars_validate_regular_files_symlinks_and_size_bounds() {
+        let (temp, mut report) = fixture();
+        report["tests"][0]["pair"]["diff"] = serde_json::Value::Null;
+        write_fixture(temp.path(), &report);
+        let sidecar = temp
+            .path()
+            .join("suite/bitmaps_test/current/home.png.error.json");
+
+        // Non-regular sidecar (directory) is rejected.
+        fs::create_dir(&sidecar).unwrap();
+        assert!(load(temp.path()).is_err());
+        fs::remove_dir(&sidecar).unwrap();
+
+        // Oversized sidecar is rejected.
+        fs::write(&sidecar, vec![b' '; MAX_ERROR_MARKER_BYTES + 1]).unwrap();
+        assert!(load(temp.path()).is_err());
+
+        // Malformed JSON sidecar is rejected.
+        fs::write(&sidecar, b"{not-valid-json").unwrap();
+        assert!(load(temp.path()).is_err());
+
+        #[cfg(unix)]
+        {
+            fs::remove_file(&sidecar).unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let target = outside.path().join("outside.error.json");
+            fs::write(&target, r#"{"error":true,"message":"boom"}"#).unwrap();
+            std::os::unix::fs::symlink(&target, &sidecar).unwrap();
+            assert!(load(temp.path()).is_err());
+            fs::remove_file(&sidecar).unwrap();
+        }
+
+        // Valid error marker sidecar marks test capture as placeholder and falls back to reference thumbnail.
+        fs::write(&sidecar, r#"{"error":true,"message":"capture failed"}"#).unwrap();
+        let loaded = load(temp.path()).unwrap().unwrap();
+        assert!(
+            loaded.tests[0]
                 .previews
                 .as_ref()
                 .unwrap()

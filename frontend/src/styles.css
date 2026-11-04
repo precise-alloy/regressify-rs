@@ -1258,9 +1258,10 @@ body:has(.settings-dialog[open]) {
   border-bottom: 1px solid var(--border);
 }
 .capture-thumbnail > img {
-  display: block;
   width: 100%;
-  height: auto;
+  height: 100%;
+  object-fit: contain;
+  object-position: top;
 }
 .open-capture {
   position: absolute;
