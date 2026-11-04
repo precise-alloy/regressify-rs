@@ -1463,12 +1463,27 @@ test("legacy suite reports without previews remain readable", async ({ page }) =
     await route.fulfill({ response, json: suite });
   });
   await page.goto("/suites/workspace-overview");
-  const image = page.locator(".capture-card").first().locator("img");
+  const container = page.locator(".capture-thumbnail").first();
+  const image = container.locator("img");
   await expect(image).toBeVisible();
   await expect(image).toHaveAttribute("src", original);
   await expect
     .poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth))
     .toBeGreaterThan(0);
+  const geometry = await container.evaluate((box) => {
+    const img = box.querySelector("img") as HTMLImageElement;
+    const boxRect = box.getBoundingClientRect();
+    const imgRect = img.getBoundingClientRect();
+    return {
+      topDelta: Math.abs(imgRect.top - boxRect.top),
+      widthDelta: Math.abs(imgRect.width - boxRect.width),
+      imgHeight: imgRect.height,
+      boxHeight: boxRect.height,
+    };
+  });
+  expect(geometry.topDelta).toBeLessThan(1);
+  expect(geometry.widthDelta).toBeLessThan(1);
+  expect(geometry.imgHeight).toBeGreaterThan(geometry.boxHeight);
   await page.locator(".capture-card").first().click();
   await expect
     .poll(() =>

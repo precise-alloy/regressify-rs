@@ -139,6 +139,7 @@ export function SuitePage() {
                     alt={`${capture.label} preview`}
                     width={640}
                     height={400}
+                    className={capture.previews?.grid ? "grid-preview" : undefined}
                   />
                   <span className="open-capture">
                     <ArrowUpRight size={18} />
