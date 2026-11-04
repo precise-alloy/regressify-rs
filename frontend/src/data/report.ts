@@ -70,6 +70,7 @@ export const manifestSchema = z
     heading: z.string(),
     subheading: z.string(),
     generatedAt: z.iso.datetime(),
+    regressifyVersion: z.string().optional(),
     suites: z.array(suiteSummarySchema),
   })
   .refine(

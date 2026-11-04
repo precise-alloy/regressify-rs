@@ -135,6 +135,8 @@ Screenshots are saved under `.fixtures/screenshots`.
 
 Footer checks cover short, filtered, and not-found pages, plus long content in
 document scrolling on desktop and mobile, with an independently scrolling sidebar.
+The footer links to Regressify and shows the generating binary's version and commit
+when present in the manifest; legacy manifests remain supported.
 Page scrollbar gutters remain stable on overview, suite, comparison, capture-log,
 error, and landing pages, including when vertical scrollbars appear or disappear.
 Empty gutters retain a theme-aware track color without changing the page background.

@@ -972,6 +972,39 @@ test.describe("page scrollbar tracks", () => {
   });
 });
 
+test("footer shows the generator version and app link, including on legacy reports", async ({
+  page,
+}) => {
+  const [response] = await Promise.all([
+    page.waitForResponse((response) => response.url().includes("/_snapshot/data/manifest.json?")),
+    page.goto("/"),
+  ]);
+  const actualManifest = await response.json();
+  expect(actualManifest.regressifyVersion).toBeTruthy();
+  await expect(page.getByRole("contentinfo")).toContainText(actualManifest.regressifyVersion);
+  let legacy = false;
+  await page.route("**/_snapshot/data/manifest.json?*", async (route) => {
+    const response = await route.fetch();
+    const manifest = await response.json();
+    if (legacy) delete manifest.regressifyVersion;
+    else manifest.regressifyVersion = "1.2.3 (abcdef0123456789)";
+    await route.fulfill({ response, json: manifest });
+  });
+  for (const path of ["/", "/suites/workspace-overview"]) {
+    await page.goto(path);
+    const footer = page.getByRole("contentinfo");
+    await expect(footer).toContainText("Regressify 1.2.3 (abcdef0123456789)");
+    await expect(footer.getByRole("link", { name: "Regressify" })).toHaveAttribute(
+      "href",
+      "https://regressify.eshn.dev/",
+    );
+  }
+  legacy = true;
+  await page.goto("/");
+  await expect(page.getByRole("contentinfo")).toContainText("Regressify");
+  await expect(page.getByRole("contentinfo")).not.toContainText("1.2.3");
+});
+
 test("footer stays at the bottom on short and empty pages", async ({ page }, info) => {
   const viewport = page.viewportSize();
   if (!viewport) throw new Error("The viewport is not configured");

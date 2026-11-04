@@ -957,12 +957,16 @@ body:has(.settings-dialog[open]) {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
   padding: 18px 0;
   color: var(--muted);
   font-size: 11px;
 }
 .app-footer > span:first-child {
   font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 .suite-panel {
   background: var(--surface);

@@ -72,6 +72,8 @@ pub(super) struct Manifest {
     pub heading: String,
     pub subheading: String,
     pub generated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regressify_version: Option<String>,
     pub suites: Vec<SuiteSummary>,
 }
 
@@ -789,6 +791,15 @@ pub(crate) fn generate_site(
             .unwrap_or("Snapshot regression test results")
             .into(),
         generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        regressify_version: Some(
+            concat!(
+                env!("CARGO_PKG_VERSION"),
+                " (",
+                env!("BINARY_GIT_HASH"),
+                ")"
+            )
+            .into(),
+        ),
         suites: summaries,
     };
     for (name, bytes) in FRONTEND_FILES {
@@ -1519,6 +1530,7 @@ mod tests {
             heading: "Private heading".into(),
             subheading: "Private subheading".into(),
             generated_at: "2026-09-24T00:00:00Z".into(),
+            regressify_version: None,
             suites: vec![SuiteSummary {
                 id: "private-suite".into(),
                 display_name: None,
@@ -1634,6 +1646,12 @@ mod tests {
     #[test]
     fn snapshot_text_precedence_empty_values_and_hostile_text_are_preserved_safely() {
         let temp = tempfile::tempdir().unwrap();
+        let legacy: Manifest = serde_json::from_value(serde_json::json!({
+            "version": 2, "title": "", "heading": "", "subheading": "",
+            "generatedAt": "2026-09-24T00:00:00Z", "suites": []
+        }))
+        .unwrap();
+        assert!(legacy.regressify_version.is_none());
         let workspace = WorkspaceConfig {
             snapshot_title: Some("Shop <report> & \"results\"".into()),
             snapshot_heading: Some("Shop & results".into()),
@@ -1642,6 +1660,15 @@ mod tests {
         };
         generate_site(temp.path(), &[], &args(), &workspace).unwrap();
         let (_, manifest) = read_manifest(&temp.path().canonicalize().unwrap()).unwrap();
+        assert_eq!(
+            manifest.regressify_version.as_deref(),
+            Some(concat!(
+                env!("CARGO_PKG_VERSION"),
+                " (",
+                env!("BINARY_GIT_HASH"),
+                ")"
+            ))
+        );
         assert_eq!(manifest.heading, "Shop & results");
         assert_eq!(manifest.subheading, "**Staging** <script>alert(1)</script>");
         let html = fs::read_to_string(temp.path().join("index.html")).unwrap();
@@ -2109,6 +2136,7 @@ mod tests {
             heading: "Review".into(),
             subheading: String::new(),
             generated_at: "2026-09-23T00:00:00Z".into(),
+            regressify_version: None,
             suites: vec![SuiteSummary {
                 id: "one".into(),
                 display_name: None,
@@ -2269,6 +2297,7 @@ mod tests {
             heading: "Review".into(),
             subheading: String::new(),
             generated_at: "2026-09-23T00:00:00Z".into(),
+            regressify_version: None,
             suites: vec![SuiteSummary {
                 id: "one".into(),
                 display_name: None,
