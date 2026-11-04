@@ -2426,8 +2426,8 @@ mod tests {
                 "_snapshot/images/one/{pixels}-preview/{}",
                 Path::new(path).file_name().unwrap().to_str().unwrap()
             ));
-            if pixels == "test" {
-                expected.insert("_snapshot/images/one/test-thumbnail/home.png".into());
+            if pixels == "diff" {
+                expected.insert("_snapshot/images/one/diff-thumbnail/home_diff.png".into());
             }
         }
         let report = serde_json::json!({ "id": "one", "tests": [{ "status": "fail", "pair": {

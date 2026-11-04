@@ -98,7 +98,7 @@ Verified: 2026-10-17
   version at build time. Suite/image titles prepend the route's decoded suite name;
   the overview restores the report title.
 - [Suite previews](../../src/snapshot/capture_report.rs) are fast deterministic PNGs:
-  full-image previews at most 640x480, top-cropped grid thumbnails at most 640x400.
+  full-image previews at most 640x480, full-width grid thumbnails at most 640x400 (first-diff crop when diff exists, top-cropped test otherwise, or top-cropped reference when no test was captured; short thumbnails align to the top).
   [ReportImage](../../frontend/src/components/ui.tsx) bounds active sources; review uses originals.
 - [Theme startup](../../frontend/index.html) applies saved/system appearance before React.
   [ThemeControl](../../frontend/src/App.tsx) stays mounted in Settings > Appearance,

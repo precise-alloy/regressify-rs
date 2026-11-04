@@ -289,7 +289,10 @@ version, its suite JSON version, and the manifest version without renaming files
 Optional capture `previews` fields contain `reference`, `test`, `diff`, and `grid`
 image URLs under the same version-2 schema and path-validation rules. The
 [publisher](../src/snapshot/capture_report.rs) creates full-image previews bounded
-to 640 x 480 and top-cropped grid thumbnails bounded to 640 x 400, without upscaling.
+to 640 x 480 and full-width grid thumbnails bounded to 640 x 400 (cropped vertically
+around the first diff area when a diff exists, at the top of the test capture
+otherwise, or at the top of the reference capture when no test image was captured;
+short pages align to the top of the thumbnail area), without upscaling.
 It uses fast thumbnail resizing and PNG Fast/Sub encoding without copied metadata
 or expensive optimization passes. Identical inputs produce byte-identical outputs;
 tests compare complete encoded bytes across repeated generations. Only the grid's
