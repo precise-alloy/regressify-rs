@@ -73,17 +73,36 @@ jobs:
       - name: Default CLI regression tests
         run: cargo test --locked --all-targets
 
-  windows-gui:
-    name: Windows desktop tests and build
+  windows-gui-tests:
+    name: Windows desktop tests (shard ${{ matrix.shard }}/4)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: win-gui
+      # Same test set as `cargo test --all-targets`, split by a stable hash of the test name,
+      # so new tests are picked up automatically. Doctests are not part of --all-targets.
+      - name: Desktop models and native interaction tests
+        run: cargo nextest run --locked --features gui-tests --all-targets --no-fail-fast --partition hash:${{ matrix.shard }}/4
+
+  windows-gui-build:
+    name: Windows desktop build
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: win-gui
-      - name: Desktop models and native interaction tests
-        run: cargo test --locked --features gui-tests --all-targets
+          shared-key: win-gui-build
       - name: Build standalone desktop
         run: cargo build --locked --features gui --bin regressify-desktop
 
