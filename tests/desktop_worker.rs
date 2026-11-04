@@ -438,6 +438,40 @@ fn cli_partial_runs_succeed_beside_an_unloadable_unrelated_suite() {
 
 #[test]
 #[ignore = "requires cached managed Chromium; uses loopback fixtures only"]
+fn cli_scoped_runs_on_fresh_output_keep_states_ignored() {
+    let site = LoggingSite::new();
+    let root = tempfile::tempdir().unwrap();
+    logging_workspace(root.path(), &site, 2, false);
+    let output = root.path().join(".regressify");
+    let gitignore = output.join(".gitignore");
+    assert!(!output.exists());
+    let scoped = |run_id: &str, command: &str| {
+        let result = logging_cli_command(root.path(), run_id, command, false, false)
+            .args(["--test-suite", "suite-0"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{run_id}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    // Partial runs skip the snapshot, which used to be the only writer of these rules.
+    scoped("fresh-ref", "ref");
+    let rules = std::fs::read_to_string(&gitignore).unwrap();
+    assert!(
+        rules.lines().any(|line| line.trim() == "/states/"),
+        "{rules}"
+    );
+    assert!(!output.join("index.html").exists());
+
+    std::fs::write(&gitignore, b"custom\n").unwrap();
+    scoped("edited-test", "test");
+    assert_eq!(std::fs::read(&gitignore).unwrap(), b"custom\n");
+}
+
+#[test]
+#[ignore = "requires cached managed Chromium; uses loopback fixtures only"]
 fn standalone_cli_persists_passed_and_failed_logs_without_desktop_initialization() {
     use regressify::diagnostics::{
         journal::{ArchiveState, JournalReader},
@@ -933,6 +967,7 @@ fn desktop_test_and_reference_runs_skip_the_post_run_report() {
         .unwrap();
     }
     let output = workspace.path().join(".regressify");
+    assert!(!output.exists());
     let extra_reference = output.join("scoped/bitmaps_reference/extra__FINAL.png");
     // The CLI would rebuild after the whole-workspace runs; the desktop never does.
     for (command, run_id, selected, scenarios) in [
@@ -1019,6 +1054,14 @@ fn desktop_test_and_reference_runs_skip_the_post_run_report() {
                 !output.join(path).exists(),
                 "{run_id}: desktop {} run generated {path}",
                 command.label()
+            );
+        }
+        if run_id == "scoped-reference" {
+            // The fresh output still gets the ignore rules the skipped snapshot used to write.
+            let rules = std::fs::read_to_string(output.join(".gitignore")).unwrap();
+            assert!(
+                rules.lines().any(|line| line.trim() == "/states/"),
+                "{run_id}: {rules}"
             );
         }
         for name in &selected {

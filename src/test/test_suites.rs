@@ -1753,6 +1753,8 @@ pub async fn exec_test_suites(args: TestArgs, snapshot_policy: PostRunSnapshot) 
     validate_suite_capture_keys(&workspace_config, &parsed_suites)?;
     validate_external_capture_files(root_dir, &workspace_config, &parsed_suites)?;
     ensure_capture_run_directories_are_new(common::REGRESSIFY_DIR.get_required()?, &parsed_suites)?;
+    // Before any capture can persist browser state, whatever the snapshot policy.
+    crate::snapshot::ensure_output_gitignore(common::REGRESSIFY_DIR.get_required()?)?;
     let snapshot_decision =
         post_run_snapshot_decision(snapshot_policy, &discovered, &parsed_suites, &scenarios);
 
@@ -1962,6 +1964,8 @@ pub async fn exec_ref(args: RefArgs, snapshot_policy: PostRunSnapshot) -> Result
     validate_suite_capture_keys(&workspace_config, &parsed_suites)?;
     validate_external_capture_files(root_dir, &workspace_config, &parsed_suites)?;
     ensure_capture_run_directories_are_new(common::REGRESSIFY_DIR.get_required()?, &parsed_suites)?;
+    // Before any capture can persist browser state, whatever the snapshot policy.
+    crate::snapshot::ensure_output_gitignore(common::REGRESSIFY_DIR.get_required()?)?;
     let snapshot_decision =
         post_run_snapshot_decision(snapshot_policy, &discovered, &parsed_suites, &scenarios);
 

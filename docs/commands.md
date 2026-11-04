@@ -204,6 +204,11 @@ and print a reminder. Run `regressify snapshot`
 without a filter to refresh every suite. Desktop Run Test and Run Reference
 never rebuild it; use Build Report or Deploy.
 
+`test` and `ref` create `<output>/.gitignore` with the managed ignore rules
+when it is missing, so persisted browser state and run artifacts stay out of
+Git before any report exists. An existing file is left unchanged; rebuilding
+the combined report still writes the managed rules.
+
 ## Run History and Cleanup
 
 Each suite keeps a local `runs.json` registry in its output directory. A run becomes

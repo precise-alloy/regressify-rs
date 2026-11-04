@@ -6,6 +6,7 @@ mod site;
 
 pub use actions::snapshot;
 pub use helpers::get_asset_version;
+pub(crate) use site::ensure_output_gitignore;
 #[cfg(all(test, feature = "desktop"))]
 pub(crate) use site::generate_site;
 #[cfg(feature = "desktop")]
