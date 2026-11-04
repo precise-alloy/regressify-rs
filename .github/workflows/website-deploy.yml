@@ -30,6 +30,9 @@ jobs:
     name: Deploy website and MCP from the deployed release
     if: github.repository == 'precise-alloy/regressify-rs'
     runs-on: ubuntu-latest
+    environment:
+      name: website-production
+      url: https://regressify.eshn.dev
     env:
       SITE_ORIGIN: https://regressify.eshn.dev
       CLI_ARCHIVE: regressify-cli-x86_64-unknown-linux-gnu.zip

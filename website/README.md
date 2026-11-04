@@ -207,6 +207,14 @@ catalog builder it uses the release CLI's legacy export, after verifying the CLI
 against the feed's SHA-256. The update feed and MCP catalog stay on the deployed
 release; website and Worker code can change.
 
+Both workflows use the `website-production` GitHub environment on their `deploy`
+job, with `https://regressify.eshn.dev` as its URL. GitHub displays this link in
+the workflow run graph and deployment history; hosting remains on Cloudflare.
+Create the environment under **Settings > Environments > New environment**.
+Existing repository-level Cloudflare secrets do not need to move. Environment
+protection rules apply to both workflows: if restricting deployment branches and
+tags, allow `master` and release tags (`v*`); required reviewers pause deployment.
+
 That configuration deploys one Worker, `regressify`, on the custom domain
 `regressify.eshn.dev` with `workers.dev` and preview URLs disabled. `dist/` serves
 static assets with `404.html` for unknown paths. The website-owned

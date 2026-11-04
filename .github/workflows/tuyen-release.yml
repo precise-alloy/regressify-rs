@@ -303,6 +303,9 @@ jobs:
     needs: [set-matrix, publish, mcp-catalog]
     name: Deploy website and MCP after release verification
     runs-on: ubuntu-latest
+    environment:
+      name: website-production
+      url: https://regressify.eshn.dev
     steps:
       - uses: actions/checkout@v6
         with:
