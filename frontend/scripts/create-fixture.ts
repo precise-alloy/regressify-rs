@@ -215,6 +215,7 @@ export async function createFixture() {
     heading: "A clear view of every change.",
     subheading: "**Northstar** / Production baseline compared with staging",
     generatedAt: "2026-09-23T09:42:00Z",
+    regressifyVersion: "0.0.0 (fixture)",
     suites: [],
   };
   const names = [

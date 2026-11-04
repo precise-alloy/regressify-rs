@@ -556,6 +556,8 @@ prepend the suite name as `suite name | snapshotTitle`. `snapshotHeading` is the
 report heading in the compact top bar on every page, with `snapshotSubheading`
 on its own line below it. The overview's page heading is `Snapshot Overview`, with
 the generated date and time beneath it and no breadcrumb row.
+The report footer links to Regressify and identifies the version and commit that
+generated the report. Older reports without this metadata omit the version.
 The title and heading are plain text. The subheading supports safe Markdown text,
 emphasis, lists, code, and HTTP(S) links; raw HTML and embedded images are omitted.
 An empty string is an explicit value, while `null` falls back to the built-in default.

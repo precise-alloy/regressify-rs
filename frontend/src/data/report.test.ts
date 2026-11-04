@@ -551,6 +551,10 @@ describe("snapshot contract", () => {
       suites: [],
     };
     expect(manifestSchema.parse(manifest).suites).toEqual([]);
+    expect(
+      manifestSchema.parse({ ...manifest, regressifyVersion: "1.2.3 (abc123)" }).regressifyVersion,
+    ).toBe("1.2.3 (abc123)");
+    expect(manifestSchema.safeParse({ ...manifest, regressifyVersion: 123 }).success).toBe(false);
     expect(manifestSchema.safeParse({ ...manifest, version: 1 }).success).toBe(false);
     const suite = {
       id: "shop",

@@ -380,7 +380,10 @@ function Shell() {
             </main>
             {!imageMatch && (
               <footer className="app-footer">
-                <span>Regressify</span>
+                <span>
+                  <a href="https://regressify.eshn.dev/">Regressify</a>
+                  {manifest.regressifyVersion && ` ${manifest.regressifyVersion}`}
+                </span>
                 <span>Visual regression report</span>
               </footer>
             )}
