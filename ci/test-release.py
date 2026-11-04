@@ -592,6 +592,20 @@ gh() {
                 self.assertEqual({row["application"] for row in payloads}, expected)
                 self.assertTrue(all(row["target"] == "x86_64-pc-windows-msvc" for row in payloads))
 
+    def test_website_deployments_publish_environment_url(self):
+        for workflow, origin in (
+            (WORKFLOW, WORKFLOW["env"]["RELEASE_ORIGIN"]),
+            (WEBSITE_WORKFLOW, WEBSITE_WORKFLOW["jobs"]["deploy"]["env"]["SITE_ORIGIN"]),
+        ):
+            with self.subTest(workflow=workflow["name"]):
+                self.assertEqual(workflow["jobs"]["deploy"].get("environment"), {
+                    "name": "website-production",
+                    "url": origin,
+                })
+                for name, job in workflow["jobs"].items():
+                    if name != "deploy":
+                        self.assertNotIn("environment", job)
+
     def test_website_workflow_redeploys_the_deployed_release(self):
         self.assertEqual(WEBSITE_WORKFLOW["on"]["push"]["branches"], ["master"])
         self.assertEqual(WEBSITE_WORKFLOW["on"]["push"]["paths"], [

@@ -49,6 +49,11 @@ Verified: 2026-10-29
   the live feed bytes after deploy.
   Docs deploys and release deploys share no concurrency group; that overlap risk
   was accepted on 2026-10-29.
+- Both [release](../../.github/workflows/tuyen-release.yml) and
+  [website](../../.github/workflows/website-deploy.yml) `deploy` jobs attach to
+  `website-production` with `https://regressify.eshn.dev` as their environment URL
+  (verified 2026-11-04). This supplies GitHub's run-graph link without GitHub Pages;
+  environment protection rules apply to both workflows, including release tags.
 - Workerd rejects `fetch` with `redirect: 'error'`; the admin feed uses `manual`
   and rejects non-2xx responses without forwarding bearer credentials. Website
   tests are scoped to `src` so MCP test files cannot pollute discovery.
