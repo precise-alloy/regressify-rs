@@ -249,7 +249,9 @@ impl Default for InstallHandle {
     }
 }
 
-/// Runs the install and publishes progress; the final state is always `Restart` or `Failed`.
+/// Runs the install and publishes progress. It never publishes the terminal state: the caller
+/// does that once `InstallLock` is dropped, so `Restart`/`Failed` cannot unblock quit or retry
+/// while `.Regressify.lock` still exists.
 pub fn perform_install(
     bundle: &Path,
     cache: &Path,
@@ -275,11 +277,15 @@ pub fn perform_install(
             })
         },
     );
-    match &result {
-        Ok(()) => handle.set(InstallState::Restart),
-        Err(error) => handle.set(InstallState::Failed(failure_reason(error))),
-    }
     result
+}
+
+/// Publishes the final `Restart` or `Failed` state. Call only after `InstallLock` is dropped.
+fn publish_install_result(handle: &InstallHandle, result: &Result<()>) {
+    handle.set(match result {
+        Ok(()) => InstallState::Restart,
+        Err(error) => InstallState::Failed(failure_reason(error)),
+    });
 }
 
 /// UI text for a failed install. Only claims the app is unchanged when that is true: a failed
@@ -335,9 +341,8 @@ pub fn install_macos_update(
     current: &str,
     handle: &InstallHandle,
 ) -> Result<()> {
-    let run = || -> Result<()> {
+    install_scoped(bundle, handle, |lock| {
         let current: Version = current.parse()?;
-        let lock = macos_install::InstallLock::acquire(bundle)?;
         let plan = feed.macos_install_plan(current)?;
         let deps = macos_install::Deps {
             open: &open_archive,
@@ -345,15 +350,19 @@ pub fn install_macos_update(
             verify: &|path| run_codesign(&["--verify", "--deep", "--strict"], path),
             ops: &macos_install::RealOps,
         };
-        install_locked(&lock, bundle, cache, current, &plan, &deps, handle)
-    };
-    let result = run();
-    if let Err(error) = &result {
-        // `perform_install` already published its own failure; this covers earlier steps.
-        if !matches!(handle.get(), InstallState::Failed(_)) {
-            handle.set(InstallState::Failed(failure_reason(error)));
-        }
-    }
+        install_locked(lock, bundle, cache, current, &plan, &deps, handle)
+    })
+}
+
+/// Holds the install lock for `body` only, then publishes the terminal state: the lock is gone
+/// before the UI can see `Restart`/`Failed`.
+fn install_scoped(
+    bundle: &Path,
+    handle: &InstallHandle,
+    body: impl FnOnce(&macos_install::InstallLock) -> Result<()>,
+) -> Result<()> {
+    let result = macos_install::InstallLock::acquire(bundle).and_then(|lock| body(&lock));
+    publish_install_result(handle, &result);
     result
 }
 
@@ -3148,7 +3157,7 @@ mod tests {
 
     #[test]
     fn install_state_messages_and_final_states() {
-        use super::{InstallHandle, InstallState, perform_install};
+        use super::{InstallHandle, InstallState, perform_install, publish_install_result};
         let say = |state: InstallState| state.message();
         assert_eq!(
             say(InstallState::Downloading {
@@ -3192,7 +3201,9 @@ mod tests {
             ops: &super::macos_install::RealOps,
         };
         let handle = InstallHandle::new();
-        assert!(perform_install(&app, cache.path(), &plan, &deps, &handle).is_err());
+        let result = perform_install(&app, cache.path(), &plan, &deps, &handle);
+        assert!(result.is_err());
+        publish_install_result(&handle, &result);
         assert!(matches!(handle.get(), InstallState::Failed(reason) if reason.contains("offline")));
         assert_eq!(
             std::fs::read(app.join("Contents/MacOS/regressify-desktop")).unwrap(),
@@ -3442,6 +3453,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn terminal_install_state_is_published_after_the_lock_is_released() {
+        use super::{InstallHandle, InstallState, install_scoped};
+        for succeed in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let app = fake_installed_app(dir.path());
+            let lock_dir = dir.path().join(".Regressify.lock");
+            let handle = InstallHandle::new();
+            let result = install_scoped(&app, &handle, |_lock| {
+                // While the lock is held the UI must still see an in-progress state.
+                assert!(lock_dir.exists());
+                assert!(handle.get().in_progress(), "{:?}", handle.get());
+                if succeed {
+                    Ok(())
+                } else {
+                    anyhow::bail!("boom")
+                }
+            });
+            assert_eq!(result.is_ok(), succeed);
+            assert!(!lock_dir.exists());
+            assert_eq!(
+                matches!(handle.get(), InstallState::Restart),
+                succeed,
+                "{:?}",
+                handle.get()
+            );
+            assert_eq!(matches!(handle.get(), InstallState::Failed(_)), !succeed);
+        }
+        // A concurrent observer (the UI thread) must never see a terminal state while the lock
+        // directory still exists.
+        for _ in 0..200 {
+            let dir = tempfile::tempdir().unwrap();
+            let app = fake_installed_app(dir.path());
+            let lock_dir = dir.path().join(".Regressify.lock");
+            let handle = InstallHandle::new();
+            let watcher = {
+                let (handle, lock_dir) = (handle.clone(), lock_dir.clone());
+                std::thread::spawn(move || {
+                    while handle.get().in_progress() {
+                        std::hint::spin_loop();
+                    }
+                    lock_dir.exists()
+                })
+            };
+            let _ = install_scoped(&app, &handle, |_| Ok(()));
+            assert!(
+                !watcher.join().unwrap(),
+                "terminal state visible under the lock"
+            );
+        }
+        // Failing to take the lock still ends in `Failed`.
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let _held = macos_install::InstallLock::acquire(&app).unwrap();
+        let handle = InstallHandle::new();
+        assert!(install_scoped(&app, &handle, |_| Ok(())).is_err());
+        assert!(matches!(handle.get(), InstallState::Failed(_)));
+    }
+
     #[cfg(unix)]
     #[test]
     fn install_revalidates_bundle_ownership_under_the_lock() {
@@ -3491,7 +3561,7 @@ mod tests {
 
     #[test]
     fn failure_text_only_claims_unchanged_when_it_is() {
-        use super::{InstallHandle, InstallState, perform_install};
+        use super::{InstallHandle, InstallState, perform_install, publish_install_result};
         let dir = tempfile::tempdir().unwrap();
         let app = fake_installed_app(dir.path());
         let ok = |_: &std::path::Path| Ok(());
@@ -3511,7 +3581,9 @@ mod tests {
             ops: &macos_install::RealOps,
         };
         let handle = InstallHandle::new();
-        assert!(perform_install(&app, cache.path(), &plan, &deps, &handle).is_err());
+        let result = perform_install(&app, cache.path(), &plan, &deps, &handle);
+        assert!(result.is_err());
+        publish_install_result(&handle, &result);
         assert!(
             handle
                 .get()
@@ -3551,7 +3623,9 @@ mod tests {
             ops: &ops,
         };
         let handle = InstallHandle::new();
-        assert!(perform_install(&app, cache.path(), &plan, &deps, &handle).is_err());
+        let result = perform_install(&app, cache.path(), &plan, &deps, &handle);
+        assert!(result.is_err());
+        publish_install_result(&handle, &result);
         let InstallState::Failed(text) = handle.get() else {
             panic!("expected a failure")
         };
