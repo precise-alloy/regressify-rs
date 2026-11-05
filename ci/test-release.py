@@ -591,10 +591,12 @@ gh() {
                     self.assertEqual(actual_step.get("id"), "cache")
                 actual_step.pop("id", None)
                 if "env" in expected_step:
-                    # The release version and update origin only reach the regressify crate, which is never cached.
-                    expected_step["env"] = {key: value for key, value in expected_step["env"].items() if key not in ("REGRESSIFY_DESKTOP_VERSION", "REGRESSIFY_UPDATE_ORIGIN")}
-                    if "env" in actual_step:
-                        actual_step["env"] = {key: value for key, value in actual_step["env"].items() if key != "REGRESSIFY_UPDATE_ORIGIN"}
+                    # The release version only reaches the regressify crate, which is never cached.
+                    expected_step["env"] = {key: value for key, value in expected_step["env"].items() if key != "REGRESSIFY_DESKTOP_VERSION"}
+                if name == "Build artifacts":
+                    # The macOS-only update origin (empty elsewhere) is set on the release's Build artifacts
+                    # step; the warm-up omits it. Every other step, including the Windows desktop build, must match.
+                    expected_step["env"] = {key: value for key, value in expected_step["env"].items() if key != "REGRESSIFY_UPDATE_ORIGIN"}
                 if name.startswith("Build "):
                     condition = expected_step["if"].removeprefix("${{ ").removesuffix(" }}")
                     expected_step["if"] = "${{ steps.cache.outputs.cache-hit != 'true' && " + condition + " }}"
