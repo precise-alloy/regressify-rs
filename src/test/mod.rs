@@ -21,6 +21,7 @@ mod test_suites;
 pub(crate) mod browser_tests;
 
 pub use browsers::fetcher;
+pub use test_suites::PostRunSnapshot;
 pub use test_suites::exec_ref;
 pub use test_suites::exec_test_suites;
 

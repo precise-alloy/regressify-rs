@@ -3,6 +3,51 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Post-Run Snapshot Scope (2026-11-04)
+
+- Resolved in source: `test`/`ref` always rebuilt the combined snapshot for every
+  output directory. A one-scenario desktop run spent about 57 of 79 seconds on
+  unrelated suites. [Orchestration](src/test/test_suites.rs) now rebuilds only
+  after whole-workspace full runs. Partial CLI runs print a `regressify snapshot`
+  reminder; the [desktop worker](src/desktop/worker.rs) always skips it. The
+  default `desktop_capture_runs_skip_the_post_run_report_and_keep_their_operation`
+  unit test guards the worker policy. Ignored cached-Chromium tests
+  `cli_rebuilds_the_report_only_after_whole_workspace_full_runs`,
+  `cli_partial_runs_succeed_beside_an_unloadable_unrelated_suite`, and
+  `desktop_test_and_reference_runs_skip_the_post_run_report` cover scoped and
+  single-scenario `ref`/`test`, including baseline promotion. The CLI tests fail
+  with the old rebuild-always behavior; the desktop test fails when the worker uses
+  the CLI policy.
+- Removing the scoped rebuild also removed these verified defects for desktop and
+  partial CLI runs. A broken or locked unrelated suite made a successful run exit
+  non-zero after baseline promotion. Stop during the report phase reported a
+  cancellation after promotion. Lock contention between concurrent processes
+  failed otherwise successful runs. Only the unloadable-suite case has a direct
+  regression test; desktop runs no longer have a report phase to cancel.
+- Open: [`generate_site`](src/snapshot/site.rs) has no output-level lock around
+  `publish_staged_files` and `prune_generated_files`. `.staging.lock` covers only
+  staging creation ([staging](src/run_history/staging.rs)). Concurrent whole-workspace
+  runs, `snapshot`, Build Report, or Deploy on one output can prune each other's
+  assets.
+- Open: publication overwrites stable paths without kill-safe recovery; rollback
+  runs only on returned errors. A killed process can leave a torn site that makes
+  later suite rename/delete fail until regeneration. Abandoned `.staging`
+  payloads hold full image copies and are swept only before deployment.
+- Open: one unloadable suite, including an orphan output folder, fails a
+  whole-workspace rebuild instead of warning like the desktop
+  [Results catalog](src/desktop/results.rs).
+- Open: `progress::Event::Compared` has no run ID, and live progress keys captures
+  by suite and capture ([progress](src/progress.rs)). On-demand comparison of an
+  older run inside a worker could overwrite the current run's activity rows; desktop
+  `test`/`ref` no longer trigger it, while Build Report and Deploy still can.
+- Open: after a scenario-only `ref`, the snapshot and Results pair the new live
+  reference ([`resolve_image_source`](src/snapshot/capture_report.rs)) with the
+  old default run's test image, diff, and status, so that capture's card is
+  internally inconsistent until a new full-suite run.
+- By design, not a defect: scenario-only reruns never replace the latest
+  completed full-suite default, so a rerun of one timed-out scenario reaches
+  snapshot or deployment only after a new full-suite run.
+
 ## Landing Preview tiny_http Connection Starvation (2026-11-03)
 
 - Open hypothesis: the desktop landing preview in

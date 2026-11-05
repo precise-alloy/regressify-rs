@@ -1737,7 +1737,10 @@ data never changes a capture's pass/fail status.
 Runs provides direct Run Test, Run Reference, Approve Results, and Compare
 Results buttons. There is no command-mode selector followed by a generic Run.
 More actions provides Build Report, Optimize Images, Install Chromium, and
-Initialize Workspace. Navigator rows and the checkboxes in Runs support multiple
+Initialize Workspace. Run Test and Run Reference save captures, comparisons,
+and baselines but do not rebuild the local web report at `<output>/index.html`;
+Results reads run reports directly, and Build Report or Deploy regenerates the
+web report for the selected suites. Navigator rows and the checkboxes in Runs support multiple
 selections and All. No selection disables suite commands, never an
 implicit all-suite run. Invalid suites remain visible for
 repair and are excluded from Select all. Editor Run Suite Test and Run Suite

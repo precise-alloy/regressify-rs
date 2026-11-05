@@ -194,6 +194,18 @@ fn logging_cli(
     disabled: bool,
     skip_compare: bool,
 ) -> Output {
+    logging_cli_command(root, run, command, disabled, skip_compare)
+        .output()
+        .unwrap()
+}
+
+fn logging_cli_command(
+    root: &Path,
+    run: &str,
+    command: &str,
+    disabled: bool,
+    skip_compare: bool,
+) -> Command {
     let mut process = Command::new(env!("CARGO_BIN_EXE_regressify"));
     process
         .args(["--root"])
@@ -217,7 +229,250 @@ fn logging_cli(
     if skip_compare {
         process.arg("--skip-compare");
     }
-    process.output().unwrap()
+    process
+}
+
+#[test]
+#[ignore = "requires cached managed Chromium; uses loopback fixtures only"]
+fn cli_rebuilds_the_report_only_after_whole_workspace_full_runs() {
+    let site = LoggingSite::new();
+    let root = tempfile::tempdir().unwrap();
+    logging_workspace(root.path(), &site, 2, false);
+    // A two-scenario suite separates "every suite selected" from "every scenario run".
+    let scenarios = ["page", "extra"].map(|id| {
+        serde_json::json!({
+            "id": id,
+            "label": format!("Suite 2 {id}"),
+            "url": format!("{}/capture", site.origin),
+            "selectors": ["viewport"],
+        })
+    });
+    std::fs::write(
+        root.path().join("visual_tests/suite-2.tests.json"),
+        serde_json::to_vec(&serde_json::json!({ "scenarios": scenarios })).unwrap(),
+    )
+    .unwrap();
+    let output = root.path().join(".regressify");
+    let published = |label: &str| {
+        [
+            "index.html",
+            "_snapshot/data/suites/suite-0.json",
+            "_snapshot/data/suites/suite-1.json",
+        ]
+        .map(|path| {
+            std::fs::read(output.join(path))
+                .unwrap_or_else(|error| panic!("{label}: missing published {path}: {error}"))
+        })
+    };
+    let run = |command: &mut Command, label: &str| {
+        let result = command.output().unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr).into_owned();
+        assert!(result.status.success(), "{label}: {stderr}");
+        stderr
+    };
+    let hint = "Report not regenerated for a partial run";
+
+    let stderr = run(
+        &mut logging_cli_command(root.path(), "baseline", "ref", false, false),
+        "whole-workspace ref",
+    );
+    assert!(!stderr.contains(hint), "{stderr}");
+    let baseline = published("whole-workspace ref");
+
+    // Partial runs must not reload, rewrite, or prune unrelated suites' report data.
+    let every_suite_partial_scenarios = [
+        "--scenario",
+        "suite-0:page",
+        "--scenario",
+        "suite-1:page",
+        "--scenario",
+        "suite-2:page",
+    ];
+    let extra_references = ["desktop", "mobile"].map(|viewport| {
+        output.join(format!(
+            "suite-2/bitmaps_reference/extra_{viewport}__VIEWPORT.png"
+        ))
+    });
+    for reference in &extra_references {
+        // A single-scenario reference must still promote its baseline.
+        std::fs::remove_file(reference).unwrap();
+    }
+    for (label, run_id, command, filter) in [
+        (
+            "scenario ref",
+            "scenario-ref",
+            "ref",
+            &["--scenario", "suite-2:extra"][..],
+        ),
+        (
+            "suite ref",
+            "suite-ref",
+            "ref",
+            &["--test-suite", "suite-0"][..],
+        ),
+        (
+            "suite test",
+            "suite-test",
+            "test",
+            &["--test-suite", "suite-0"][..],
+        ),
+        (
+            "scenario subset test",
+            "subset-test",
+            "test",
+            &every_suite_partial_scenarios[..],
+        ),
+    ] {
+        let mut command = logging_cli_command(root.path(), run_id, command, false, false);
+        command.args(filter);
+        let stderr = run(&mut command, label);
+        assert!(stderr.contains(hint), "{label}: {stderr}");
+        assert!(stderr.contains("regressify snapshot"), "{label}: {stderr}");
+        assert_eq!(
+            published(label),
+            baseline,
+            "{label} changed the published report"
+        );
+    }
+    for report in [
+        "suite-2/bitmaps_test/scenario-ref/report.json",
+        "suite-0/bitmaps_test/suite-ref/report.json",
+        "suite-0/bitmaps_test/suite-test/report.json",
+        "suite-2/bitmaps_test/subset-test/report.json",
+    ] {
+        assert!(
+            output.join(report).is_file(),
+            "Partial runs must still capture and report: {report}"
+        );
+    }
+    for reference in &extra_references {
+        assert!(reference.is_file(), "Missing {}", reference.display());
+    }
+
+    // Selecting every scenario explicitly is a whole-workspace run, as is no filter.
+    let mut every_scenario = logging_cli_command(root.path(), "explicit", "test", false, false);
+    every_scenario
+        .args(every_suite_partial_scenarios)
+        .args(["--scenario", "suite-2:extra"]);
+    for (label, run_id, command) in [
+        (
+            "explicit whole-workspace test",
+            "explicit",
+            &mut every_scenario,
+        ),
+        (
+            "whole-workspace test",
+            "whole",
+            &mut logging_cli_command(root.path(), "whole", "test", false, false),
+        ),
+    ] {
+        let stderr = run(command, label);
+        assert!(!stderr.contains(hint), "{label}: {stderr}");
+        for suite in ["suite-0", "suite-1", "suite-2"] {
+            let summary: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output.join(format!("_snapshot/data/suites/{suite}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(summary["runId"], run_id, "{label}: {suite}");
+        }
+        // Later tests compare against the baseline the single-scenario ref promoted.
+        let report: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output.join(format!("suite-2/bitmaps_test/{run_id}/report.json")))
+                .unwrap(),
+        )
+        .unwrap();
+        let extra = report["tests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|test| {
+                test["pair"]["fileName"]
+                    .as_str()
+                    .is_some_and(|name| name.starts_with("extra_"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(extra.len(), 2, "{label}: {report}");
+        assert!(
+            extra.iter().all(|test| test["status"] == "pass"),
+            "{label}: {report}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires cached managed Chromium; uses loopback fixtures only"]
+fn cli_partial_runs_succeed_beside_an_unloadable_unrelated_suite() {
+    let site = LoggingSite::new();
+    let root = tempfile::tempdir().unwrap();
+    logging_workspace(root.path(), &site, 2, false);
+    let baseline = logging_cli(root.path(), "baseline", "ref", false, false);
+    assert!(
+        baseline.status.success(),
+        "{}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    // Before the fix, every run reloaded this suite and exited non-zero after
+    // its own captures, comparisons, and baseline promotion had succeeded.
+    std::fs::write(
+        root.path()
+            .join(".regressify/suite-1/bitmaps_test/baseline/report.json"),
+        b"{",
+    )
+    .unwrap();
+    for (run_id, command) in [("partial-ref", "ref"), ("partial-test", "test")] {
+        let result = logging_cli_command(root.path(), run_id, command, false, false)
+            .args(["--test-suite", "suite-0"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(result.status.success(), "{run_id}: {stderr}");
+        assert!(
+            !stderr.contains("suite-1"),
+            "{run_id} touched the unrelated suite: {stderr}"
+        );
+        assert!(
+            root.path()
+                .join(format!(
+                    ".regressify/suite-0/bitmaps_test/{run_id}/report.json"
+                ))
+                .is_file(),
+            "{run_id}: {stderr}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires cached managed Chromium; uses loopback fixtures only"]
+fn cli_scoped_runs_on_fresh_output_keep_states_ignored() {
+    let site = LoggingSite::new();
+    let root = tempfile::tempdir().unwrap();
+    logging_workspace(root.path(), &site, 2, false);
+    let output = root.path().join(".regressify");
+    let gitignore = output.join(".gitignore");
+    assert!(!output.exists());
+    let scoped = |run_id: &str, command: &str| {
+        let result = logging_cli_command(root.path(), run_id, command, false, false)
+            .args(["--test-suite", "suite-0"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{run_id}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    // Partial runs skip the snapshot, which used to be the only writer of these rules.
+    scoped("fresh-ref", "ref");
+    let rules = std::fs::read_to_string(&gitignore).unwrap();
+    assert!(
+        rules.lines().any(|line| line.trim() == "/states/"),
+        "{rules}"
+    );
+    assert!(!output.join("index.html").exists());
+
+    std::fs::write(&gitignore, b"custom\n").unwrap();
+    scoped("edited-test", "test");
+    assert_eq!(std::fs::read(&gitignore).unwrap(), b"custom\n");
 }
 
 #[test]
@@ -687,6 +942,210 @@ fn capture_workspaces_share_managed_chromium() {
                 .into_iter()
                 .map(|entry| entry.unwrap())
                 .any(|entry| entry.file_name().to_string_lossy().ends_with(".error.json"))
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires cached managed Chromium; uses a data URL page only"]
+fn desktop_test_and_reference_runs_skip_the_post_run_report() {
+    let _setup = desktop_launches();
+    let executable = Path::new(env!("CARGO_BIN_EXE_regressify-desktop"));
+    let workspace = tempfile::tempdir().unwrap();
+    let suites = workspace.path().join("visual_tests");
+    std::fs::create_dir_all(&suites).unwrap();
+    let page =
+        "data:text/html,<body style='background:rgb(24,128,100)'><main>Report scope</main></body>";
+    for (name, ids) in [("scoped", &["page", "extra"][..]), ("other", &["page"][..])] {
+        let scenarios = ids
+            .iter()
+            .map(|id| serde_json::json!({"id": id, "label": id, "url": page, "delay": 0, "noScrollTop": true}))
+            .collect::<Vec<_>>();
+        std::fs::write(
+            suites.join(format!("{name}.tests.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "postInteractionWait": 0,
+                "scenarios": scenarios,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let output = workspace.path().join(".regressify");
+    assert!(!output.exists());
+    let extra_reference = output.join("scoped/bitmaps_reference/extra__FINAL.png");
+    // The CLI would rebuild after the whole-workspace runs; the desktop never does.
+    for (command, run_id, selected, scenarios) in [
+        (
+            RunCommand::Reference,
+            "scoped-reference",
+            vec!["scoped"],
+            vec![],
+        ),
+        (
+            RunCommand::Reference,
+            "scenario-reference",
+            vec!["scoped"],
+            vec!["scoped:extra"],
+        ),
+        (RunCommand::Test, "scoped-test", vec!["scoped"], vec![]),
+        (
+            RunCommand::Reference,
+            "all-reference",
+            vec!["scoped", "other"],
+            vec![],
+        ),
+        (
+            RunCommand::Test,
+            "all-test",
+            vec!["scoped", "other"],
+            vec![],
+        ),
+    ] {
+        if run_id == "scenario-reference" {
+            // A single-scenario reference must still promote its baseline.
+            std::fs::remove_file(&extra_reference).unwrap();
+        }
+        let request = RunRequest {
+            root: workspace.path().into(),
+            command,
+            options: RunOptions {
+                suites: selected.iter().map(|name| name.to_string()).collect(),
+                scenarios: scenarios
+                    .iter()
+                    .map(|filter| filter.parse().unwrap())
+                    .collect(),
+                run_id: run_id.into(),
+                fetch_browser: Some(false),
+                async_capture_limit: 1,
+                async_capture_ramp_ms: 0,
+                ..Default::default()
+            },
+        };
+        let events = tempfile::NamedTempFile::new().unwrap();
+        let result = invoke_with_events(executable, &request, Some(events.path()));
+        let log = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.status.success(), "{run_id}: {log}");
+        assert!(
+            !log.contains("Report not regenerated"),
+            "{run_id}: desktop runs must not print the CLI reminder: {log}"
+        );
+        let mut phases = Vec::new();
+        let mut reader = regressify::progress::EventReader::open(events.path()).unwrap();
+        reader
+            .drain(|record| {
+                if let regressify::progress::Event::Phase { name } = record.event {
+                    phases.push(name);
+                }
+            })
+            .unwrap();
+        reader.complete().unwrap();
+        assert!(
+            phases.iter().any(|phase| phase == "Capturing scenarios"),
+            "{run_id}: {phases:?}"
+        );
+        assert!(
+            !phases
+                .iter()
+                .any(|phase| phase == "Generating report" || phase.contains("snapshot")),
+            "{run_id}: {phases:?}"
+        );
+        for path in ["index.html", "_snapshot", ".staging"] {
+            assert!(
+                !output.join(path).exists(),
+                "{run_id}: desktop {} run generated {path}",
+                command.label()
+            );
+        }
+        if run_id == "scoped-reference" {
+            // The fresh output still gets the ignore rules the skipped snapshot used to write.
+            let rules = std::fs::read_to_string(output.join(".gitignore")).unwrap();
+            assert!(
+                rules.lines().any(|line| line.trim() == "/states/"),
+                "{run_id}: {rules}"
+            );
+        }
+        for name in &selected {
+            let suite = output.join(name);
+            assert!(
+                suite.join("bitmaps_reference/page__FINAL.png").is_file(),
+                "{run_id}: missing promoted baseline for {name}"
+            );
+            assert!(
+                suite
+                    .join(format!("bitmaps_test/{run_id}/report.json"))
+                    .is_file(),
+                "{run_id}: missing run report for {name}"
+            );
+        }
+        assert!(
+            extra_reference.is_file(),
+            "{run_id}: missing extra baseline"
+        );
+        if run_id == "scoped-test" {
+            // The next test compares against the baseline the single-scenario run promoted.
+            let report: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output.join("scoped/bitmaps_test/scoped-test/report.json")).unwrap(),
+            )
+            .unwrap();
+            let extra = report["tests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|test| {
+                    test["pair"]["fileName"]
+                        .as_str()
+                        .is_some_and(|name| name.starts_with("extra"))
+                })
+                .collect::<Vec<_>>();
+            assert!(!extra.is_empty(), "{report}");
+            assert!(
+                extra.iter().all(|test| test["status"] == "pass"),
+                "{report}"
+            );
+        }
+    }
+
+    // The absence checks above cannot see a deleted or rewritten report, so seed one and repeat
+    // the whole-workspace runs after which the CLI would rebuild it.
+    let seeded = b"<!-- report built before the desktop runs -->";
+    std::fs::write(output.join("index.html"), seeded).unwrap();
+    for (command, run_id) in [
+        (RunCommand::Reference, "seeded-reference"),
+        (RunCommand::Test, "seeded-test"),
+    ] {
+        let request = RunRequest {
+            root: workspace.path().into(),
+            command,
+            options: RunOptions {
+                suites: vec!["scoped".into(), "other".into()],
+                run_id: run_id.into(),
+                fetch_browser: Some(false),
+                async_capture_limit: 1,
+                async_capture_ramp_ms: 0,
+                ..Default::default()
+            },
+        };
+        let result = invoke_with_events(executable, &request, None);
+        assert!(
+            result.status.success(),
+            "{run_id}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            std::fs::read(output.join("index.html")).unwrap(),
+            seeded,
+            "{run_id}: desktop {} run changed the existing report",
+            command.label()
+        );
+        assert!(
+            !output.join("_snapshot").exists(),
+            "{run_id}: desktop {} run generated report data",
+            command.label()
         );
     }
 }

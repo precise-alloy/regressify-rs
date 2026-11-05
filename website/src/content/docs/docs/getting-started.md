@@ -7,7 +7,7 @@ sidebar:
 # would not say which overview the card leads to.
 next:
   label: Desktop app overview
-lastUpdated: 2026-10-22
+lastUpdated: 2026-11-04
 ---
 
 This guide takes you from an empty folder to a reviewed visual check. It is adapted from the repository's
@@ -87,8 +87,10 @@ After a deployment, capture again and compare against the references:
 regressify test --test-suite alloy
 ```
 
-Results are written under `.regressify/<suite>/` and summarized in the snapshot report, which offers side-by-side,
-wipe, overlay, and diff views. In the desktop app, use the Results view instead.
+Results are written under `.regressify/<suite>/`. While `alloy` is the only suite, this run also rebuilds the snapshot
+report. Once the workspace has other suites, a run that skips any of them leaves the report unchanged; run
+`regressify snapshot` to rebuild it. The snapshot report offers side-by-side, wipe, overlay, and diff views. In the
+desktop app, use the Results view instead.
 
 Website and visual problems, such as timeouts, failed actions, and mismatches, are recorded in the report and the
 command still exits with zero. Configuration and infrastructure problems return a non-zero exit code, so CI can tell

@@ -192,8 +192,10 @@ and other VS Code settings remain explicit-init features. Run initialization
 only when these writes are intended. Read the files guide for preservation and
 failure rules. `ref` creates or updates successful
 references; failed captures do not replace good references. A later `test` makes
-new captures and comparisons. `ref` and `test` also regenerate the report
-website at `<output>/index.html`, and `snapshot` rebuilds it alone; serve the
+new captures and comparisons. `ref` and compared `test` runs that cover every
+suite and scenario in the workspace also regenerate the report website at
+`<output>/index.html`. Runs that skip any suite or scenario, and desktop runs,
+leave it unchanged, so run `snapshot` without a filter to rebuild it. Serve the
 output folder over HTTP to view it. After review, an explicitly authorized
 `regressify approve --test-suite home` promotes successful test captures from
 the latest run. These commands may modify local output and baselines.

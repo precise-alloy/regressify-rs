@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read,
+    io::{ErrorKind, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -652,6 +652,112 @@ fn publish_index(root: &Path, manifest: &Manifest) -> Result<()> {
         .replace("__SNAPSHOT_TITLE__", &escape_html(&manifest.title));
     // Publish the entry point only after all of its versioned dependencies are complete.
     output_file(root, "index.html", index.as_bytes())
+}
+
+/// Creates `<output>/.gitignore` from the managed snapshot rules when it is missing, and
+/// returns a warning when a kept path does not ignore persisted browser state in `states/`.
+// `test` and `ref` no longer always publish the snapshot, which used to be the only writer of
+// these rules, yet they keep persisted browser state (`states/`) and run artifacts out of Git.
+// Every run therefore creates them before capturing. An existing path is never followed or
+// replaced, so a user-edited file, a directory, or a link stays exactly as it is.
+pub(crate) fn ensure_output_gitignore(output: &Path) -> Result<Option<String>> {
+    fs::create_dir_all(output)
+        .with_context(|| format!("Failed to create output directory '{}'", output.display()))?;
+    let rules = FRONTEND_FILES
+        .iter()
+        .find_map(|(name, bytes)| (*name == "gitignore").then_some(*bytes))
+        .context("Bundled snapshot files have no managed gitignore")?;
+    let path = output.join(".gitignore");
+    if create_output_gitignore(&path, |file| file.write_all(rules))? {
+        return Ok(None);
+    }
+    // Snapshot publishing used to replace a differing file with the managed rules after every
+    // run; scoped and desktop runs no longer publish, so a kept file is checked instead.
+    let metadata = fs::symlink_metadata(&path)
+        .with_context(|| format!("Failed to inspect output ignore file '{}'", path.display()))?;
+    // Links are not followed: the target may sit outside the output directory.
+    if !metadata.is_file() {
+        return Ok(Some(format!(
+            "'{}' is not a regular file, so Git may not ignore persisted browser state in \
+             '/states/'. Replace it with a file that ignores '/states/'.",
+            path.display()
+        )));
+    }
+    let existing = String::from_utf8_lossy(&read_bounded(&path, MAX_REPORT_BYTES)?).into_owned();
+    Ok((!ignores_browser_state(&existing)).then(|| {
+        format!(
+            "'{}' does not ignore '/states/', so persisted browser state could be committed to \
+             Git. Add '/states/' to it, or delete it to restore the managed rules.",
+            path.display()
+        )
+    }))
+}
+
+/// Whether gitignore `rules` leave the top-level `states/` directory ignored. This recognizes
+/// the managed rule and its common spellings, plus catch-all rules and later negations; any
+/// other pattern counts as not ignoring it, so an unusual but valid file at worst warns.
+fn ignores_browser_state(rules: &str) -> bool {
+    let mut ignored = false;
+    for line in rules.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, pattern) = match line.strip_prefix('!') {
+            Some(pattern) => (true, pattern),
+            None => (false, line),
+        };
+        let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
+        let pattern = pattern.strip_suffix('/').unwrap_or(pattern);
+        if matches!(pattern, "states" | "states/**" | "*" | "**") {
+            ignored = !negated;
+        }
+    }
+    ignored
+}
+
+// Later runs keep any existing `.gitignore` as a user file, so a partial one left by a killed
+// process would stay without the rules forever. The rules are therefore written completely to a
+// same-directory temporary file first and published with a no-replace link/move, so the target
+// either is absent or holds every rule. A kill before publishing leaves only the temporary file,
+// which the published `/*.*` rule ignores.
+// Returns whether this call created the file.
+fn create_output_gitignore(
+    path: &Path,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> Result<bool> {
+    // Checked without following links; skips staging on the common already-initialized run.
+    if fs::symlink_metadata(path).is_ok() {
+        return Ok(false);
+    }
+    let parent = path
+        .parent()
+        .with_context(|| format!("Output ignore file '{}' has no parent", path.display()))?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".gitignore.").suffix(".tmp");
+    // Temporary files default to owner-only access; match the mode (minus umask) that snapshot
+    // publishing gives the same file, so collaborators on shared checkouts can read it.
+    #[cfg(unix)]
+    builder.permissions(<fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o666));
+    let mut temporary = builder
+        .tempfile_in(parent)
+        .with_context(|| format!("Failed to create output ignore file '{}'", path.display()))?;
+    write(temporary.as_file_mut())
+        .and_then(|()| temporary.as_file().sync_all())
+        .with_context(|| format!("Failed to write output ignore file '{}'", path.display()))?;
+    match temporary.persist_noclobber(path) {
+        Ok(_) => Ok(true),
+        // Another writer won the race, or (on Windows, which reports an existing directory as
+        // access denied) the path already exists; either way it is kept. Dropping the error
+        // removes the temporary file.
+        Err(error)
+            if error.error.kind() == ErrorKind::AlreadyExists
+                || fs::symlink_metadata(path).is_ok() =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error.error)
+            .with_context(|| format!("Failed to create output ignore file '{}'", path.display())),
+    }
 }
 
 pub(crate) fn generate_site(
@@ -1761,6 +1867,151 @@ mod tests {
         assert!(versioned_path("_snapshot/images/../../state.json", "images").is_err());
         fs::write(root.join(path), b"corrupted").unwrap();
         assert!(read_versioned(&root, &first, "images").is_err());
+    }
+
+    #[test]
+    fn ensure_output_gitignore_creates_missing_rules_and_never_replaces_existing_paths()
+    -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        // Runs must create exactly the rules a published snapshot writes.
+        let published = temporary.path().join("published");
+        fs::create_dir(&published)?;
+        generate_site(&published, &[], &args(), &WorkspaceConfig::default())?;
+        let managed = fs::read(published.join(".gitignore"))?;
+        // A fresh workspace has no output directory yet.
+        let output = temporary.path().join("workspace/.regressify");
+        ensure_output_gitignore(&output)?;
+        let created = fs::read(output.join(".gitignore"))?;
+        assert_eq!(created, managed);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let plain = temporary.path().join("plain");
+            fs::File::create(&plain)?;
+            let mode = |path: &Path| -> Result<u32> {
+                Ok(fs::metadata(path)?.permissions().mode() & 0o777)
+            };
+            assert_eq!(mode(&output.join(".gitignore"))?, mode(&plain)?);
+        }
+        let created = String::from_utf8(created)?;
+        for required in ["/states/", "/_diagnostics/", "bitmaps_test/"] {
+            assert!(
+                created.lines().any(|line| line.trim() == required),
+                "Missing {required} in created .gitignore"
+            );
+        }
+
+        fs::write(output.join(".gitignore"), b"custom\n")?;
+        ensure_output_gitignore(&output)?;
+        assert_eq!(fs::read(output.join(".gitignore"))?, b"custom\n");
+
+        let blocked = temporary.path().join("blocked");
+        fs::create_dir_all(blocked.join(".gitignore/kept"))?;
+        ensure_output_gitignore(&blocked)?;
+        assert!(blocked.join(".gitignore/kept").is_dir());
+
+        #[cfg(unix)]
+        {
+            let linked = temporary.path().join("linked");
+            fs::create_dir(&linked)?;
+            let target = temporary.path().join("link-target");
+            std::os::unix::fs::symlink(&target, linked.join(".gitignore"))?;
+            ensure_output_gitignore(&linked)?;
+            assert!(!target.exists(), "Followed a dangling .gitignore link");
+        }
+
+        let not_a_directory = temporary.path().join("output-file");
+        fs::write(&not_a_directory, b"private contents")?;
+        let message = format!(
+            "{:#}",
+            ensure_output_gitignore(&not_a_directory).unwrap_err()
+        );
+        assert!(
+            message.contains(&not_a_directory.display().to_string()),
+            "{message}"
+        );
+        assert_eq!(fs::read(&not_a_directory)?, b"private contents");
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_output_gitignore_warns_when_a_kept_path_does_not_ignore_browser_state() -> Result<()>
+    {
+        let temporary = tempfile::tempdir()?;
+        let output = temporary.path().join(".regressify");
+        assert_eq!(
+            ensure_output_gitignore(&output)?,
+            None,
+            "fresh managed rules"
+        );
+        assert_eq!(
+            ensure_output_gitignore(&output)?,
+            None,
+            "kept managed rules"
+        );
+
+        let path = output.join(".gitignore");
+        for (rules, covered) in [
+            ("custom\n", false),
+            ("", false),
+            ("# /states/\nstates.txt\n/other/states/\n", false),
+            ("/states/\n!/states/\n", false),
+            ("/states/\n", true),
+            ("states/\n", true),
+            ("  /states  \n", true),
+            ("states/**\n", true),
+            ("*\n", true),
+            ("/*\n!keep.txt\n", true),
+            ("!/states/\n/states/\n", true),
+        ] {
+            fs::write(&path, rules)?;
+            let warning = ensure_output_gitignore(&output)?;
+            assert_eq!(warning.is_none(), covered, "{rules:?}: {warning:?}");
+            if let Some(warning) = warning {
+                assert!(warning.contains(&path.display().to_string()), "{warning}");
+                assert!(warning.contains("/states/"), "{warning}");
+                assert!(!warning.contains("  "), "{warning}");
+            }
+            assert_eq!(fs::read_to_string(&path)?, rules, "rewrote {rules:?}");
+        }
+
+        // A directory in place of the file ignores nothing, and is kept as it is.
+        let blocked = temporary.path().join("blocked");
+        fs::create_dir_all(blocked.join(".gitignore/kept"))?;
+        let warning = ensure_output_gitignore(&blocked)?.expect("directory .gitignore warning");
+        assert!(warning.contains("not a regular file"), "{warning}");
+        assert!(!warning.contains("  "), "{warning}");
+        assert!(blocked.join(".gitignore/kept").is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_output_gitignore_write_leaves_no_partial_rules_and_retry_creates_them()
+    -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let output = temporary.path().join(".regressify");
+        fs::create_dir(&output)?;
+        let path = output.join(".gitignore");
+        // A panic mid-write stands in for a killed process: no error path or cleanup runs.
+        let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            create_output_gitignore(&path, |file| {
+                file.write_all(b"/*.*\n")?;
+                panic!("process killed while writing the ignore rules");
+            })
+        }));
+        assert!(interrupted.is_err());
+        assert!(
+            fs::symlink_metadata(&path).is_err(),
+            "An interrupted write left a partial .gitignore that later runs would keep"
+        );
+
+        ensure_output_gitignore(&output)?;
+        let rules = fs::read_to_string(&path)?;
+        assert!(
+            rules.lines().any(|line| line.trim() == "/states/"),
+            "{rules}"
+        );
+        Ok(())
     }
 
     #[test]

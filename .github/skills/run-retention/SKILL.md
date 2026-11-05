@@ -25,8 +25,9 @@ description: 'Use when changing completed-run tracking, runs.json, clean command
 1. Use the shared selection for Compare, Results, Snapshot, and Deploy. Generate
    skipped comparisons on demand, not during background inventory refresh or
    activity recovery. Legacy snapshots retain their existing report selection.
-   Results Open HTML must regenerate in the viewed output folder off the UI thread;
-   an existing `index.html` may predate completed captures with skipped comparison.
+   Results has no Open HTML action. `test`/`ref` rebuild the combined snapshot
+   only after whole-workspace full runs; partial runs and desktop workers skip it,
+   so an existing `index.html` may predate completed captures.
    Raw reports persist `captureInventoryComplete`; scenario-scoped comparison is
    not full coverage. Default consumers repair partial reports on demand, while
    explicit report selection can retain them. Legacy reports omit the flag.

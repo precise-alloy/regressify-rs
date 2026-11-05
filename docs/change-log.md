@@ -3,7 +3,7 @@ title: Change Log
 description: Track changes to the Optimizely CMS testing guides, actions, scenarios, and suite options so you can spot new capabilities quickly.
 guid: 1679e8d7-c710-4a1f-9640-224277efcd7e
 date: 2023-09-06T17:00:00+00:00
-updated: 2026-10-26T00:00:00+00:00
+updated: 2026-11-04T00:00:00+00:00
 draft: false
 hidden: false
 weight: 41000
@@ -16,6 +16,16 @@ extra:
 ---
 
 This page records notable updates to the testing docs, which is much faster than reading Git history with unnecessary archaeology.
+
+## 2026-11-04 (Unreleased)
+
+- Changed: `test` and `ref` rebuild the combined snapshot report only after
+  runs that cover every suite and scenario in the workspace. Runs that skip any
+  suite or scenario no longer reprocess every other suite; they leave the
+  published report unchanged and print a reminder to run `regressify snapshot`. Desktop Run Test and Run
+  Reference no longer rebuild the local web report; use Build Report or Deploy.
+  Captures, comparisons, and promoted baselines are unchanged. See
+  [Commands](commands.md#commands).
 
 ## 2026-10-23 (Unreleased)
 

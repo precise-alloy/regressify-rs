@@ -31,6 +31,17 @@ pub fn read_request(input: impl Read) -> Result<WorkerRequest> {
     serde_json::from_slice(&bytes).context("Invalid desktop run request")
 }
 
+/// No desktop view reads the combined web report: Results reads run reports
+/// directly, and Build Report and Deploy regenerate it for their selected
+/// suites. A post-run rebuild would load, lock, and possibly compare every
+/// output directory for no visible gain, so desktop Test/Reference skip it.
+fn engine_options(run: &RunRequest) -> crate::application::EngineOptions {
+    crate::application::EngineOptions {
+        operation_id: run.options.diagnostic_operation_id.clone(),
+        post_run_snapshot: crate::test::PostRunSnapshot::Skip,
+    }
+}
+
 pub fn run_stdio() -> Result<()> {
     crate::diagnostics::install::install_subscriber();
     let startup = crate::diagnostics::startup::StartupLog::begin_for(
@@ -144,11 +155,7 @@ fn run_request() -> Result<()> {
                         .await
                         .context("Cannot generate report snapshots for deployment")?;
                     } else {
-                        crate::application::execute_identified(
-                            cli,
-                            request.run.options.diagnostic_operation_id.clone(),
-                        )
-                        .await?;
+                        crate::application::execute_with(cli, engine_options(&request.run)).await?;
                     }
                     if let Some((job, client)) = deployment {
                         let directory = request
@@ -223,5 +230,37 @@ mod tests {
         assert_eq!(decoded.run.command, request.command);
         assert!(read_request(b"not JSON".as_slice()).is_err());
         assert!(read_request(vec![b' '; MAX_REQUEST_BYTES + 1].as_slice()).is_err());
+    }
+
+    #[test]
+    fn desktop_capture_runs_skip_the_post_run_report_and_keep_their_operation() {
+        let operation = crate::diagnostics::record::OperationId::new();
+        for (command, suites, scenarios) in [
+            (RunCommand::Test, vec!["shop"], vec![]),
+            (RunCommand::Reference, vec!["shop"], vec![]),
+            (RunCommand::Reference, vec!["shop"], vec!["shop:home"]),
+            (RunCommand::Test, vec!["shop", "blog"], vec![]),
+        ] {
+            let request = RunRequest {
+                root: "QA workspace".into(),
+                command,
+                options: RunOptions {
+                    suites: suites.into_iter().map(String::from).collect(),
+                    scenarios: scenarios
+                        .into_iter()
+                        .map(|filter| filter.parse().unwrap())
+                        .collect(),
+                    diagnostic_operation_id: Some(operation.clone()),
+                    ..RunOptions::default()
+                },
+            };
+            let options = engine_options(&request);
+            assert_eq!(
+                options.post_run_snapshot,
+                crate::test::PostRunSnapshot::Skip,
+                "{command:?}"
+            );
+            assert_eq!(options.operation_id, Some(operation.clone()));
+        }
     }
 }

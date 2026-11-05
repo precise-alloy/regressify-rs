@@ -149,6 +149,71 @@ fn validate_scenario_filters(
     Ok(())
 }
 
+/// How `test` and `ref` treat the combined workspace report after captures finish.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PostRunSnapshot {
+    /// CLI behavior: rebuild only after a run that refreshed every workspace suite.
+    #[default]
+    Automatic,
+    /// Desktop workers: no desktop view reads the local web report, and Build
+    /// Report and Deploy regenerate it explicitly for their selected suites.
+    Skip,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PostRunSnapshotDecision {
+    Generate,
+    SkipPartial,
+    Skip,
+}
+
+fn is_full_suite_selection(name: &str, suite: &TestSuite, filters: &[ScenarioFilter]) -> bool {
+    !suite.scenarios.is_empty()
+        && selected_scenarios(name, suite, filters).count() == suite.scenarios.len()
+}
+
+/// Rebuilding the combined report loads, locks, and may compare every output
+/// directory, and scenario-only runs never become default results. Only a run
+/// that produced a new full-suite result for every workspace suite may rebuild
+/// it automatically; narrower runs leave the published site untouched instead
+/// of reprocessing or failing on unrelated suites.
+fn post_run_snapshot_decision(
+    policy: PostRunSnapshot,
+    discovered: &[String],
+    suites: &[(TestSuiteInput, Arc<TestSuite>)],
+    filters: &[ScenarioFilter],
+) -> PostRunSnapshotDecision {
+    if policy == PostRunSnapshot::Skip {
+        return PostRunSnapshotDecision::Skip;
+    }
+    let whole_workspace = discovered
+        .iter()
+        .all(|name| suites.iter().any(|(input, _)| &input.name == name));
+    // Share the RunLease predicate so "full" always matches default-run eligibility.
+    let every_suite_full = suites
+        .iter()
+        .all(|(input, suite)| is_full_suite_selection(&input.name, suite, filters));
+    if whole_workspace && every_suite_full {
+        PostRunSnapshotDecision::Generate
+    } else {
+        PostRunSnapshotDecision::SkipPartial
+    }
+}
+
+fn finish_post_run_snapshot(decision: PostRunSnapshotDecision, output_dir: &Path) -> Result<()> {
+    match decision {
+        PostRunSnapshotDecision::Generate => generate_snapshot_reports(),
+        PostRunSnapshotDecision::SkipPartial => {
+            eprintln!(
+                "Report not regenerated for a partial run; run 'regressify snapshot' to refresh {}",
+                output_dir.join("index.html").display()
+            );
+            Ok(())
+        }
+        PostRunSnapshotDecision::Skip => Ok(()),
+    }
+}
+
 fn selected_scenarios<'suite>(
     name: &'suite str,
     suite: &'suite TestSuite,
@@ -1587,8 +1652,7 @@ fn begin_suite_runs(
     suites
         .iter()
         .map(|(input, suite)| {
-            let full_suite = !suite.scenarios.is_empty()
-                && selected_scenarios(&input.name, suite, filters).count() == suite.scenarios.len();
+            let full_suite = is_full_suite_selection(&input.name, suite, filters);
             let run = RunLease::begin(
                 &suite_output_dir(output_dir, suite)?,
                 suite
@@ -1659,7 +1723,7 @@ fn finalize_test_suite(
     Ok(())
 }
 
-pub async fn exec_test_suites(args: TestArgs) -> Result<()> {
+pub async fn exec_test_suites(args: TestArgs, snapshot_policy: PostRunSnapshot) -> Result<()> {
     let TestArgs {
         fetch_browser,
         test_suite: test_suites,
@@ -1678,6 +1742,7 @@ pub async fn exec_test_suites(args: TestArgs) -> Result<()> {
         load_active_replacement_profile(root_dir, replacement_profile.as_deref())?;
 
     let available = discover_test_suites(&visual_tests_dir)?;
+    let discovered: Vec<_> = available.iter().map(|input| input.name.clone()).collect();
     let filtered = filter_test_suites(available, &test_suites)?;
     let filtered = filter_scenario_suites(filtered, &scenarios)?;
 
@@ -1688,6 +1753,14 @@ pub async fn exec_test_suites(args: TestArgs) -> Result<()> {
     validate_suite_capture_keys(&workspace_config, &parsed_suites)?;
     validate_external_capture_files(root_dir, &workspace_config, &parsed_suites)?;
     ensure_capture_run_directories_are_new(common::REGRESSIFY_DIR.get_required()?, &parsed_suites)?;
+    // Before any capture can persist browser state, whatever the snapshot policy.
+    if let Some(warning) =
+        crate::snapshot::ensure_output_gitignore(common::REGRESSIFY_DIR.get_required()?)?
+    {
+        eprintln!("{} {warning}", "WARNING:".yellow());
+    }
+    let snapshot_decision =
+        post_run_snapshot_decision(snapshot_policy, &discovered, &parsed_suites, &scenarios);
 
     let workspace_config = Arc::new(workspace_config);
     let mut suite_runs = begin_suite_runs(
@@ -1852,7 +1925,7 @@ pub async fn exec_test_suites(args: TestArgs) -> Result<()> {
     }
 
     if !skip_compare {
-        generate_snapshot_reports()?;
+        finish_post_run_snapshot(snapshot_decision, common::REGRESSIFY_DIR.get_required()?)?;
     }
 
     Ok(())
@@ -1860,7 +1933,7 @@ pub async fn exec_test_suites(args: TestArgs) -> Result<()> {
 
 /// `ref` command: capture baseline reference screenshots.
 /// Promotes only successful selected captures, preserving unrelated references.
-pub async fn exec_ref(args: RefArgs) -> Result<()> {
+pub async fn exec_ref(args: RefArgs, snapshot_policy: PostRunSnapshot) -> Result<()> {
     let RefArgs {
         fetch_browser,
         test_suite: test_suites,
@@ -1882,6 +1955,7 @@ pub async fn exec_ref(args: RefArgs) -> Result<()> {
     validate_workspace_config(&workspace_config)?;
 
     let available = discover_test_suites(&visual_tests_dir)?;
+    let discovered: Vec<_> = available.iter().map(|input| input.name.clone()).collect();
     let filtered = filter_test_suites(available, &test_suites)?;
     let filtered = filter_scenario_suites(filtered, &scenarios)?;
 
@@ -1894,6 +1968,14 @@ pub async fn exec_ref(args: RefArgs) -> Result<()> {
     validate_suite_capture_keys(&workspace_config, &parsed_suites)?;
     validate_external_capture_files(root_dir, &workspace_config, &parsed_suites)?;
     ensure_capture_run_directories_are_new(common::REGRESSIFY_DIR.get_required()?, &parsed_suites)?;
+    // Before any capture can persist browser state, whatever the snapshot policy.
+    if let Some(warning) =
+        crate::snapshot::ensure_output_gitignore(common::REGRESSIFY_DIR.get_required()?)?
+    {
+        eprintln!("{} {warning}", "WARNING:".yellow());
+    }
+    let snapshot_decision =
+        post_run_snapshot_decision(snapshot_policy, &discovered, &parsed_suites, &scenarios);
 
     let workspace_config = Arc::new(workspace_config);
     let mut suite_runs = begin_suite_runs(regressify_dir, &parsed_suites, &scenarios)?;
@@ -2025,7 +2107,7 @@ pub async fn exec_ref(args: RefArgs) -> Result<()> {
     }
 
     drop(suite_runs);
-    generate_snapshot_reports()?;
+    finish_post_run_snapshot(snapshot_decision, regressify_dir)?;
 
     Ok(())
 }
@@ -2100,6 +2182,100 @@ mod tests {
         assert_eq!(
             crate::run_history::capture_runs(&second.join("bitmaps_test")).unwrap()[0].state,
             RunState::Interrupted
+        );
+    }
+
+    #[test]
+    fn post_run_snapshot_rebuilds_only_after_whole_workspace_full_runs() {
+        use PostRunSnapshotDecision::{Generate, Skip, SkipPartial};
+        let named = |name: &str, ids: &[&str]| {
+            (
+                TestSuiteInput {
+                    name: name.into(),
+                    path: PathBuf::from(format!("{name}.tests.yaml")),
+                    format: TestSuiteFormat::Yaml,
+                },
+                Arc::new(suite(ids.iter().map(|id| scenario(id, None)).collect())),
+            )
+        };
+        let filters = |values: &[&str]| -> Vec<ScenarioFilter> {
+            values.iter().map(|value| value.parse().unwrap()).collect()
+        };
+        let names = |values: &[&str]| -> Vec<String> {
+            values.iter().map(|value| value.to_string()).collect()
+        };
+        let auto = PostRunSnapshot::Automatic;
+        let shop = || named("shop", &["home", "cart"]);
+        let blog = || named("blog", &["post"]);
+
+        let workspace = names(&["shop", "blog"]);
+        let both = [shop(), blog()];
+        assert_eq!(
+            post_run_snapshot_decision(auto, &workspace, &both, &[]),
+            Generate
+        );
+        // Desktop workers skip even whole-workspace and partial selections.
+        assert_eq!(
+            post_run_snapshot_decision(PostRunSnapshot::Skip, &workspace, &both, &[]),
+            Skip
+        );
+        assert_eq!(
+            post_run_snapshot_decision(PostRunSnapshot::Skip, &workspace, &[shop()], &[]),
+            Skip
+        );
+        // Explicitly selecting every scenario still records full-suite runs.
+        assert_eq!(
+            post_run_snapshot_decision(
+                auto,
+                &workspace,
+                &both,
+                &filters(&["shop:home", "shop:cart", "blog:post"])
+            ),
+            Generate
+        );
+        assert_eq!(
+            post_run_snapshot_decision(
+                auto,
+                &workspace,
+                &both,
+                &filters(&["shop:home", "blog:post"])
+            ),
+            SkipPartial
+        );
+        assert_eq!(
+            post_run_snapshot_decision(auto, &workspace, &[shop()], &[]),
+            SkipPartial
+        );
+        assert_eq!(
+            post_run_snapshot_decision(
+                auto,
+                &names(&["shop"]),
+                &[shop()],
+                &filters(&["shop:home"])
+            ),
+            SkipPartial
+        );
+    }
+
+    #[test]
+    fn post_run_snapshot_skips_leave_published_report_untouched() {
+        let output = tempfile::tempdir().unwrap();
+        fs::write(output.path().join("index.html"), b"published").unwrap();
+        for decision in [
+            PostRunSnapshotDecision::SkipPartial,
+            PostRunSnapshotDecision::Skip,
+        ] {
+            finish_post_run_snapshot(decision, output.path()).unwrap();
+        }
+        let mut entries = fs::read_dir(output.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries, ["index.html"]);
+        assert_eq!(
+            fs::read(output.path().join("index.html")).unwrap(),
+            b"published"
         );
     }
 
