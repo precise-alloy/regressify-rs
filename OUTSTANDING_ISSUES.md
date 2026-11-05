@@ -12,6 +12,9 @@ are historical evidence, not open implementation tasks.
   shared key. `test_release_cache_separates_manual_windows_runtime` fails before
   the fix for CLI and desktop and passes after it. Hosted cache reuse remains
   unverified.
+- Resolved: warm-up cancellation is now ref-scoped; a feature-branch dispatch
+  cannot cancel the master run. The parity test rejects the old global group
+  and missing or renamed cache IDs used by the build guards.
 
 ## Post-Run Snapshot Scope (2026-11-04)
 

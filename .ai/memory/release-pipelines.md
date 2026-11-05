@@ -68,6 +68,9 @@ Verified: 2026-10-29
   Step-local `RUSTFLAGS` do not enter the action's key. The regression test
   `test_release_cache_separates_manual_windows_runtime` fails with the old key
   for both Windows applications; non-Windows manual/tag cache sharing remains.
+- Warm-up cancellation is ref-scoped so feature-branch dispatches cannot cancel
+  master runs. Parity tests assert `id: cache` before stripping IDs, preserving
+  the cache-hit guard dependency (verified 2026-11-05).
 - Workerd rejects `fetch` with `redirect: 'error'`; the admin feed uses `manual`
   and rejects non-2xx responses without forwarding bearer credentials. Website
   tests are scoped to `src` so MCP test files cannot pollute discovery.

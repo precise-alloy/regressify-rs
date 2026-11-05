@@ -517,6 +517,7 @@ gh() {
         self.assertIn("'https://regressify.eshn.dev'", (ROOT / "website/src/lib/release.ts").read_text(encoding="utf-8"))
 
     def test_selector_and_parallel_job_contract(self):
+        """Preserve release selection, parallelism, and toolchain-aware cache policy."""
         selector = WORKFLOW["on"]["workflow_dispatch"]["inputs"]["build"]
         self.assertEqual(selector["type"], "choice")
         self.assertEqual(selector["default"], "both")
@@ -551,12 +552,17 @@ gh() {
         self.assertFalse(any(step.get("uses", "").startswith("actions/cache@") for other in WORKFLOW["jobs"].values() for step in other["steps"]))
 
     def test_release_cache_warmup_mirrors_tag_builds(self):
+        """Keep warm-up builds and cache-hit guards aligned with tagged releases."""
         warm = yaml.load(
             (ROOT / ".github/workflows/release-cache.yml").read_text(encoding="utf-8"),
             Loader=yaml.BaseLoader,
         )
         # Only default-branch triggers can save caches that tag runs may restore.
         self.assertEqual(set(warm["on"]), {"schedule", "workflow_dispatch"})
+        self.assertEqual(warm["concurrency"], {
+            "group": "${{ github.workflow }}-${{ github.ref }}",
+            "cancel-in-progress": "true",
+        })
         self.assertEqual(warm["permissions"], {"contents": "read"})
         self.assertEqual(warm["env"], WORKFLOW["env"])
         job = warm["jobs"]["warm"]
@@ -576,6 +582,8 @@ gh() {
             with self.subTest(step=name):
                 expected_step = dict(next(step for step in release if step.get("name") == name))
                 actual_step = dict(next(step for step in job["steps"] if step.get("name") == name))
+                if name == "⚡ Cache":
+                    self.assertEqual(actual_step.get("id"), "cache")
                 actual_step.pop("id", None)
                 if "env" in expected_step:
                     # The release version only reaches the regressify crate, which is never cached.
@@ -586,11 +594,13 @@ gh() {
                 self.assertEqual(actual_step, expected_step)
 
     def test_release_cache_separates_manual_windows_runtime(self):
+        """Isolate Windows runtime caches while retaining other platform cache sharing."""
         cache = next(step for step in WORKFLOW["jobs"]["release"]["steps"]
                      if step.get("uses", "").startswith("Swatinem/rust-cache@"))
         template = cache["with"]["shared-key"]
 
         def keys(rows):
+            """Render the shared-key expressions for concrete release matrix rows."""
             result = {}
             for row in rows:
                 values = {
