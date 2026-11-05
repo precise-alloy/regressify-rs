@@ -1504,7 +1504,7 @@ mod tests {
         design,
         tests::{editor, editor_at_size, settle_dialog},
     };
-    use crate::desktop::updates::Release;
+    use crate::desktop::updates::{InstallHandle, Release};
 
     fn available_release() -> Release {
         UpdateFeed::new("https://regressify.eshn.dev")
