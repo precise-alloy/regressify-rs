@@ -379,20 +379,56 @@ fn open_archive(url: &str) -> Result<Box<dyn Read>> {
     Ok(Box::new(response))
 }
 
+/// A hung `codesign` would hold the install (and `.Regressify.lock`) and block quit forever.
+const CODESIGN_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Absolute `codesign` path and an argument vector: no shell, no PATH lookup.
 fn run_codesign(args: &[&str], path: &Path) -> Result<()> {
-    let output = std::process::Command::new("/usr/bin/codesign")
-        .args(args)
-        .arg(path)
-        .output()
-        .context("Cannot run /usr/bin/codesign")?;
+    let mut command = std::process::Command::new("/usr/bin/codesign");
+    command.args(args).arg(path);
+    run_bounded(command, CODESIGN_TIMEOUT, "codesign")
+}
+
+/// Runs `command` and fails unless it succeeds within `timeout`; on expiry the child is killed
+/// and reaped. Only the first 300 characters of stderr are surfaced.
+fn run_bounded(mut command: std::process::Command, timeout: Duration, name: &str) -> Result<()> {
+    use std::process::Stdio;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Cannot run {name}"))?;
+    // Drain stderr on its own thread so a chatty child cannot block on a full pipe.
+    let mut stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.take(64 * 1024).read_to_string(&mut text);
+        }
+        text
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child
+            .try_wait()
+            .with_context(|| format!("Cannot wait for {name}"))?
+        {
+            Some(status) => break status,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                bail!("{name} did not finish within {} seconds", timeout.as_secs());
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    };
+    let stderr = reader.join().unwrap_or_default();
     ensure!(
-        output.status.success(),
-        "codesign failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-            .chars()
-            .take(300)
-            .collect::<String>()
+        status.success(),
+        "{name} failed: {}",
+        stderr.chars().take(300).collect::<String>()
     );
     Ok(())
 }
@@ -3197,6 +3233,25 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_child_is_killed_at_the_deadline_and_failures_report_stderr() {
+        use super::run_bounded;
+        use std::time::{Duration, Instant};
+        let mut hang = std::process::Command::new("sleep");
+        hang.arg("30");
+        let started = Instant::now();
+        let error = run_bounded(hang, Duration::from_millis(200), "tool").unwrap_err();
+        assert!(format!("{error:#}").contains("did not finish"), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let mut fail = std::process::Command::new("sh");
+        fail.args(["-c", "echo boom >&2; exit 3"]);
+        let error = run_bounded(fail, Duration::from_secs(10), "tool").unwrap_err();
+        assert!(format!("{error:#}").contains("boom"), "{error:#}");
+        let ok = std::process::Command::new("true");
+        run_bounded(ok, Duration::from_secs(10), "tool").unwrap();
     }
 
     #[cfg(unix)]

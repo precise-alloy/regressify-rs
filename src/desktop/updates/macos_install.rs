@@ -652,8 +652,13 @@ pub fn swap_bundle(
     // changed yet and the install is refused.
     let mark_path = parent.join(RECOVERY_MARK_NAME);
     let previous_version = installed_version(bundle).unwrap_or_default();
-    ops.write_mark(&mark_path, &mark_contents(staged, &previous_version))
-        .context("Cannot record the swap before replacing the app; nothing was changed")?;
+    if let Err(error) = ops.write_mark(&mark_path, &mark_contents(staged, &previous_version)) {
+        // A write that failed midway can leave a partial mark; with no matching previous version
+        // it would block every later install until deleted by hand. Nothing has changed yet.
+        let _ = fs::remove_file(&mark_path);
+        return Err(anyhow::Error::new(error)
+            .context("Cannot record the swap before replacing the app; nothing was changed"));
+    }
     // Power-loss ordering: mark durable -> staged contents durable -> exchange. Otherwise a
     // crash could persist the exchange but not the mark or the replacement's contents, and the
     // missing-mark recovery would delete the stage holding the only complete app.
@@ -1996,6 +2001,35 @@ mod tests {
         // Still blocking: nothing was deleted, the mark stays until the user acts.
         assert_eq!(binary_of(&dir.path().join(BACKUP_NAME)), b"old");
         assert!(dir.path().join(RECOVERY_MARK_NAME).exists());
+    }
+
+    #[test]
+    fn a_failed_mark_write_leaves_no_partial_mark_behind() {
+        struct PartialMark;
+        impl SwapOps for PartialMark {
+            fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+                fs::rename(from, to)
+            }
+            fn exchange(&self, a: &Path, b: &Path) -> io::Result<()> {
+                RealOps.exchange(a, b)
+            }
+            fn write_mark(&self, path: &Path, _: &str) -> io::Result<()> {
+                fs::write(path, b"")?;
+                Err(io::Error::other("disk full"))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (app, staged) = staged_pair(dir.path());
+        let error = swap_bundle(&app, &staged, &PartialMark, &ok_step).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("nothing was changed"),
+            "{error:#}"
+        );
+        assert!(!dir.path().join(RECOVERY_MARK_NAME).exists());
+        assert_eq!(binary_of(&app), b"old");
+        // The next attempt is not blocked by a leftover.
+        swap_bundle(&app, &staged, &RealOps, &ok_step).unwrap();
+        assert_eq!(binary_of(&app), b"new");
     }
 
     #[test]

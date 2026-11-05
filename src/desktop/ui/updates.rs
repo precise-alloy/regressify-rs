@@ -148,6 +148,9 @@ impl UpdatePanel {
             outcome: result,
         } = attempt;
         self.notice_checking = false;
+        // An install in progress (or finished, awaiting Restart, or failed) renders from the
+        // notice: keep it until the install row is gone, whatever a peer or a check reports.
+        let installing = self.install_state().is_some();
         // Only a sent request (failures included) restarts the throttle; cached polls
         // must not, or the deadline never arrives.
         if dispatched {
@@ -159,7 +162,9 @@ impl UpdatePanel {
             Ok(NoticeOutcome::Available(notice))
                 if dismissal_hides(self.notice_dismissed, notice.version) =>
             {
-                self.notice = None;
+                if !installing {
+                    self.notice = None;
+                }
                 self.dismissed_notice = Some(notice);
                 // A cached poll must not erase the failure of the manual check that preceded it.
                 self.notice_message = notice_message_after_success(
@@ -177,7 +182,9 @@ impl UpdatePanel {
                     notice_message_after_success(dispatched, &self.notice_message, "");
             }
             Ok(NoticeOutcome::Current) => {
-                self.notice = None;
+                if !installing {
+                    self.notice = None;
+                }
                 self.dismissed_notice = None;
                 self.notice_message = notice_message_after_success(
                     dispatched,
@@ -186,7 +193,9 @@ impl UpdatePanel {
                 );
             }
             Ok(NoticeOutcome::Dismissed(notice)) => {
-                self.notice = None;
+                if !installing {
+                    self.notice = None;
+                }
                 self.dismissed_notice = Some(notice);
                 // A cached poll must not erase the failure of the manual check that preceded it.
                 self.notice_message = notice_message_after_success(
@@ -337,7 +346,7 @@ fn update_banner_colors(cx: &App) -> UpdateBannerColors {
 }
 
 /// Prefix of the dialog message after a failed notice check (also tells `mac_status` to append it).
-const DISMISSED_MESSAGE: &str = "A newer version is available, but its notice was dismissed. Use the install command or the release page.";
+const DISMISSED_MESSAGE: &str = "A newer version is available, but its notice was dismissed. It shows again when a newer release is published.";
 
 impl Workbench {
     pub(super) fn render_update_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -744,6 +753,12 @@ impl Workbench {
                 .notice_attempted_at
                 .is_none_or(|at| at.elapsed() >= CHECK_INTERVAL);
         let Some(cache) = self.update_cache_dir() else {
+            // Say so instead of leaving "Ready to check" next to a button that does nothing.
+            self.updates.update(cx, |state, cx| {
+                state.notice_message =
+                    format!("{CHECK_FAILED_PREFIX}the update cache location is unavailable");
+                cx.notify();
+            });
             return;
         };
         self.updates.update(cx, |state, _| {
@@ -1319,20 +1334,26 @@ impl Workbench {
                 // and exit (which would leave both instances gone once this one quits).
                 drop(released);
                 if relaunch(&app, workspace.as_deref()) {
-                    return (true, None);
+                    return (true, None, None);
                 }
                 // Launch failed: this window keeps running, so reclaim the workspace.
-                let reclaimed = match (&workspace, directory) {
+                // Keep why it failed: a filesystem error has no other owner to blame.
+                let (reclaimed, reason) = match (&workspace, directory) {
                     (Some(root), Ok(directory)) => match DesktopInstance::open(&directory, root) {
-                        Ok(OpenInstance::Owned(instance)) => Some(instance),
-                        _ => None,
+                        Ok(OpenInstance::Owned(instance)) => (Some(instance), None),
+                        Ok(OpenInstance::Activated) => (
+                            None,
+                            Some("it is now open in another Regressify window".to_owned()),
+                        ),
+                        Err(error) => (None, Some(format!("{error:#}"))),
                     },
-                    _ => None,
+                    (Some(_), Err(error)) => (None, Some(format!("{error:#}"))),
+                    (None, _) => (None, None),
                 };
-                (false, reclaimed)
+                (false, reclaimed, reason)
             });
             cx.spawn(async move |view, cx| {
-                let (launched, reclaimed) = task.await;
+                let (launched, reclaimed, reason) = task.await;
                 let _ = view.update(cx, |this, cx| {
                     this.updates.update(cx, |state, _| state.restarting = false);
                     if launched {
@@ -1351,7 +1372,10 @@ impl Workbench {
                         // this window frozen (still `busy`) so two windows never edit one
                         // workspace, but closable: `workspace_lost` bypasses the busy close guard.
                         this.workspace_lost = true;
-                        this.status = "This workspace is now open in another Regressify window; close this window".into();
+                        this.status = format!(
+                            "Cannot reopen this workspace after the failed restart ({}); close this window",
+                            reason.as_deref().unwrap_or("it is owned elsewhere")
+                        );
                         cx.notify();
                         return;
                     } else {
@@ -1586,6 +1610,43 @@ mod tests {
             feed(true, Ok(NoticeOutcome::Dismissed(notice)), cx);
             assert_eq!(message(cx), super::DISMISSED_MESSAGE);
             window.render_frame(cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_peer_dismissal_keeps_the_restart_banner_while_an_install_is_pending(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::desktop::updates::{NoticeAttempt, NoticeOutcome};
+
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, window, cx| {
+            let notice = view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, _| {
+                    // Install finished (Restart offered); the relaunch is never invoked here.
+                    let relaunch: super::Relauncher =
+                        std::sync::Arc::new(|_: &std::path::Path, _: Option<&std::path::Path>| {
+                            false
+                        });
+                    updates.seed_macos(Some(relaunch));
+                    updates.notice.clone().unwrap()
+                })
+            });
+            view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, cx| {
+                    updates.apply_notice_attempt(
+                        NoticeAttempt {
+                            dispatched: false,
+                            outcome: Ok(NoticeOutcome::Dismissed(notice)),
+                        },
+                        cx,
+                    )
+                })
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("update-notice-restart").is_some());
         })
         .unwrap();
     }

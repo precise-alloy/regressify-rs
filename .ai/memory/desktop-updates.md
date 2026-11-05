@@ -47,8 +47,9 @@ See the [updater skill](../../.github/skills/desktop-updates/SKILL.md) and
   directory exchange (refuses the install where unavailable) and one `.previous` backup,
   then relaunches through the unsaved-work guards. It shares install.sh's
   `.Regressify.lock` and reads the installed version from the bundle's `Info.plist`.
-  The recovery mark is written before the rollback exchange (an unreadable mark counts as
-  pending; an unwritable one still blocks retries in-process); a failed rollback keeps the
-  old app and blocks later installs. A failed `Info.plist` stamp aborts before the swap.
+  The recovery mark is written before the first exchange. An unreadable or empty mark counts
+  as pending. A mark that cannot be written is removed and the install is refused with nothing
+  changed; there is no in-process latch, so it does not block retries. A failed rollback keeps the
+  old app and blocks later installs. `codesign` runs under a 120 s deadline (killed on expiry). A failed `Info.plist` stamp aborts before the swap.
   Logic is unit tested on Linux; the UI and real `codesign`/`open` behavior remain
   unverified on real hardware.
