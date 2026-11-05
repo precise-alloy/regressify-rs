@@ -389,25 +389,57 @@ fn run_codesign(args: &[&str], path: &Path) -> Result<()> {
     run_bounded(command, CODESIGN_TIMEOUT, "codesign")
 }
 
-/// Runs `command` and fails unless it succeeds within `timeout`; on expiry the child is killed
-/// and reaped. Only the first 300 characters of stderr are surfaced.
+/// How long to wait for the stderr pipe to close after the child exited or was killed. A
+/// descendant that inherited the pipe can keep it open indefinitely.
+const STDERR_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// Runs `command` and fails unless it succeeds within `timeout`; on expiry the child (and, on
+/// unix, its process group) is killed and reaped. Only the first 300 characters of stderr are
+/// surfaced, and waiting for them is bounded: a descendant holding the pipe cannot hang this.
 fn run_bounded(mut command: std::process::Command, timeout: Duration, name: &str) -> Result<()> {
     use std::process::Stdio;
+    use std::sync::{Arc, Mutex, mpsc};
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Own process group, so a timeout can take descendants (e.g. `codesign_allocate`) too.
+        command.process_group(0);
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("Cannot run {name}"))?;
-    // Drain stderr on its own thread so a chatty child cannot block on a full pipe.
-    let mut stderr = child.stderr.take();
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.take(64 * 1024).read_to_string(&mut text);
-        }
-        text
-    });
+    // Drain stderr on its own thread so a chatty child cannot block on a full pipe. It appends
+    // to shared storage as it reads, so a timed-out drain still reports what arrived.
+    let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let (done, finished) = mpsc::channel::<()>();
+    if let Some(mut stderr) = child.stderr.take() {
+        let captured = Arc::clone(&captured);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(read) = stderr.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                let mut bytes = captured.lock().unwrap_or_else(|error| error.into_inner());
+                if bytes.len() < 64 * 1024 {
+                    bytes.extend_from_slice(&chunk[..read]);
+                }
+            }
+            let _ = done.send(());
+        });
+    } else {
+        drop(done);
+    }
+    // After the child is gone, give the drain a moment, then detach it (it ends when the
+    // pipe finally closes) and use what was captured so far.
+    let collect = || {
+        let _ = finished.recv_timeout(STDERR_DRAIN_GRACE);
+        let bytes = captured.lock().unwrap_or_else(|error| error.into_inner());
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
     let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child
@@ -416,15 +448,24 @@ fn run_bounded(mut command: std::process::Command, timeout: Duration, name: &str
         {
             Some(status) => break status,
             None if std::time::Instant::now() >= deadline => {
+                kill_group(&child);
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = reader.join();
-                bail!("{name} did not finish within {} seconds", timeout.as_secs());
+                let partial = collect();
+                bail!(
+                    "{name} did not finish within {} seconds{}",
+                    timeout.as_secs(),
+                    if partial.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", partial.chars().take(300).collect::<String>())
+                    }
+                );
             }
             None => std::thread::sleep(Duration::from_millis(25)),
         }
     };
-    let stderr = reader.join().unwrap_or_default();
+    let stderr = collect();
     ensure!(
         status.success(),
         "{name} failed: {}",
@@ -432,6 +473,21 @@ fn run_bounded(mut command: std::process::Command, timeout: Duration, name: &str
     );
     Ok(())
 }
+
+/// Best effort: SIGKILL the child's process group via `/bin/kill` (no new dependency). The
+/// child was started as its own group leader, so the group id is its pid.
+#[cfg(unix)]
+fn kill_group(child: &std::process::Child) {
+    let _ = std::process::Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_group(_: &std::process::Child) {}
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct NoticeState {
@@ -3252,6 +3308,49 @@ mod tests {
         assert!(format!("{error:#}").contains("boom"), "{error:#}");
         let ok = std::process::Command::new("true");
         run_bounded(ok, Duration::from_secs(10), "tool").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_holding_stderr_cannot_hang_the_bounded_run() {
+        use super::run_bounded;
+        use std::time::{Duration, Instant};
+        // Normal exit while a long-lived descendant still holds the inherited stderr pipe.
+        let mut lingering = std::process::Command::new("sh");
+        lingering.args(["-c", "sleep 30 & echo partial >&2; exit 1"]);
+        let started = Instant::now();
+        let error = run_bounded(lingering, Duration::from_secs(10), "tool").unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(format!("{error:#}").contains("partial"), "{error:#}");
+        // Same descendant on a success exit: no hang either.
+        let mut ok = std::process::Command::new("sh");
+        ok.args(["-c", "sleep 30 & echo partial >&2; exit 0"]);
+        let started = Instant::now();
+        run_bounded(ok, Duration::from_secs(10), "tool").unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        // Hung child with a descendant: killed at the deadline, returns, reports partial text.
+        let mut hung = std::process::Command::new("sh");
+        hung.args(["-c", "sleep 30 & echo partial >&2; sleep 30"]);
+        let started = Instant::now();
+        let error = run_bounded(hung, Duration::from_millis(300), "tool").unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("did not finish") && text.contains("partial"),
+            "{text}"
+        );
     }
 
     #[cfg(unix)]
