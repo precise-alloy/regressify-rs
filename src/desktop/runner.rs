@@ -220,9 +220,8 @@ impl RunOptions {
             "suites" => command.supports_suites(),
             "scenarios" => command.supports_scenarios(),
             "fetchBrowser" | "asyncCaptureLimit" | "asyncCaptureRampMs" | "debug"
-            | "requiredLogin" => command.captures(),
+            | "requiredLogin" | "replacementProfile" => command.captures(),
             "skipCompare" => command == RunCommand::Test,
-            "replacementProfile" => command == RunCommand::Test,
             "misMatchThreshold" => matches!(command, RunCommand::Test | RunCommand::Compare),
             "asyncCompareLimit" => command == RunCommand::Compare,
             "speed" | "minSizeKb" => command == RunCommand::Optimize,
@@ -319,14 +318,9 @@ impl RunRequest {
             );
             arguments.extend(["--report-capture".into(), capture.into()]);
         }
-        if self.command.captures()
-            && let Some(fetch) = options.fetch_browser
-        {
-            arguments.extend(["--fetch-browser".into(), fetch.to_string().into()]);
-        }
-        if self.command == RunCommand::Test {
-            if options.skip_compare {
-                arguments.push("--skip-compare".into());
+        if self.command.captures() {
+            if let Some(fetch) = options.fetch_browser {
+                arguments.extend(["--fetch-browser".into(), fetch.to_string().into()]);
             }
             if !options.replacement_profile.is_empty() {
                 arguments.extend([
@@ -334,6 +328,9 @@ impl RunRequest {
                     options.replacement_profile.clone().into(),
                 ]);
             }
+        }
+        if self.command == RunCommand::Test && options.skip_compare {
+            arguments.push("--skip-compare".into());
         }
         if matches!(self.command, RunCommand::Test | RunCommand::Compare) {
             arguments.extend([
@@ -1913,6 +1910,17 @@ pub(crate) mod tests {
         assert!(arguments.contains(&OsString::from("shop & checkout")));
         assert!(arguments.contains(&OsString::from("QA ; profile")));
         assert_eq!(arguments[1], request.root.as_os_str());
+
+        let mut ref_request = super::tests::request(RunCommand::Reference);
+        ref_request.options.replacement_profile = "staging".into();
+        let ref_arguments = ref_request.arguments().unwrap();
+        assert!(ref_arguments.contains(&OsString::from("--replacement-profile")));
+        assert!(ref_arguments.contains(&OsString::from("staging")));
+        assert!(RunOptions::applies(
+            "replacementProfile",
+            RunCommand::Reference
+        ));
+        assert!(RunOptions::applies("replacementProfile", RunCommand::Test));
     }
 
     #[test]

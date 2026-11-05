@@ -501,6 +501,25 @@ state: user-aaaa
 
 {% spoiler() %}
 
+replacementProfile
+
+:::::
+
+Type: `string`.  
+Default value: Empty (uses `default` profile when present).
+
+Selects a named replacement profile from `common/_replacement-profiles.yaml` for this test suite, ignoring the `default` profile. Overridden by `--replacement-profile` and `REPLACEMENT_PROFILE`.
+
+Example:
+
+```yaml wrap
+replacementProfile: staging
+```
+
+{% end %}
+
+{% spoiler() %}
+
 urlReplacements
 
 :::::
@@ -508,7 +527,7 @@ urlReplacements
 Type: `ReplacementModel[]`.  
 Default value: `[]`.
 
-Find/replace for URLs in the `test` command. Invalid regex replacements are treated as configuration errors before scenarios start.
+Find/replace for URLs in the `ref` and `test` commands. When `find` is set, `ref` replaces `find` with `ref` and `test` replaces `find` with `test`. When `find` is omitted, `ref` leaves URLs unchanged and `test` replaces `ref` with `test`. Invalid regex replacements are treated as configuration errors before scenarios start.
 Set `regex: true` to use a regular expression. Supported JavaScript-style
 flags are `g` (global replacement), `i` (case-insensitive), `m` (multiline),
 `s` (dot-all), and `u` (Unicode); flags require `regex: true` and may not be
@@ -517,15 +536,12 @@ repeated.
 Example:
 
 ```yaml
-# Below settings have no effect when running under `ref` command.
-# When running using `test` command,
-# replace the URL from `https://legacy1.domain.com/` to `https://new1.domain.com/`,
-# and from `https://legacy2.domain.com/` to `https://new2.domain.com/`
 urlReplacements:
+  - find: "{HOST}"
+    ref: https://prod.domain.com
+    test: https://staging.domain.com
   - ref: https://legacy1.domain.com/
     test: https://new1.domain.com/
-  - ref: https://legacy2.domain.com/
-    test: https://new2.domain.com/
 ```
 
 {% end %}

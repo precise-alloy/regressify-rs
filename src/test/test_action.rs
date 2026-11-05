@@ -2412,6 +2412,7 @@ mod tests {
     #[test]
     fn action_url_replacements_apply_before_navigation_or_matching() {
         let replacements = vec![UrlReplacement {
+            find: None,
             ref_pattern: "https://prod.example.com".to_string(),
             test: "https://test.example.com".to_string(),
             regex: None,

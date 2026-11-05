@@ -131,8 +131,8 @@ pub(super) fn build() -> Result<Value> {
             "replacement-profiles",
             "replacement-profiles",
             "common/_replacement-profiles.yaml",
-            "Reference captures use raw URLs. Test captures apply the selected profile, workspace rules, then suite rules.",
-            json!({"profiles": {"default": [], "staging": [{"ref": "https://example.com", "test": "https://staging.example.com"}]}}),
+            "Profile items run in order. URL items replace find->ref in ref mode and find/ref->test in test mode; script items transform the suite JSON.",
+            json!({"profiles": {"default": [], "staging": [{"ref": "https://example.com", "test": "https://staging.example.com"}, {"find": "{HOST}", "ref": "https://example.com", "test": "https://staging.example.com"}, {"script": "common/transform.js"}]}}),
         ),
         (
             "cookies",
@@ -397,7 +397,8 @@ mod tests {
                 "replacement-profiles" => {
                     let profiles: ReplacementProfilesFile = serde_json::from_value(value).unwrap();
                     for rules in profiles.profiles.values() {
-                        crate::config::replacements::validate_replacements(rules, name).unwrap();
+                        crate::config::replacements::validate_profile_items_syntax(rules, name)
+                            .unwrap();
                     }
                 }
                 "cookies" => {
@@ -939,8 +940,10 @@ mod tests {
                         let profiles: ReplacementProfilesFile =
                             serde_json::from_value(value).unwrap();
                         for rules in profiles.profiles.values() {
-                            crate::config::replacements::validate_replacements(rules, topic)
-                                .unwrap();
+                            crate::config::replacements::validate_profile_items_syntax(
+                                rules, topic,
+                            )
+                            .unwrap();
                         }
                     }
                     "viewports" => {
