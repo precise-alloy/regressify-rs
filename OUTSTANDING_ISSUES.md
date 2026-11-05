@@ -3,6 +3,16 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Release Cache Runtime Isolation (2026-11-05)
+
+- Resolved in source: manual Windows builds could seed the tagged static-runtime
+  cache, causing warm-up to skip the required compilation. Both
+  [release](.github/workflows/tuyen-release.yml) and
+  [warm-up](.github/workflows/release-cache.yml) now include runtime mode in the
+  shared key. `test_release_cache_separates_manual_windows_runtime` fails before
+  the fix for CLI and desktop and passes after it. Hosted cache reuse remains
+  unverified.
+
 ## Post-Run Snapshot Scope (2026-11-04)
 
 - Resolved in source: `test`/`ref` always rebuilt the combined snapshot for every
