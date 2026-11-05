@@ -1,6 +1,6 @@
 # Shared Desktop Updates
 
-Verified: 2026-10-22
+Verified: 2026-11-05
 
 - The feed is `https://regressify.eshn.dev/downloads/latest.txt`; binaries are
   versioned GitHub assets. Manifest redirects are refused; bounded GitHub HTTPS
@@ -53,3 +53,4 @@ See the [updater skill](../../.github/skills/desktop-updates/SKILL.md) and
   old app and blocks later installs. `codesign` runs under a 120 s deadline (killed on expiry). A failed `Info.plist` stamp aborts before the swap.
   Logic is unit tested on Linux; the UI and real `codesign`/`open` behavior remain
   unverified on real hardware.
+  Check: `cargo test --features desktop --lib desktop::updates::macos_install::tests`.
