@@ -1,0 +1,102 @@
+name: Release Cache
+# Tag runs can only restore caches from master scope, so scheduled master runs keep
+# release-profile dependencies warm. Steps mirror the tag build; ci/test-release.py checks parity.
+on:
+  schedule:
+    # After Thursday Rust releases, and often enough to beat the seven-day eviction.
+    - cron: '23 4 * * 1,5'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_ORIGIN: https://regressify.eshn.dev
+
+jobs:
+  warm:
+    if: ${{ github.repository == 'precise-alloy/regressify-rs' }}
+    name: Warm ${{ matrix.application }} (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { application: cli, os: macos-15-intel, target: x86_64-apple-darwin, features: '', installer: false }
+          - { application: desktop, os: macos-15-intel, target: x86_64-apple-darwin, features: gui, installer: false }
+          - { application: cli, os: macos-15, target: aarch64-apple-darwin, features: '', installer: false }
+          - { application: desktop, os: macos-15, target: aarch64-apple-darwin, features: gui, installer: false }
+          - { application: cli, os: windows-latest, target: x86_64-pc-windows-msvc, features: '', installer: true }
+          - { application: desktop, os: windows-latest, target: x86_64-pc-windows-msvc, features: gui, installer: true }
+          - { application: cli, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, features: '', installer: false }
+          - { application: desktop, os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, features: gui, installer: false }
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Linux desktop dependencies
+        if: ${{ matrix.application == 'desktop' && startsWith(matrix.os, 'ubuntu') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config \
+            libasound2-dev libclang-dev libfontconfig1-dev libfreetype6-dev \
+            libglib2.0-dev libssl-dev libvulkan-dev libwayland-dev libzstd-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+        shell: bash
+
+      - name: Install Rust
+        run: ci/install-rust.sh
+        env:
+          TOOLCHAIN: stable
+          TARGET: ${{ matrix.target }}
+        shell: bash
+
+      - name: ⚡ Cache
+        id: cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.application }}-${{ matrix.target }}-${{ matrix.installer && 'static' || 'native' }}
+          save-if: ${{ github.ref_type != 'tag' }}
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v3
+        if: ${{ contains(matrix.os, 'windows') }}
+
+      # An exact hit means the same lockfile and rustc are already cached.
+      - name: Build artifacts
+        if: ${{ steps.cache.outputs.cache-hit != 'true' && !matrix.installer }}
+        run: ci/make-release.sh
+        env:
+          FILE_NAME: ${{ matrix.application == 'desktop' && 'regressify-desktop' || 'regressify' }}
+          PACKAGE_NAME: ${{ matrix.application == 'desktop' && 'regressify-desktop' || 'regressify-cli' }}
+          CARGO_FEATURES: ${{ matrix.features }}
+          OS: ${{ matrix.os }}
+          TARGET: ${{ matrix.target }}
+          NO_DEFAULT_FEATURES: 1
+        shell: bash
+
+      - name: Build Windows desktop release
+        if: ${{ steps.cache.outputs.cache-hit != 'true' && matrix.installer && matrix.application == 'desktop' }}
+        shell: pwsh
+        env:
+          REGRESSIFY_UPDATE_ORIGIN: ${{ env.RELEASE_ORIGIN }}
+          BINARY_GIT_HASH: ${{ github.sha }}
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --locked --no-default-features --features gui --bin regressify-desktop --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "Desktop build failed ($LASTEXITCODE)." }
+
+      - name: Build Windows CLI release
+        if: ${{ steps.cache.outputs.cache-hit != 'true' && matrix.installer && matrix.application == 'cli' }}
+        shell: pwsh
+        env:
+          BINARY_GIT_HASH: ${{ github.sha }}
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --locked --no-default-features --bin regressify --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "CLI build failed ($LASTEXITCODE)." }
