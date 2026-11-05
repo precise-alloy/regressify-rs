@@ -131,8 +131,8 @@ pub(super) fn build() -> Result<Value> {
             "replacement-profiles",
             "replacement-profiles",
             "common/_replacement-profiles.yaml",
-            "Profile items run in order. URL items replace find->ref in ref mode and find/ref->test in test mode; script items transform the suite JSON.",
-            json!({"profiles": {"default": [], "staging": [{"ref": "https://example.com", "test": "https://staging.example.com"}, {"find": "{HOST}", "ref": "https://example.com", "test": "https://staging.example.com"}, {"script": "common/transform.js"}]}}),
+            "Profile items run in order. URL items replace find->ref in ref mode and find/ref->test in test mode. To add a script item, see the profile-script example.",
+            json!({"profiles": {"default": [], "staging": [{"find": "{HOST}", "ref": "https://example.com", "test": "https://staging.example.com"}, {"ref": "https://example.com", "test": "https://staging.example.com"}]}}),
         ),
         (
             "cookies",
@@ -235,6 +235,13 @@ pub(super) fn build() -> Result<Value> {
             "common/hooks/on-before.js",
             "Standard browser JavaScript injected through onBeforeScript at initial document creation, before site scripts. Sets a synthetic browser value using window.regressify; the DOM may not exist yet.",
             "window.visualCaptureMode = window.regressify.isReference ? \"reference\" : \"test\";\n",
+        ),
+        (
+            "profile-script",
+            "javascript",
+            "common/transform.js",
+            "Node.js or Bun script (not browser JavaScript) for a replacement profile item `- script: common/transform.js`. It reads the suite JSON object on stdin and writes the transformed object to stdout; REGRESSIFY_MODE is ref or test. Create it together with that profile item.",
+            "const input = require(\"fs\").readFileSync(0, \"utf8\");\nconst suite = JSON.parse(input);\nconst host = process.env.REGRESSIFY_MODE === \"ref\" ? \"https://example.com\" : \"https://staging.example.com\";\nfor (const scenario of suite.scenarios) scenario.url = scenario.url.replace(\"{HOST}\", host);\nprocess.stdout.write(JSON.stringify(suite));\n",
         ),
         (
             "scenario-ready-script",

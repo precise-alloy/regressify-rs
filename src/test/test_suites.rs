@@ -292,7 +292,7 @@ fn build_capture_jobs(
                         .label
                         .as_deref()
                         .filter(|label| !label.trim().is_empty())
-                        .unwrap_or(&scenario.url)
+                        .unwrap_or(scenario.reference_page_url())
                         .to_string(),
                     viewport: job
                         .viewport
@@ -770,9 +770,10 @@ fn create_ramped_semaphore(limit: usize) -> Arc<Semaphore> {
 fn load_replacement_profiles_for_run(
     root_dir: &std::path::Path,
     cli_profile: Option<&str>,
+    env_profile: Option<&str>,
 ) -> Result<Option<replacements::ReplacementProfilesFile>> {
     let (profile_name, explicit_profile) =
-        replacements::resolve_profile_selection(cli_profile, None);
+        replacements::resolve_profile_selection(cli_profile, env_profile, None);
     if explicit_profile && profile_name.trim().is_empty() {
         anyhow::bail!("Replacement profile name must not be empty");
     }
@@ -781,7 +782,7 @@ fn load_replacement_profiles_for_run(
         if explicit_profile {
             anyhow::bail!(
                 "Replacement profile file not found: {}",
-                root_dir.join("common/_replacement-profiles.yaml").display()
+                replacements::PROFILE_FILE_DISPLAY
             );
         }
         return Ok(None);
@@ -1229,6 +1230,32 @@ pub(crate) fn validate_scenario_dependencies(
     Ok(())
 }
 
+/// Profile scripts block on child processes, so parsing must not run on an async worker.
+async fn parse_suites_off_runtime(
+    root_dir: &Path,
+    visual_tests_dir: &Path,
+    inputs: Vec<TestSuiteInput>,
+    profiles: Option<replacements::ReplacementProfilesFile>,
+    cli_profile: Option<&str>,
+    env_profile: Option<String>,
+    mode: replacements::ReplacementMode,
+) -> Result<Vec<(TestSuiteInput, Arc<TestSuite>)>> {
+    let (root_dir, visual_tests_dir) = (root_dir.to_path_buf(), visual_tests_dir.to_path_buf());
+    let cli_profile = cli_profile.map(str::to_string);
+    tokio::task::spawn_blocking(move || {
+        let ctx = SuiteProfileContext {
+            root_dir: &root_dir,
+            profiles: profiles.as_ref(),
+            cli_profile: cli_profile.as_deref(),
+            env_profile: env_profile.as_deref(),
+            mode,
+        };
+        parse_test_suites_with_profile(&visual_tests_dir, inputs, Some(&ctx))
+    })
+    .await
+    .context("Test suite parsing task failed")?
+}
+
 #[cfg(test)]
 fn parse_test_suites(
     visual_tests_dir: &std::path::Path,
@@ -1559,7 +1586,7 @@ fn report_page_urls(
     };
     let url = replacements::apply_replacements_for_mode(&scenario.url, url_replacements, mode)?;
     Ok(capture::ReportPageUrls {
-        reference_url: scenario.url.clone(),
+        reference_url: scenario.reference_page_url().to_string(),
         url,
         scenario_id: scenario.id.clone(),
         scenario_label: Some(
@@ -1567,7 +1594,7 @@ fn report_page_urls(
                 .label
                 .as_deref()
                 .filter(|label| !label.trim().is_empty())
-                .unwrap_or(&scenario.url)
+                .unwrap_or(scenario.reference_page_url())
                 .to_string(),
         ),
         scenario_display_name: None,
@@ -1599,7 +1626,7 @@ fn write_capture_run_manifests(
                 .map(|scenario| crate::helpers::ScenarioName {
                     id: scenario.id.as_deref().unwrap_or_default(),
                     label: scenario.label.as_deref(),
-                    url: Some(&scenario.url),
+                    url: Some(scenario.reference_page_url()),
                 })
                 .collect::<Vec<_>>(),
         );
@@ -1757,7 +1784,12 @@ pub async fn exec_test_suites(args: TestArgs, snapshot_policy: PostRunSnapshot) 
     // Load workspace config
     let workspace_config = config::load_workspace_config(root_dir)?;
     validate_workspace_config(&workspace_config)?;
-    let profiles = load_replacement_profiles_for_run(root_dir, replacement_profile.as_deref())?;
+    let env_profile = replacements::env_profile();
+    let profiles = load_replacement_profiles_for_run(
+        root_dir,
+        replacement_profile.as_deref(),
+        env_profile.as_deref(),
+    )?;
 
     let available = discover_test_suites(&visual_tests_dir)?;
     let discovered: Vec<_> = available.iter().map(|input| input.name.clone()).collect();
@@ -1766,14 +1798,16 @@ pub async fn exec_test_suites(args: TestArgs, snapshot_policy: PostRunSnapshot) 
 
     // Parse all test suites upfront. YAML/config errors are infrastructure
     // errors and must fail before scenarios start.
-    let profile_ctx = SuiteProfileContext {
+    let parsed_suites = parse_suites_off_runtime(
         root_dir,
-        profiles: profiles.as_ref(),
-        cli_profile: replacement_profile.as_deref(),
-        mode: replacements::ReplacementMode::Test,
-    };
-    let parsed_suites =
-        parse_test_suites_with_profile(&visual_tests_dir, filtered, Some(&profile_ctx))?;
+        &visual_tests_dir,
+        filtered,
+        profiles,
+        replacement_profile.as_deref(),
+        env_profile,
+        replacements::ReplacementMode::Test,
+    )
+    .await?;
     validate_scenario_filters(&parsed_suites, &scenarios)?;
     validate_suite_capture_keys(&workspace_config, &parsed_suites)?;
     validate_external_capture_files(root_dir, &workspace_config, &parsed_suites)?;
@@ -1971,7 +2005,12 @@ pub async fn exec_ref(args: RefArgs, snapshot_policy: PostRunSnapshot) -> Result
     // Load workspace config
     let workspace_config = config::load_workspace_config(root_dir)?;
     validate_workspace_config(&workspace_config)?;
-    let profiles = load_replacement_profiles_for_run(root_dir, replacement_profile.as_deref())?;
+    let env_profile = replacements::env_profile();
+    let profiles = load_replacement_profiles_for_run(
+        root_dir,
+        replacement_profile.as_deref(),
+        env_profile.as_deref(),
+    )?;
 
     let available = discover_test_suites(&visual_tests_dir)?;
     let discovered: Vec<_> = available.iter().map(|input| input.name.clone()).collect();
@@ -1982,14 +2021,16 @@ pub async fn exec_ref(args: RefArgs, snapshot_policy: PostRunSnapshot) -> Result
 
     // Parse all test suites upfront. YAML/config errors are infrastructure
     // errors and must fail before scenarios start.
-    let profile_ctx = SuiteProfileContext {
+    let parsed_suites = parse_suites_off_runtime(
         root_dir,
-        profiles: profiles.as_ref(),
-        cli_profile: replacement_profile.as_deref(),
-        mode: replacements::ReplacementMode::Ref,
-    };
-    let parsed_suites =
-        parse_test_suites_with_profile(&visual_tests_dir, filtered, Some(&profile_ctx))?;
+        &visual_tests_dir,
+        filtered,
+        profiles,
+        replacement_profile.as_deref(),
+        env_profile,
+        replacements::ReplacementMode::Ref,
+    )
+    .await?;
     validate_scenario_filters(&parsed_suites, &scenarios)?;
     validate_suite_capture_keys(&workspace_config, &parsed_suites)?;
     validate_external_capture_files(root_dir, &workspace_config, &parsed_suites)?;
@@ -4288,6 +4329,9 @@ mod tests {
 
     #[test]
     fn suite_replacement_profile_ignores_default_and_cli_overrides_suite() {
+        if !replacements::js_runtime_available() {
+            return;
+        }
         let workspace = tempfile::tempdir().unwrap();
         let common = workspace.path().join("common");
         let visual_tests = workspace.path().join("visual_tests");
@@ -4368,6 +4412,7 @@ scenarios:
             root_dir: workspace.path(),
             profiles: Some(&profiles),
             cli_profile: None,
+            env_profile: None,
             mode: replacements::ReplacementMode::Ref,
         };
         let ref_suites =
@@ -4386,6 +4431,7 @@ scenarios:
             root_dir: workspace.path(),
             profiles: Some(&profiles),
             cli_profile: None,
+            env_profile: None,
             mode: replacements::ReplacementMode::Test,
         };
         let test_suites =
@@ -4405,6 +4451,7 @@ scenarios:
             root_dir: workspace.path(),
             profiles: Some(&profiles),
             cli_profile: Some("override_prof"),
+            env_profile: None,
             mode: replacements::ReplacementMode::Test,
         };
         let overridden_suites =
@@ -4416,6 +4463,107 @@ scenarios:
         assert_eq!(
             overridden_suites[1].1.scenarios[0].url,
             "https://override-test.example.com/override-test-path/legacy"
+        );
+    }
+
+    /// Parses `suite_yaml` in both modes under a `{ref: prod, test: staging}` profile.
+    fn parse_in_both_modes(suite_yaml: &str, script: Option<(&str, &str)>) -> [Arc<TestSuite>; 2] {
+        let workspace = tempfile::tempdir().unwrap();
+        let common = workspace.path().join("common");
+        let visual_tests = workspace.path().join("visual_tests");
+        std::fs::create_dir_all(&common).unwrap();
+        std::fs::create_dir_all(&visual_tests).unwrap();
+        let mut profile = String::from(
+            "profiles:\n  default:\n    - find: \"{HOST}\"\n      ref: https://prod.example.com\n      test: https://staging.example.com\n    - ref: https://prod.example.com\n      test: https://staging.example.com\n",
+        );
+        if let Some((file, body)) = script {
+            std::fs::write(common.join(file), body).unwrap();
+            profile.push_str(&format!("    - script: {file}\n"));
+        }
+        std::fs::write(common.join("_replacement-profiles.yaml"), profile).unwrap();
+        std::fs::write(visual_tests.join("a.tests.yaml"), suite_yaml).unwrap();
+        let profiles = replacements::load_replacement_profiles(workspace.path())
+            .unwrap()
+            .unwrap();
+        [
+            replacements::ReplacementMode::Ref,
+            replacements::ReplacementMode::Test,
+        ]
+        .map(|mode| {
+            let ctx = SuiteProfileContext {
+                root_dir: workspace.path(),
+                profiles: Some(&profiles),
+                cli_profile: None,
+                env_profile: None,
+                mode,
+            };
+            let inputs = discover_test_suites(&visual_tests).unwrap();
+            parse_test_suites_with_profile(&visual_tests, inputs, Some(&ctx))
+                .unwrap()
+                .remove(0)
+                .1
+        })
+    }
+
+    #[test]
+    fn unlabeled_scenarios_keep_one_id_and_baseline_url_in_ref_and_test_modes() {
+        let [reference, test] = parse_in_both_modes(
+            "scenarios:\n  - url: https://prod.example.com/home\n  - url: '{HOST}/about'\n",
+            None,
+        );
+        for index in 0..2 {
+            assert_eq!(
+                reference.scenarios[index].id, test.scenarios[index].id,
+                "scenario {index}"
+            );
+        }
+        // Hashed from the authored URL, exactly as before profiles ran at parse time.
+        assert_eq!(
+            test.scenarios[0].id.as_deref(),
+            Some(
+                crate::snapshot::get_asset_version("https://prod.example.com/home".as_bytes(), 20)
+                    .as_str()
+            )
+        );
+        assert_eq!(test.scenarios[0].url, "https://staging.example.com/home");
+        assert_eq!(
+            test.scenarios[0].reference_page_url(),
+            "https://prod.example.com/home"
+        );
+        assert_eq!(test.scenarios[1].url, "https://staging.example.com/about");
+        assert_eq!(
+            test.scenarios[1].reference_page_url(),
+            "https://prod.example.com/about"
+        );
+        assert_eq!(reference.scenarios[1].url, "https://prod.example.com/about");
+
+        let page = report_page_urls(&test.scenarios[0], &[], true).unwrap();
+        assert_eq!(page.reference_url, "https://prod.example.com/home");
+        assert_eq!(page.url, "https://staging.example.com/home");
+        assert_eq!(
+            page.scenario_label.as_deref(),
+            Some("https://prod.example.com/home")
+        );
+    }
+
+    #[test]
+    fn scripts_that_reorder_scenarios_fall_back_to_the_transformed_url() {
+        if !replacements::js_runtime_available() {
+            return;
+        }
+        let [_, test] = parse_in_both_modes(
+            "scenarios:\n  - id: first\n    url: https://prod.example.com/a\n  - id: second\n    url: https://prod.example.com/b\n",
+            Some((
+                "reverse.js",
+                "const s = JSON.parse(require('fs').readFileSync(0, 'utf8')); s.scenarios.reverse(); process.stdout.write(JSON.stringify(s));\n",
+            )),
+        );
+        // Explicit ids differ at the same position, so no original URL may be attached.
+        assert_eq!(test.scenarios[0].id.as_deref(), Some("second"));
+        assert_eq!(test.scenarios[0].reference_url, None);
+        assert_eq!(
+            test.scenarios[0].reference_page_url(),
+            "https://staging.example.com/b"
         );
     }
 
@@ -4436,13 +4584,19 @@ scenarios:
             root_dir: workspace.path(),
             profiles: None,
             cli_profile: None,
+            env_profile: None,
             mode: replacements::ReplacementMode::Test,
         };
         let err = parse_test_suites_with_profile(&visual_tests, inputs, Some(&ctx_no_file))
             .err()
             .expect("Missing replacement profile file must fail");
         assert!(
-            format!("{err:#}").contains("Replacement profile file not found"),
+            format!("{err:#}")
+                .contains("Replacement profile file not found: common/_replacement-profiles.yaml"),
+            "{err:#}"
+        );
+        assert!(
+            !format!("{err:#}").contains(workspace.path().to_string_lossy().as_ref()),
             "{err:#}"
         );
 
@@ -4452,6 +4606,7 @@ scenarios:
             root_dir: workspace.path(),
             profiles: Some(&empty_profiles),
             cli_profile: None,
+            env_profile: None,
             mode: replacements::ReplacementMode::Test,
         };
         let err = parse_test_suites_with_profile(&visual_tests, inputs, Some(&ctx_undefined))

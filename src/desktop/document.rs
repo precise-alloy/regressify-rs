@@ -14,7 +14,14 @@ use serde_json::{Value, json};
 use yaml_edit::{AsYaml, Document as YamlDocument, Sequence, SyntaxKind, YamlFile, YamlNode};
 
 use crate::{
-    config::{WorkspaceConfig, replacements::validate_replacements, viewports},
+    config::{
+        WorkspaceConfig,
+        replacements::{
+            ReplacementProfileItem, ReplacementProfilesFile, validate_profile_items_syntax,
+            validate_replacements,
+        },
+        viewports,
+    },
     types::{Browser, TestSuite, UrlReplacement},
 };
 
@@ -27,6 +34,7 @@ pub enum DocumentKind {
     Workspace,
     Suite,
     Viewports,
+    ReplacementProfiles,
     Data,
 }
 
@@ -801,6 +809,9 @@ pub(crate) fn validate_semantics(kind: DocumentKind, value: &Value) -> Result<()
         DocumentKind::Viewports => {
             Vec::<viewports::ViewportDef>::deserialize(value)?;
         }
+        DocumentKind::ReplacementProfiles => {
+            ReplacementProfilesFile::deserialize(value)?;
+        }
         DocumentKind::Data => {}
     }
     let issues = semantic_diagnostics(kind, value);
@@ -874,6 +885,29 @@ pub(crate) fn semantic_diagnostics(
                         format!("/{}/{}", error.index, error.field)
                     });
                 semantic_issue(&mut issues, pointer, error.to_string());
+            }
+        }
+        DocumentKind::ReplacementProfiles => {
+            // Schema diagnostics own ill-typed items; check regexes, flags, and script names here.
+            // Whether a script file exists needs the workspace, so the run checks that.
+            for (name, items) in value["profiles"].as_object().into_iter().flatten() {
+                for (index, item) in items.as_array().into_iter().flatten().enumerate() {
+                    if issues.len() >= super::validation::MAX_DIAGNOSTICS {
+                        break;
+                    }
+                    let pointer = format!(
+                        "/profiles/{}/{index}",
+                        super::validation::escape_pointer(name)
+                    );
+                    if let Ok(item) = ReplacementProfileItem::deserialize(item)
+                        && let Err(error) = validate_profile_items_syntax(
+                            std::slice::from_ref(&item),
+                            &super::validation::display_path(&pointer),
+                        )
+                    {
+                        semantic_issue(&mut issues, pointer, format!("{error:#}"));
+                    }
+                }
             }
         }
         DocumentKind::Data => {

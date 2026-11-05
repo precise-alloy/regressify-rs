@@ -1068,6 +1068,16 @@ fn entry_kind(relative: &Path) -> DocumentKind {
     {
         return DocumentKind::Viewports;
     }
+    // Only the exact names the runtime loads; `components` is exhausted when the file is directly in `common/`.
+    if in_folder("common")
+        && components.next().is_none()
+        && matches!(
+            name.as_str(),
+            "_replacement-profiles.yaml" | "_replacement-profiles.yml"
+        )
+    {
+        return DocumentKind::ReplacementProfiles;
+    }
     DocumentKind::Data
 }
 
@@ -1148,6 +1158,10 @@ fn validate_typed_source(document: &Document) -> Result<()> {
         DocumentKind::Suite => parse_typed_source::<crate::types::TestSuite>(document).map(|_| ()),
         DocumentKind::Viewports => {
             parse_typed_source::<Vec<crate::config::viewports::ViewportDef>>(document).map(|_| ())
+        }
+        DocumentKind::ReplacementProfiles => {
+            parse_typed_source::<crate::config::replacements::ReplacementProfilesFile>(document)
+                .map(|_| ())
         }
         DocumentKind::Data => Ok(()),
     }
@@ -1424,8 +1438,20 @@ mod tests {
             ("common/README", DocumentKind::Data),
             ("common/_on-ready.js", DocumentKind::Data),
             ("common/_override.css", DocumentKind::Data),
+            (
+                "common/_replacement-profiles.yaml",
+                DocumentKind::ReplacementProfiles,
+            ),
+            (
+                "common/_replacement-profiles.yml",
+                DocumentKind::ReplacementProfiles,
+            ),
             ("common/_viewports.yaml", DocumentKind::Viewports),
             ("common/data.json", DocumentKind::Data),
+            (
+                "common/nested/_replacement-profiles.yaml",
+                DocumentKind::Data,
+            ),
             ("common/nested/helper.tests.json", DocumentKind::Data),
             ("common/nested/hook.js", DocumentKind::Data),
             ("common/template.tests.yaml", DocumentKind::Data),

@@ -199,7 +199,8 @@ Type: `string`.
 Go to specific URL.
 Regressify waits until the destination document is interactive before running the
 next action. In `test` mode, active URL replacements are applied before
-navigating; `ref` mode uses the URL as written.
+navigating; `ref` mode applies only rules with `find` (`find` becomes `ref`) and
+otherwise uses the URL as written.
 
 Example:
 
@@ -532,8 +533,8 @@ require Node.js or change the link's `target` behavior.
 
 An optional `url` on `switchTab: new` filters the destination using the same
 exact URL/glob rules as `wait`. It follows redirects and includes query strings
-and fragments. Test-mode URL replacements also apply; reference-mode URLs stay
-as written. Omit `url` for `previous` and `original`; preflight rejects it there.
+and fragments. Test-mode URL replacements also apply; reference mode applies only
+rules with `find`. Omit `url` for `previous` and `original`; preflight rejects it there.
 
 Tab selection is bounded by `elementTimeout`. Missing or closed tabs fail the
 scenario. If several new tabs match, use a more specific `url`; Regressify does
@@ -595,7 +596,7 @@ URL patterns also support brace alternatives, for example
 Select actions retry missing or disabled options until `elementTimeout` expires.
 If there is navigation, add the URL pattern of the target page also.
 
-In `test` mode, URL replacements from the active replacement profile and suite/workspace `urlReplacements` are applied to `url` before matching. In `ref` mode, wait URLs are matched as written.
+In `test` mode, URL replacements from the active replacement profile and suite/workspace `urlReplacements` are applied to `url` before matching. In `ref` mode, only rules with `find` apply (`find` becomes `ref`); other wait URLs are matched as written.
 URL patterns support `*` within a path segment, `**` across path depth, and
 wildcards in query values.
 

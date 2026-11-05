@@ -239,7 +239,7 @@ pub struct FocusAction {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[derive(schemars::JsonSchema)]
 pub struct GotoAction {
-    /// Navigate the page (or frame) to this URL and wait until the document is interactive. Test captures apply URL replacements; reference captures use it as written.
+    /// Navigate the page (or frame) to this URL and wait until the document is interactive. Test captures apply URL replacements; reference captures apply only rules with find (find becomes ref) and otherwise use it as written.
     #[schemars(example = "https://example.com")]
     pub goto: String,
     pub frame: Option<Frame>,
@@ -437,7 +437,7 @@ pub struct UncheckAction {
 pub struct SwitchTabAction {
     /// Select a new tab opened by the current page, the previously selected tab, or the scenario's original tab. Subsequent actions and screenshots use the selected tab.
     pub switch_tab: TabTarget,
-    /// Optional URL or glob for a new tab. Waits for its navigation to match; * stays within one path segment and ** matches across segments. Only valid with switchTab: new; test captures apply URL replacements.
+    /// Optional URL or glob for a new tab. Waits for its navigation to match; * stays within one path segment and ** matches across segments. Only valid with switchTab: new; test captures apply URL replacements, and reference captures apply rules with find.
     #[schemars(example = "**/quote")]
     pub url: Option<String>,
     /// Restrict this action to one viewport label or a list of labels (case-insensitive).
@@ -462,7 +462,7 @@ pub struct WaitAction {
     /// Whole milliseconds to pause, or an element selector that must exist and become visible within elementTimeout. With url, the URL is matched first; this pause or selector wait runs afterwards.
     #[schemars(example = 1000, example = "#ready")]
     pub wait: Wait,
-    /// URL or glob the page or frame URL must match within elementTimeout before the wait continues. * matches within one path segment, ** across segments, {a,b} lists alternatives, and ? is literal. Test captures apply URL replacements.
+    /// URL or glob the page or frame URL must match within elementTimeout before the wait continues. * matches within one path segment, ** across segments, {a,b} lists alternatives, and ? is literal. Test captures apply URL replacements, and reference captures apply rules with find.
     #[schemars(example = "**/dashboard")]
     pub url: Option<String>,
     /// Element condition, default visible. Hidden also matches an absent element; detached requires absence. Only valid with a selector wait.
