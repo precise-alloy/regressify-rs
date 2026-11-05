@@ -3107,7 +3107,11 @@ impl Workbench {
                     }
                     if this.close_after_preferences {
                         this.close_after_preferences = false;
-                        if saved && !this.busy && !this.unsaved(cx) && !this.runs.read(cx).running()
+                        // A frozen-but-closable window (`workspace_lost`) stays `busy` for good.
+                        if saved
+                            && (!this.busy || this.workspace_lost)
+                            && !this.unsaved(cx)
+                            && !this.runs.read(cx).running()
                         {
                             this.quit_or_install(cx);
                         } else {
@@ -3354,7 +3358,10 @@ pub fn launch(instance: Option<DesktopInstance>) {
                                     if this.install_blocks_quit(cx) {
                                         false
                                     } else if this.workspace_lost {
-                                        true
+                                        // Quit the process: returning `true` would only close the
+                                        // window and leave the app running headless on macOS.
+                                        this.finish_close(cx);
+                                        false
                                     } else if this.busy {
                                         if this.git.read(cx).active() {
                                             this.git

@@ -211,6 +211,12 @@ impl InstallState {
     }
 }
 
+/// Whether a stored install state belongs to a release other than the one just announced and
+/// is no longer running, so it must not be shown for (or mask checks of) the announced one.
+pub fn install_is_stale(state: &InstallState, target: Option<Version>, announced: Version) -> bool {
+    !state.in_progress() && target.is_some_and(|target| target != announced)
+}
+
 #[derive(Clone, Debug)]
 pub struct InstallHandle(std::sync::Arc<std::sync::Mutex<InstallState>>);
 
@@ -238,6 +244,14 @@ impl InstallHandle {
         handle
     }
 
+    /// A failed install, for GUI tests.
+    #[cfg(all(test, feature = "gui-tests"))]
+    pub fn failed(reason: &str) -> Self {
+        let handle = Self::new();
+        handle.set(InstallState::Failed(reason.into()));
+        handle
+    }
+
     fn set(&self, state: InstallState) {
         *self.0.lock().unwrap_or_else(|error| error.into_inner()) = state;
     }
@@ -260,7 +274,7 @@ pub fn perform_install(
     handle: &InstallHandle,
 ) -> Result<()> {
     use macos_install::Phase;
-    let result = macos_install::install(
+    macos_install::install(
         bundle,
         cache,
         &plan.url,
@@ -276,8 +290,7 @@ pub fn perform_install(
                 Phase::Installing => InstallState::Installing,
             })
         },
-    );
-    result
+    )
 }
 
 /// Publishes the final `Restart` or `Failed` state. Call only after `InstallLock` is dropped.
@@ -3451,6 +3464,22 @@ mod tests {
             text.contains("did not finish") && text.contains("partial"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn an_install_row_only_describes_the_release_it_was_started_for() {
+        use super::{InstallState, install_is_stale};
+        let old: Version = "2.2.0.0".parse().unwrap();
+        let newer: Version = "2.3.0.0".parse().unwrap();
+        let running = InstallState::Installing;
+        let failed = InstallState::Failed("x".into());
+        // Finished or failed installs of another release are stale...
+        assert!(install_is_stale(&InstallState::Restart, Some(old), newer));
+        assert!(install_is_stale(&failed, Some(old), newer));
+        // ...but not for the same release, not while running, and not when unscoped.
+        assert!(!install_is_stale(&InstallState::Restart, Some(old), old));
+        assert!(!install_is_stale(&running, Some(old), newer));
+        assert!(!install_is_stale(&failed, None, newer));
     }
 
     #[test]
