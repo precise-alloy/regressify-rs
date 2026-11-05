@@ -156,7 +156,15 @@ impl UpdatePanel {
         // A newly announced release retires a finished or failed install of another release.
         if let Ok(NoticeOutcome::Available(notice)) = &result
             && let Some(state) = self.install_state()
-            && install_is_stale(&state, self.install_for, notice.version)
+            && install_is_stale(
+                &state,
+                // The installed release (from the fresh plan) wins over the clicked notice.
+                self.install
+                    .as_ref()
+                    .and_then(InstallHandle::target)
+                    .or(self.install_for),
+                notice.version,
+            )
         {
             self.install = None;
             self.install_for = None;
@@ -1773,34 +1781,52 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    async fn restart_with_an_invalid_source_draft_opens_the_unsaved_guard(cx: &mut TestAppContext) {
+    async fn restart_with_an_invalid_field_draft_opens_the_unsaved_guard(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let (handle, view) = editor(cx, directory.path());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |this, cx| {
                 this.updates.update(cx, |updates, _| {
-                    let relaunch: super::Relauncher =
-                        std::sync::Arc::new(|_: &std::path::Path, _: Option<&std::path::Path>| {
+                    let relaunch: super::Relauncher = std::sync::Arc::new(
+                        move |_: &std::path::Path, _: Option<&std::path::Path>| {
+                            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             false
-                        });
+                        },
+                    );
                     updates.seed_macos(Some(relaunch));
                 });
-                this.tab = 1;
-                this.source.update(cx, |state, cx| {
-                    state.set_value("scenarios: [unterminated".to_owned(), window, cx)
-                });
+                // An unparsable Fields draft makes `flush_drafts` return Err.
+                let binding = this
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.field.key == "delay")
+                    .unwrap();
+                if let crate::desktop::ui::Control::Input(input) = &binding.control {
+                    input.update(cx, |state, cx| state.set_value("invalid draft", window, cx));
+                }
                 this.request_macos_restart(window, cx);
+                assert!(this.field_errors.contains_key("delay"));
             });
         })
         .unwrap();
         settle_dialog(cx, handle).await;
         cx.update_window(handle.into(), |_, window, cx| {
-            // Same guard as native close: Discard stays available, nothing was refused silently.
+            // Same guard as native close; the restart is not refused with a bare status.
             assert!(window.find("guard-discard").visible());
             assert!(!view.read(cx).status.starts_with("Cannot restart to update"));
-            window.click("guard-cancel", cx);
+            // Save is disabled while a field is invalid, so clicking it restarts nothing.
+            window.click("guard-save", cx);
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            window.click("guard-discard", cx);
         })
         .unwrap();
+        // Discard drops the invalid draft and the restart continues into the relaunch.
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, _| {
+            calls.load(std::sync::atomic::Ordering::SeqCst) == 1
+        })
+        .await;
     }
 
     #[gpui_kit::test]
