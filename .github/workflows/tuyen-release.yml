@@ -122,6 +122,9 @@ jobs:
           TARGET: ${{ matrix.target }}
           NO_DEFAULT_FEATURES: 1
           REGRESSIFY_DESKTOP_VERSION: ${{ needs.set-matrix.outputs.version }}
+          # macOS desktop only: embeds the notify-only update feed origin. The CLI and Linux builds
+          # get an empty value, which build.rs treats as update checks disabled.
+          REGRESSIFY_UPDATE_ORIGIN: ${{ matrix.application == 'desktop' && startsWith(matrix.os, 'macos') && env.RELEASE_ORIGIN || '' }}
         shell: bash
 
       - name: Build Windows desktop release

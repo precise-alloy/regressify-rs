@@ -242,8 +242,9 @@ app launches are blocked during setup. After installation the initiating workspa
 reopens, if one was open. Older installers cannot
 downgrade an installed version. Local preparation removes the network dependency
 from installation, but disk errors, security software, or running app instances
-can still prevent setup from completing. Unconfigured development builds and non-Windows
-builds do not contact the update service.
+can still prevent setup from completing. Unconfigured development builds and Linux builds
+do not contact the update service; macOS builds only check for a notice (see
+[macOS update notice](#macos-update-notice-and-opt-in-install)).
 
 The public feed is `https://regressify.eshn.dev/downloads/latest.txt`. It selects
 the site's supported version; binaries remain on GitHub Releases. Official builds
@@ -266,7 +267,90 @@ Musl distributions and Linux ARM64 are not supported by prebuilt releases; the
 installer rejects them before downloading or changing files. Linux desktop still requires compatible
 system GUI libraries. The script requires curl, unzip, and a SHA-256 tool; it
 verifies every selected archive before replacing binaries and does not edit shell
-profiles. Non-Windows in-app updates remain unavailable; rerun the terminal command.
+profiles. Linux in-app updates remain unavailable; rerun the terminal command. macOS shows a notice
+and can install in place (see below).
+
+### macOS update notice and opt-in install
+
+Official macOS builds (Intel and Apple silicon) check the same release feed at
+startup and then every eight hours. Checking never downloads or installs anything. When
+the feed's `version` is newer, a banner reads "Regressify <version> is available"
+that offers **Update now** when the app can install in place (see below) and otherwise
+shows the install command (`curl -fsSL https://<update-origin>/install.sh | sh`, host
+taken from the build's update origin) with a **Copy command** button; after a failed
+install the command appears there too. It also has **View release** (opens
+`https://github.com/precise-alloy/regressify-rs/releases/tag/<tag>`), and a dismiss
+button. Dismissing hides the banner for that version and older ones; a newer release
+shows again, and the Software updates dialog keeps offering that release's controls.
+The command installs into `/Applications` (or `~/Applications` when that is not
+writable) unless `REGRESSIFY_APP_DIR` is set, so for an app installed elsewhere
+put `REGRESSIFY_APP_DIR=<folder containing Regressify.app>` on the `sh` side of the
+pipe (`curl ... | REGRESSIFY_APP_DIR=<folder> sh`; a prefix before `curl` reaches only
+`curl`) or open the newly installed copy afterward.
+Only `version` and `tag` are read (the tag must match the version); installer and
+archive fields are ignored. A failed or malformed check leaves the banner unchanged
+and shows its error in the Software updates dialog; it is also
+written to diagnostics, and retry after the usual eight hours. The check timestamp,
+the last announced release, and the dismissal live in `updates/notice.json`,
+separate from the Windows installer state, and are updated under a lock. Open
+macOS windows share them: a release found by one window appears in the others on
+their next poll, and dismissing in one hides it in the rest. Linux builds have no
+update check. Versions are shown without a trailing `.0` (`2.2.2.0` reads `2.2.2`).
+The **Software updates** dialog uses the same state: running version, status (up to
+date, available, checking, or the error), an enabled **Check for updates** that forces
+the notice check (skipping only the eight-hour deadline), and the same **Update now**
+or **Copy command** controls as the banner.
+
+**Update now** appears only when the running binary is inside a `Regressify.app`
+whose folder the user can write to; otherwise (bare binary, `cargo run`, read-only
+folder) only the copy-command flow is offered. Clicking it, and nothing earlier:
+
+1. fetches a fresh manifest and picks `archive.regressify-desktop-<aarch64|x86_64>-apple-darwin.zip`
+   (size and SHA-256), then downloads
+   `https://github.com/precise-alloy/regressify-rs/releases/download/<tag>/<archive>`
+   over HTTPS with the Windows updater's GitHub-only redirect allowlist, into a private
+   (0700) folder under the user's update cache;
+2. aborts and deletes the download unless it is exactly the announced size (capped at
+   256 MiB) and matches the SHA-256;
+3. extracts only `regressify-desktop` after checking every entry (only
+   `regressify-desktop`, `LICENSE`, `LICENSING.md`; no paths, absolute names, or symlinks);
+4. copies the installed bundle beside it (`.Regressify.app.update-stage-<random>`),
+   replaces only `Contents/MacOS/regressify-desktop`, stamps the new version into
+   `Info.plist` (a plist that cannot be stamped and read back aborts the install before
+   anything is swapped), ad-hoc signs with `/usr/bin/codesign --force --deep --sign -`
+   and checks `codesign --verify`;
+5. exchanges the staged and installed apps with one atomic `renamex_np(RENAME_SWAP)`, so the
+   app path always holds a whole app, then verifies again and exchanges back on failure. The
+   old app becomes `Regressify.app.previous` (the single backup; older backups are removed).
+   If the volume cannot exchange, the install is refused with nothing changed and the copy
+   command stays the way to update. Before the exchange, `.Regressify.app.recovery-needed`
+   records the stage folder and the version the app reported before the swap; it is removed
+   once the update is verified and the old app is kept as the backup, or once a rollback
+   works. If the mark cannot be written, the install is refused with nothing changed. If the
+   rollback itself fails, or the old app cannot be kept as `Regressify.app.previous`, the
+   previous app stays in its stage folder and the Failed message names it. After a kill the
+   mark persists across restarts: when the live app still reports the recorded version the mark
+   is stale (nothing swapped, or the rollback finished) and is cleared; otherwise the updater
+   refuses further installs and never deletes that folder. `install.sh` does not read the
+   mark, so restore the preserved app (and delete the mark file) before running any
+   installer, in-app or terminal;
+6. shows **Restart**. Restart uses the same unsaved-work guards as quitting (including the
+   landing-app editor: Save or Discard continues into the restart, Keep editing cancels it),
+   then runs `/usr/bin/open -n <app> --args <workspace>` off the UI thread and quits when it
+   succeeds; unsaved work is never discarded silently. This window releases its workspace
+   ownership just before the launch (the new instance would otherwise only activate this one)
+   and reclaims it if the launch fails.
+
+The banner shows Downloading n%, Verifying, Installing, Restart, or Failed with the
+reason (the install command is offered again after a failure). The same lock directory
+as `install.sh` (`.Regressify.lock` beside the app) allows one installer at a time, so the
+terminal installer and the in-app updater exclude each other; if neither is running and it
+was left behind by a crash, remove it. The version already installed is read from the
+bundle's `Info.plist` under that lock, so a stale window cannot reinstall or downgrade it.
+There is no shell, script execution, sudo, osascript, background download, or host other
+than the update origin and GitHub releases. The install steps are covered by Linux unit
+tests with injected downloader and signer; the macOS UI and real `codesign`/`open`
+behavior are unverified on real hardware.
 
 ## Git
 

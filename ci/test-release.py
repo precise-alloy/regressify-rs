@@ -540,6 +540,11 @@ gh() {
         self.assertEqual(build["env"]["PACKAGE_NAME"], "${{ matrix.application == 'desktop' && 'regressify-desktop' || 'regressify-cli' }}")
         self.assertEqual(build["env"]["CARGO_FEATURES"], "${{ matrix.features }}")
         self.assertEqual(build["env"]["NO_DEFAULT_FEATURES"], "1")
+        # The macOS desktop build embeds the notify-only update origin; CLI and Linux never do.
+        self.assertEqual(
+            build["env"]["REGRESSIFY_UPDATE_ORIGIN"],
+            "${{ matrix.application == 'desktop' && startsWith(matrix.os, 'macos') && env.RELEASE_ORIGIN || '' }}",
+        )
         cache = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/cache@"))
         self.assertIn("matrix.application", cache["with"]["key"])
 
