@@ -249,6 +249,7 @@ impl CompletionCatalog {
             DocumentKind::Workspace,
             DocumentKind::Suite,
             DocumentKind::Viewports,
+            DocumentKind::ReplacementProfiles,
         ] {
             if let Some(schema) = validation::schema(kind)? {
                 schemas.push((kind, schema));

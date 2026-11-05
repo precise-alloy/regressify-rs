@@ -8,7 +8,10 @@ use super::{
     document::{ACTIONS, DocumentKind},
     schema::{self, resolve},
 };
-use crate::{config::WorkspaceConfig, config::viewports::ViewportDef, types::TestSuite};
+use crate::{
+    config::{WorkspaceConfig, replacements::ReplacementProfilesFile, viewports::ViewportDef},
+    types::TestSuite,
+};
 
 pub(crate) const MAX_DIAGNOSTICS: usize = 50;
 
@@ -41,10 +44,13 @@ fn document_schema(kind: DocumentKind) -> Result<Option<&'static DocumentSchema>
         LazyLock::new(|| DocumentSchema::new(schemars::schema_for!(WorkspaceConfig)));
     static VIEWPORTS: LazyLock<Result<DocumentSchema, String>> =
         LazyLock::new(|| DocumentSchema::new(schemars::schema_for!(Vec<ViewportDef>)));
+    static REPLACEMENT_PROFILES: LazyLock<Result<DocumentSchema, String>> =
+        LazyLock::new(|| DocumentSchema::new(schemars::schema_for!(ReplacementProfilesFile)));
     let schema = match kind {
         DocumentKind::Suite => &*SUITE,
         DocumentKind::Workspace => &*WORKSPACE,
         DocumentKind::Viewports => &*VIEWPORTS,
+        DocumentKind::ReplacementProfiles => &*REPLACEMENT_PROFILES,
         DocumentKind::Data => return Ok(None),
     };
     schema
@@ -1210,6 +1216,60 @@ mod tests {
                 .message
                 .contains("1")
         );
+    }
+
+    #[test]
+    fn replacement_profile_diagnostics_name_the_item_and_accept_both_item_types() {
+        let valid = json!({"profiles": {"default": [], "qa": [
+            {"find": "{HOST}", "ref": "https://a.example", "test": "https://b.example"},
+            {"ref": "^https://a", "test": "https://b", "regex": true, "flags": "i"},
+            {"script": "common/transform.js"}
+        ]}});
+        assert!(
+            diagnostics(DocumentKind::ReplacementProfiles, &valid)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            crate::desktop::document::validate_value(DocumentKind::ReplacementProfiles, &valid)
+                .is_ok()
+        );
+
+        // An item can only be one type: mixing them is an error pointing at the item.
+        let mixed = json!({"profiles": {"qa": [
+            {"script": "a.js", "ref": "x", "test": "y"}
+        ]}});
+        let issues = diagnostics(DocumentKind::ReplacementProfiles, &mixed).unwrap();
+        assert!(!issues.is_empty());
+        assert!(
+            issues
+                .iter()
+                .all(|issue| issue.pointer.starts_with("/profiles/qa/0")),
+            "{issues:?}"
+        );
+        assert!(
+            crate::desktop::document::validate_value(DocumentKind::ReplacementProfiles, &mixed)
+                .is_err()
+        );
+
+        // Well-typed items still get the runtime's regex, flag, and script checks.
+        for (item, expected) in [
+            (
+                json!({"ref": "[", "test": "/", "regex": true}),
+                "Invalid regex",
+            ),
+            (json!({"ref": "a", "test": "b", "flags": "i"}), "flags"),
+            (json!({"script": "notes.txt"}), "unsupported extension"),
+        ] {
+            let value = json!({"profiles": {"my profile": [item]}});
+            let issues = crate::desktop::document::semantic_diagnostics(
+                DocumentKind::ReplacementProfiles,
+                &value,
+            );
+            assert_eq!(issues.len(), 1, "{issues:?}");
+            assert_eq!(issues[0].pointer, "/profiles/my profile/0");
+            assert!(issues[0].message.contains(expected), "{issues:?}");
+        }
     }
 
     #[test]

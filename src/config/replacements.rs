@@ -1,15 +1,38 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::ffi::{OsStr, OsString};
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::types::UrlReplacement;
+
+/// Bounds one script run so a hung or runaway script cannot stall or exhaust a test run.
+#[derive(Clone, Copy, Debug)]
+pub struct ScriptLimits {
+    pub timeout: Duration,
+    pub max_stdout_bytes: usize,
+}
+
+impl Default for ScriptLimits {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(60),
+            max_stdout_bytes: 32 * 1024 * 1024,
+        }
+    }
+}
 
 /// Execution mode determining how URL replacement rules and profile scripts run.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -53,11 +76,33 @@ pub struct ScriptReplacement {
 
 /// One step in a replacement profile: either a URL replacement rule or a script transformation.
 /// Each item in a profile must be exactly one of these two variants.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ReplacementProfileItem {
     Url(UrlReplacement),
     Script(ScriptReplacement),
+}
+
+// Hand-written so errors name the offending field instead of serde's generic
+// "did not match any variant of untagged enum".
+impl<'de> Deserialize<'de> for ReplacementProfileItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = Value::deserialize(deserializer)?;
+        match value.as_object() {
+            Some(map) if map.contains_key("script") => ScriptReplacement::deserialize(value)
+                .map(Self::Script)
+                .map_err(|error| D::Error::custom(format!("invalid `script` item: {error}"))),
+            Some(_) => UrlReplacement::deserialize(value)
+                .map(Self::Url)
+                .map_err(|error| {
+                    D::Error::custom(format!("invalid URL replacement item: {error}"))
+                }),
+            None => Err(D::Error::custom(
+                "each profile item must be an object with `script`, or with `ref` and `test`",
+            )),
+        }
+    }
 }
 
 /// Supported external script runtimes detected from the script's file extension.
@@ -105,6 +150,9 @@ pub struct ReplacementProfilesFile {
     pub profiles: HashMap<String, Vec<ReplacementProfileItem>>,
 }
 
+/// Workspace-relative location shown when the profile file is missing.
+pub const PROFILE_FILE_DISPLAY: &str = "common/_replacement-profiles.yaml";
+
 /// Load replacement profiles from a YAML file.
 /// Looks for `common/_replacement-profiles.yaml` or `common/_replacement-profiles.yml`
 /// relative to the workspace root.
@@ -130,30 +178,35 @@ pub fn load_replacement_profiles(root_dir: &Path) -> Result<Option<ReplacementPr
     }
 }
 
-/// Determine the active replacement profile name and whether it was explicitly configured.
-/// Priority: CLI `--replacement-profile` -> `REPLACEMENT_PROFILE` env var -> suite `replacementProfile` -> `"default"`.
-pub fn resolve_profile_selection(
-    cli_arg: Option<&str>,
-    suite_profile: Option<&str>,
-) -> (String, bool) {
-    if let Some(name) = cli_arg {
-        return (name.to_string(), true);
-    }
-    if let Ok(env_val) = std::env::var("REPLACEMENT_PROFILE")
-        && !env_val.is_empty()
-    {
-        return (env_val, true);
-    }
-    if let Some(suite_name) = suite_profile {
-        return (suite_name.to_string(), true);
-    }
-    ("default".to_string(), false)
+/// The `REPLACEMENT_PROFILE` environment variable, read once per run; empty counts as unset.
+pub fn env_profile() -> Option<String> {
+    std::env::var("REPLACEMENT_PROFILE")
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
-/// Determine the active replacement profile name without suite context.
-/// Priority: CLI arg -> REPLACEMENT_PROFILE env var -> "default"
-pub fn get_profile_name(cli_arg: Option<&str>) -> String {
-    resolve_profile_selection(cli_arg, None).0
+/// Determine the active replacement profile name and whether it was explicitly configured.
+/// Priority: CLI `--replacement-profile` -> `REPLACEMENT_PROFILE` -> suite `replacementProfile` -> `"default"`.
+pub fn resolve_profile_selection(
+    cli_arg: Option<&str>,
+    env_profile: Option<&str>,
+    suite_profile: Option<&str>,
+) -> (String, bool) {
+    match cli_arg.or(env_profile).or(suite_profile) {
+        Some(name) => (name.to_string(), true),
+        None => ("default".to_string(), false),
+    }
+}
+
+/// `\\?\UNC\server\share` becomes `\\server\share` and `\\?\C:\` becomes `C:\`; other paths are unchanged.
+pub fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        path.to_string()
+    }
 }
 
 /// Bind URL replacement rules for a specific execution mode (`Ref` or `Test`).
@@ -379,7 +432,12 @@ pub fn resolve_profile_script_path(
         source,
     )?;
     let common_dir = root_dir.join("common");
-    let path = Path::new(configured_path);
+    // Trim and drop `.` components so `./common/x.js` resolves like `common/x.js`.
+    let normalized: PathBuf = Path::new(configured_path.trim())
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir))
+        .collect();
+    let path = normalized.as_path();
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else if path.components().next() == Some(Component::Normal(std::ffi::OsStr::new("common"))) {
@@ -404,19 +462,15 @@ pub fn resolve_profile_script_path(
 
     let canonical_root = root_dir
         .canonicalize()
-        .with_context(|| format!("Failed to resolve workspace root '{}'", root_dir.display()))?;
-    let canonical_common = common_dir.canonicalize().with_context(|| {
-        format!(
-            "Failed to resolve common directory '{}'",
-            common_dir.display()
-        )
-    })?;
+        .context("Failed to resolve the workspace root")?;
+    let canonical_common = common_dir
+        .canonicalize()
+        .context("Failed to resolve the 'common' folder")?;
     if !canonical_common.starts_with(&canonical_root) {
         anyhow::bail!(
-            "Configured replacement script '{}' in {} escapes workspace root '{}'",
+            "Configured replacement script '{}' in {} escapes the workspace root",
             configured_path,
-            source,
-            root_dir.display()
+            source
         );
     }
     let canonical_path = candidate.canonicalize().with_context(|| {
@@ -427,10 +481,9 @@ pub fn resolve_profile_script_path(
     })?;
     if !canonical_path.starts_with(&canonical_common) {
         anyhow::bail!(
-            "Configured replacement script '{}' in {} escapes common directory '{}'",
+            "Configured replacement script '{}' in {} escapes the 'common' folder",
             configured_path,
-            source,
-            common_dir.display()
+            source
         );
     }
     if !canonical_path.is_file() {
@@ -441,16 +494,37 @@ pub fn resolve_profile_script_path(
         );
     }
 
-    // Strip the Windows verbatim `\\?\` prefix added by `canonicalize()` so
-    // `cmd.exe` and other external shells can execute the resolved script path.
+    // Strip the Windows verbatim prefix added by `canonicalize()` so cmd.exe and other
+    // external shells can execute the resolved script path.
     #[cfg(windows)]
-    let canonical_path = canonical_path
-        .to_str()
-        .and_then(|s| s.strip_prefix(r"\\?\"))
-        .map(PathBuf::from)
-        .unwrap_or(canonical_path);
+    let canonical_path = PathBuf::from(strip_verbatim_prefix(&canonical_path.to_string_lossy()));
+
+    // `%VAR%` expands inside cmd's quoted command line and `"` cannot be quoted, so neither is safe.
+    if kind == ScriptKind::Batch && canonical_path.to_string_lossy().contains(['%', '!', '"']) {
+        anyhow::bail!(
+            "Replacement script '{}' in {} is in a folder whose path contains '%', '!' or '\"'; cmd.exe cannot run it safely. Move the workspace or use a .ps1/.js script",
+            configured_path,
+            source
+        );
+    }
 
     Ok((canonical_path, kind))
+}
+
+/// Report URL for `url` as the baseline environment sees it: only `find` rules apply.
+/// Scripts are skipped because they cannot be re-run per URL.
+pub fn reference_url(url: &str, items: &[ReplacementProfileItem]) -> Result<String> {
+    let mut result = url.to_string();
+    for item in items {
+        if let ReplacementProfileItem::Url(rule) = item {
+            result = apply_replacements_for_mode(
+                &result,
+                std::slice::from_ref(rule),
+                ReplacementMode::Ref,
+            )?;
+        }
+    }
+    Ok(result)
 }
 
 /// Apply a single URL replacement rule to all URL-bearing fields in a raw test suite JSON value
@@ -502,6 +576,26 @@ pub fn run_profile_script(
     profile_name: &str,
     suite_name: &str,
 ) -> Result<Value> {
+    run_profile_script_with_limits(
+        root_dir,
+        script,
+        suite_value,
+        mode,
+        profile_name,
+        suite_name,
+        ScriptLimits::default(),
+    )
+}
+
+pub fn run_profile_script_with_limits(
+    root_dir: &Path,
+    script: &ScriptReplacement,
+    suite_value: &Value,
+    mode: ReplacementMode,
+    profile_name: &str,
+    suite_name: &str,
+    limits: ScriptLimits,
+) -> Result<Value> {
     let source = format!("replacement profile '{}'", profile_name);
     let (script_path, kind) = resolve_profile_script_path(root_dir, &script.script, &source)?;
     let input_bytes = serde_json::to_vec(suite_value).with_context(|| {
@@ -510,6 +604,10 @@ pub fn run_profile_script(
             suite_name, script.script
         )
     })?;
+    let describe = format!(
+        "Replacement script '{}' in profile '{}'",
+        script.script, profile_name
+    );
 
     let mut child = spawn_script_process(
         kind,
@@ -521,55 +619,228 @@ pub fn run_profile_script(
         suite_name,
     )?;
 
-    // Write stdin on a helper thread so large suite payloads cannot deadlock
-    // if the child writes extensively to stdout/stderr before finishing stdin.
+    // Every pipe has its own thread: a script that fills stdout/stderr before
+    // reading stdin must not deadlock with the parent.
     if let Some(mut stdin) = child.stdin.take() {
         std::thread::spawn(move || {
             let _ = stdin.write_all(&input_bytes);
-            let _ = stdin.flush();
         });
     }
+    let overflow = Arc::new(AtomicBool::new(false));
+    let stdout_rx = drain_pipe(
+        child.stdout.take(),
+        limits.max_stdout_bytes,
+        Some(overflow.clone()),
+    );
+    let stderr_rx = drain_pipe(child.stderr.take(), 0, None);
 
-    let output = child.wait_with_output().with_context(|| {
-        format!(
-            "Failed waiting for replacement script '{}' in profile '{}'",
-            script.script, profile_name
-        )
-    })?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("{describe} could not be waited on"))?
+        {
+            break status;
+        }
+        if overflow.load(Ordering::Relaxed) {
+            kill_process_tree(&mut child);
+            anyhow::bail!(
+                "{describe} wrote more than {} to stdout",
+                describe_bytes(limits.max_stdout_bytes)
+            );
+        }
+        if started.elapsed() >= limits.timeout {
+            kill_process_tree(&mut child);
+            anyhow::bail!(
+                "{describe} timed out after {} seconds and was stopped",
+                limits.timeout.as_secs_f32()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            "no error output".to_string()
-        };
+    // A grandchild that inherited the pipes can keep them open after the script exits.
+    let collect = |receiver: mpsc::Receiver<Vec<u8>>| {
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default()
+    };
+    let stdout = collect(stdout_rx);
+    // Only drained so the script never blocks on a full pipe; its content is never reported.
+    let _ = collect(stderr_rx);
+    if overflow.load(Ordering::Relaxed) {
         anyhow::bail!(
-            "Replacement script '{}' in profile '{}' failed ({}): {}",
-            script.script,
-            profile_name,
-            output.status,
-            detail
+            "{describe} wrote more than {} to stdout",
+            describe_bytes(limits.max_stdout_bytes)
         );
     }
 
-    let transformed: Value = serde_json::from_slice(&output.stdout).with_context(|| {
-        format!(
-            "Replacement script '{}' in profile '{}' did not output valid JSON on stdout",
-            script.script, profile_name
-        )
-    })?;
-    if !transformed.is_object() {
+    if !status.success() {
+        // Scripts often echo the suite JSON, which can hold credentials, and errors reach logs.
         anyhow::bail!(
-            "Replacement script '{}' in profile '{}' must return a JSON object on stdout",
-            script.script,
-            profile_name
+            "{describe} failed ({status}); its output is not shown. Run it manually with the suite JSON on stdin to debug"
         );
+    }
+
+    let transformed: Value = serde_json::from_slice(&stdout)
+        .with_context(|| format!("{describe} did not output valid JSON on stdout"))?;
+    if !transformed.is_object() {
+        anyhow::bail!("{describe} must return a JSON object on stdout");
     }
     Ok(transformed)
+}
+
+/// Reads a pipe to the end, keeping at most `cap` bytes; `overflow` is set once more arrives.
+fn drain_pipe<R: Read + Send + 'static>(
+    pipe: Option<R>,
+    cap: usize,
+    overflow: Option<Arc<AtomicBool>>,
+) -> mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let mut buffer = [0u8; 16 * 1024];
+            while let Ok(read) = pipe.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                let room = cap.saturating_sub(kept.len());
+                kept.extend_from_slice(&buffer[..read.min(room)]);
+                if read > room
+                    && let Some(flag) = &overflow
+                {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        let _ = sender.send(kept);
+    });
+    receiver
+}
+
+fn describe_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{} MiB", bytes / (1024 * 1024))
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// Whether Bun or Node.js can run JavaScript profile scripts; tests skip without one.
+#[cfg(test)]
+pub(crate) fn js_runtime_available() -> bool {
+    ["bun", "node"]
+        .iter()
+        .any(|program| Command::new(program).arg("--version").output().is_ok())
+}
+
+fn kill_process_tree(child: &mut std::process::Child) {
+    // cmd.exe and shells start grandchildren that `Child::kill` would leave running.
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// One way to launch a script: a program, its arguments, and (Windows only) a raw tail
+/// that bypasses Rust's argument quoting.
+struct Launcher {
+    program: OsString,
+    args: Vec<OsString>,
+    raw_tail: Option<OsString>,
+}
+
+impl Launcher {
+    fn new(program: impl Into<OsString>, args: &[&OsStr]) -> Self {
+        Self {
+            program: program.into(),
+            args: args.iter().map(|arg| (*arg).to_os_string()).collect(),
+            raw_tail: None,
+        }
+    }
+}
+
+fn powershell_args(script: &Path) -> Vec<OsString> {
+    [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]
+    .iter()
+    .map(OsString::from)
+    .chain(std::iter::once(script.as_os_str().to_os_string()))
+    .collect()
+}
+
+fn launchers(kind: ScriptKind, script: &Path) -> Vec<Launcher> {
+    let script_arg = script.as_os_str();
+    match kind {
+        ScriptKind::PowerShell => ["pwsh", "powershell"]
+            .into_iter()
+            .map(|program| Launcher {
+                program: program.into(),
+                args: powershell_args(script),
+                raw_tail: None,
+            })
+            .collect(),
+        ScriptKind::Batch => vec![Launcher {
+            program: "cmd".into(),
+            args: ["/d", "/s", "/c"].iter().map(OsString::from).collect(),
+            // `/s` strips only the outer quotes, so `&`, `(` and spaces in the path stay quoted.
+            raw_tail: Some(format!("\"\"{}\"\"", script.display()).into()),
+        }],
+        ScriptKind::Bash => bash_programs()
+            .into_iter()
+            .map(|program| Launcher::new(program, &[script_arg]))
+            .collect(),
+        // Prefer Bun for JS/TS files when installed, falling back to Node.js.
+        ScriptKind::JavaScript => ["bun", "node"]
+            .into_iter()
+            .map(|program| Launcher::new(program, &[script_arg]))
+            .collect(),
+    }
+}
+
+#[cfg(not(windows))]
+fn bash_programs() -> Vec<OsString> {
+    vec!["bash".into()]
+}
+
+/// On Windows, `bash.exe` in System32 or WindowsApps is the WSL launcher, which cannot run
+/// Windows paths, so only Git Bash (or another real bash on PATH) is used.
+#[cfg(windows)]
+fn bash_programs() -> Vec<OsString> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    for (variable, tail) in [
+        ("ProgramFiles", r"Git\bin\bash.exe"),
+        ("ProgramFiles(x86)", r"Git\bin\bash.exe"),
+        ("LOCALAPPDATA", r"Programs\Git\bin\bash.exe"),
+    ] {
+        if let Some(base) = std::env::var_os(variable) {
+            found.push(Path::new(&base).join(tail));
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        found.extend(std::env::split_paths(&path).map(|dir| dir.join("bash.exe")));
+    }
+    found
+        .into_iter()
+        .filter(|candidate| {
+            let lower = candidate.to_string_lossy().to_ascii_lowercase();
+            !lower.contains(r"\windows\system32\") && !lower.contains(r"\windowsapps\")
+        })
+        .filter(|candidate| candidate.is_file())
+        .map(PathBuf::into_os_string)
+        .collect()
 }
 
 fn spawn_script_process(
@@ -581,49 +852,17 @@ fn spawn_script_process(
     profile_name: &str,
     suite_name: &str,
 ) -> Result<std::process::Child> {
-    let script_arg = script_path.as_os_str();
-    let candidates: Vec<(&str, Vec<&std::ffi::OsStr>)> = match kind {
-        ScriptKind::PowerShell => vec![
-            (
-                "pwsh",
-                vec![
-                    std::ffi::OsStr::new("-NoProfile"),
-                    std::ffi::OsStr::new("-NonInteractive"),
-                    std::ffi::OsStr::new("-ExecutionPolicy"),
-                    std::ffi::OsStr::new("Bypass"),
-                    std::ffi::OsStr::new("-File"),
-                    script_arg,
-                ],
-            ),
-            (
-                "powershell",
-                vec![
-                    std::ffi::OsStr::new("-NoProfile"),
-                    std::ffi::OsStr::new("-NonInteractive"),
-                    std::ffi::OsStr::new("-ExecutionPolicy"),
-                    std::ffi::OsStr::new("Bypass"),
-                    std::ffi::OsStr::new("-File"),
-                    script_arg,
-                ],
-            ),
-        ],
-        ScriptKind::Batch => vec![(
-            "cmd",
-            vec![
-                std::ffi::OsStr::new("/d"),
-                std::ffi::OsStr::new("/c"),
-                script_arg,
-            ],
-        )],
-        ScriptKind::Bash => vec![("bash", vec![script_arg])],
-        // Prefer Bun for JS/TS files when installed, falling back to Node.js.
-        ScriptKind::JavaScript => vec![("bun", vec![script_arg]), ("node", vec![script_arg])],
-    };
-
+    let candidates = launchers(kind, script_path);
     let mut last_error = None;
-    for (program, args) in &candidates {
-        match Command::new(program)
-            .args(args)
+    for launcher in &candidates {
+        let mut command = Command::new(&launcher.program);
+        command.args(&launcher.args);
+        #[cfg(windows)]
+        if let Some(raw) = &launcher.raw_tail {
+            use std::os::windows::process::CommandExt;
+            command.raw_arg(raw);
+        }
+        match command
             .current_dir(root_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -642,34 +881,32 @@ fn spawn_script_process(
                 return Err(error).with_context(|| {
                     format!(
                         "Failed to launch '{}' for replacement script '{}'",
-                        program, display_script
+                        launcher.program.to_string_lossy(),
+                        display_script
                     )
                 });
             }
         }
     }
 
-    let tried = candidates
-        .iter()
-        .map(|(program, _)| *program)
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound)))
-        .with_context(|| {
-            format!(
-                "Could not find runtime executable ({}) on PATH to run replacement script '{}'",
-                tried, display_script
-            )
-        })
+    let tried = match kind {
+        ScriptKind::PowerShell => "pwsh, powershell",
+        ScriptKind::Batch => "cmd",
+        ScriptKind::Bash => "bash (Git Bash on Windows; WSL bash is not supported)",
+        ScriptKind::JavaScript => "bun, node",
+    };
+    let error = last_error.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound));
+    Err(error).with_context(|| {
+        format!(
+            "Could not find a runtime ({tried}) on PATH to run replacement script '{display_script}'"
+        )
+    })
 }
 
 /// Process all items in a replacement profile sequentially from first item to last item.
 ///
-/// Any URL replacement items that precede a script item are applied directly to the suite
-/// JSON object before the script runs so the script receives the updated URLs. Any URL
-/// replacement items that follow the last script item (or all items when the profile has
-/// no scripts) are also returned as trailing `UrlReplacement` rules or applied directly
-/// depending on the caller.
+/// URL items rewrite the URLs in the suite JSON in place and script items replace the whole
+/// suite JSON, so each item sees the output of the previous one.
 pub fn apply_profile_items_to_suite_value(
     root_dir: &Path,
     items: &[ReplacementProfileItem],
@@ -761,6 +998,23 @@ mod tests {
             serde_yaml::from_str::<ReplacementProfilesFile>("profiles: {}\nprofilez: {}\n");
 
         assert!(matches!(result, Err(error) if error.to_string().contains("unknown field")));
+    }
+
+    #[test]
+    fn script_path_errors_never_expose_absolute_paths() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join("common")).unwrap();
+        std::fs::write(workspace.path().join("outside.js"), "// outside\n").unwrap();
+        let root = workspace.path().to_string_lossy().to_string();
+        let bare_root = root.trim_start_matches(r"\\?\");
+        for script in ["../outside.js", "missing.js", "common"] {
+            let message = format!(
+                "{:#}",
+                resolve_profile_script_path(workspace.path(), script, "profile 'p'").unwrap_err()
+            );
+            assert!(!message.contains(bare_root), "{message}");
+            assert!(!message.contains(r"\\?\"), "{message}");
+        }
     }
 
     #[test]
@@ -919,6 +1173,8 @@ profiles:
 
         for (path, expected_kind) in [
             ("common/transform.js", ScriptKind::JavaScript),
+            ("./common/transform.js", ScriptKind::JavaScript),
+            (" transform.js ", ScriptKind::JavaScript),
             ("transform.js", ScriptKind::JavaScript),
             ("common/setup.ps1", ScriptKind::PowerShell),
             ("run.bat", ScriptKind::Batch),
@@ -941,13 +1197,13 @@ profiles:
             resolve_profile_script_path(workspace.path(), "../outside.js", "test")
                 .unwrap_err()
                 .to_string()
-                .contains("escapes common directory")
+                .contains("escapes the 'common' folder")
         );
         assert!(
             resolve_profile_script_path(workspace.path(), "common/../outside.js", "test")
                 .unwrap_err()
                 .to_string()
-                .contains("escapes common directory")
+                .contains("escapes the 'common' folder")
         );
 
         // Missing file is rejected.
@@ -961,6 +1217,9 @@ profiles:
 
     #[test]
     fn profile_items_process_url_replacements_and_scripts_in_order() {
+        if !js_runtime_available() {
+            return;
+        }
         let workspace = tempfile::tempdir().unwrap();
         let common = workspace.path().join("common");
         std::fs::create_dir_all(&common).unwrap();
@@ -1125,6 +1384,9 @@ $obj | ConvertTo-Json -Depth 10 -Compress
 
     #[test]
     fn script_failures_and_non_object_outputs_report_clear_errors() {
+        if !js_runtime_available() {
+            return;
+        }
         let workspace = tempfile::tempdir().unwrap();
         let common = workspace.path().join("common");
         std::fs::create_dir_all(&common).unwrap();
@@ -1159,10 +1421,10 @@ $obj | ConvertTo-Json -Depth 10 -Compress
             "basic",
         )
         .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("custom script failure"),
-            "{err:#}"
-        );
+        let message = format!("{err:#}");
+        assert!(message.contains("failed ("), "{message}");
+        // Failed scripts may echo secrets, so their output must never reach the error.
+        assert!(!message.contains("custom script failure"), "{message}");
 
         let err = apply_profile_items_to_suite_value(
             workspace.path(),
@@ -1198,19 +1460,162 @@ $obj | ConvertTo-Json -Depth 10 -Compress
     }
 
     #[test]
-    fn resolve_profile_selection_prefers_cli_over_suite_over_default() {
+    fn resolve_profile_selection_prefers_cli_then_env_then_suite_then_default() {
+        let pick = |cli, env, suite| resolve_profile_selection(cli, env, suite);
         assert_eq!(
-            resolve_profile_selection(Some("cli-prof"), Some("suite-prof")),
-            ("cli-prof".to_string(), true)
+            pick(Some("cli"), Some("env"), Some("suite")),
+            ("cli".to_string(), true)
         );
         assert_eq!(
-            resolve_profile_selection(None, Some("suite-prof")),
-            ("suite-prof".to_string(), true)
+            pick(None, Some("env"), Some("suite")),
+            ("env".to_string(), true)
         );
+        assert_eq!(pick(None, None, Some("suite")), ("suite".to_string(), true));
+        assert_eq!(pick(None, None, None), ("default".to_string(), false));
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_stripped_without_losing_unc_roots() {
+        for (input, expected) in [
+            (r"\\?\C:\work\common\x.bat", r"C:\work\common\x.bat"),
+            (r"\\?\UNC\server\share\x.bat", r"\\server\share\x.bat"),
+            (r"C:\work\x.bat", r"C:\work\x.bat"),
+            ("/home/user/x.sh", "/home/user/x.sh"),
+        ] {
+            assert_eq!(strip_verbatim_prefix(input), expected);
+        }
+    }
+
+    #[test]
+    fn invalid_profile_items_name_the_offending_field() {
+        let error = |yaml: &str| {
+            serde_yaml::from_str::<ReplacementProfilesFile>(yaml)
+                .unwrap_err()
+                .to_string()
+        };
+        let mixed = error("profiles:\n  p:\n    - script: a.js\n      ref: x\n      test: y\n");
+        assert!(mixed.contains("unknown field `ref`"), "{mixed}");
+        let missing = error("profiles:\n  p:\n    - ref: x\n");
+        assert!(missing.contains("missing field `test`"), "{missing}");
+        let typo = error("profiles:\n  p:\n    - scripts: a.js\n");
+        assert!(typo.contains("unknown field `scripts`"), "{typo}");
+        let scalar = error("profiles:\n  p:\n    - text\n");
+        assert!(scalar.contains("must be an object"), "{scalar}");
+    }
+
+    #[test]
+    fn reference_url_applies_only_find_rules_and_skips_scripts() {
+        let items = vec![
+            ReplacementProfileItem::Url(UrlReplacement {
+                find: Some("{HOST}".into()),
+                ref_pattern: "https://prod.example.com".into(),
+                test: "https://staging.example.com".into(),
+                regex: None,
+                flags: None,
+            }),
+            ReplacementProfileItem::Url(UrlReplacement {
+                find: None,
+                ref_pattern: "prod".into(),
+                test: "staging".into(),
+                regex: None,
+                flags: None,
+            }),
+            ReplacementProfileItem::Script(ScriptReplacement {
+                script: "common/x.js".into(),
+            }),
+        ];
         assert_eq!(
-            resolve_profile_selection(None, None),
-            ("default".to_string(), false)
+            reference_url("{HOST}/prod/home", &items).unwrap(),
+            "https://prod.example.com/prod/home"
         );
+    }
+
+    #[test]
+    fn scripts_are_stopped_at_the_timeout_and_output_limit() {
+        if !js_runtime_available() {
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let common = workspace.path().join("common");
+        std::fs::create_dir_all(&common).unwrap();
+        std::fs::write(common.join("hang.js"), "setTimeout(() => {}, 60000);\n").unwrap();
+        std::fs::write(
+            common.join("flood.js"),
+            "process.stdout.write('x'.repeat(1 << 20));\nsetTimeout(() => {}, 60000);\n",
+        )
+        .unwrap();
+        let suite = serde_json::json!({"scenarios": []});
+        let run = |script: &str, limits: ScriptLimits| {
+            let started = Instant::now();
+            let error = run_profile_script_with_limits(
+                workspace.path(),
+                &ScriptReplacement {
+                    script: script.into(),
+                },
+                &suite,
+                ReplacementMode::Test,
+                "p",
+                "s",
+                limits,
+            )
+            .unwrap_err();
+            (format!("{error:#}"), started.elapsed())
+        };
+
+        let (message, elapsed) = run(
+            "hang.js",
+            ScriptLimits {
+                timeout: Duration::from_millis(500),
+                ..ScriptLimits::default()
+            },
+        );
+        assert!(message.contains("timed out"), "{message}");
+        assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
+
+        let (message, elapsed) = run(
+            "flood.js",
+            ScriptLimits {
+                max_stdout_bytes: 4096,
+                ..ScriptLimits::default()
+            },
+        );
+        assert!(message.contains("wrote more than 4096 bytes"), "{message}");
+        assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_scripts_run_from_folders_with_shell_metacharacters_and_reject_percent() {
+        for prefix in ["a & b ", "x (1) ", "y ^ z "] {
+            let parent = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+            let common = parent.path().join("common");
+            std::fs::create_dir_all(&common).unwrap();
+            std::fs::write(common.join("p.bat"), "@echo off\r\nfindstr \"^\" \r\n").unwrap();
+            let mut suite = serde_json::json!({"scenarios": [{"id": "h", "url": "https://x"}]});
+            apply_profile_items_to_suite_value(
+                parent.path(),
+                &[ReplacementProfileItem::Script(ScriptReplacement {
+                    script: "p.bat".into(),
+                })],
+                &mut suite,
+                ReplacementMode::Test,
+                "p",
+                "s",
+            )
+            .unwrap_or_else(|error| panic!("{prefix:?}: {error:#}"));
+            assert_eq!(suite["scenarios"][0]["url"], "https://x");
+        }
+
+        let parent = tempfile::Builder::new()
+            .prefix("p%PATH%")
+            .tempdir()
+            .unwrap();
+        std::fs::create_dir_all(parent.path().join("common")).unwrap();
+        std::fs::write(parent.path().join("common/p.bat"), "@echo off\r\n").unwrap();
+        let error = resolve_profile_script_path(parent.path(), "p.bat", "test")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cmd.exe cannot run it safely"), "{error}");
     }
 
     #[cfg(unix)]

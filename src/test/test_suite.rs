@@ -19,6 +19,8 @@ pub struct SuiteProfileContext<'a> {
     pub root_dir: &'a Path,
     pub profiles: Option<&'a config::replacements::ReplacementProfilesFile>,
     pub cli_profile: Option<&'a str>,
+    /// `REPLACEMENT_PROFILE`, captured once per run so parsing is deterministic.
+    pub env_profile: Option<&'a str>,
     pub mode: config::replacements::ReplacementMode,
 }
 
@@ -86,6 +88,7 @@ pub fn parse_test_suite_with_profile(
 
         let (profile_name, explicit_profile) = config::replacements::resolve_profile_selection(
             ctx.cli_profile,
+            ctx.env_profile,
             suite_profile.as_deref(),
         );
         if profile_name.trim().is_empty() {
@@ -103,9 +106,7 @@ pub fn parse_test_suite_with_profile(
             None if explicit_profile => {
                 anyhow::bail!(
                     "Replacement profile file not found: {}",
-                    ctx.root_dir
-                        .join("common/_replacement-profiles.yaml")
-                        .display()
+                    config::replacements::PROFILE_FILE_DISPLAY
                 )
             }
             None => &[],
@@ -117,6 +118,7 @@ pub fn parse_test_suite_with_profile(
                 active_items,
                 &format!("replacement profile '{}'", profile_name),
             )?;
+            let original_scenarios = original_scenario_keys(&suite_value);
             config::replacements::apply_profile_items_to_suite_value(
                 ctx.root_dir,
                 active_items,
@@ -125,7 +127,9 @@ pub fn parse_test_suite_with_profile(
                 &profile_name,
                 name,
             )?;
-            serde_json::from_value(suite_value)?
+            let mut transformed: TestSuite = serde_json::from_value(suite_value)?;
+            pin_original_urls(&mut transformed, &original_scenarios, active_items)?;
+            transformed
         } else {
             match format {
                 crate::types::TestSuiteFormat::Yaml => serde_yaml::from_str(&test_suite_content)?,
@@ -199,6 +203,55 @@ pub fn parse_test_suite_with_profile(
     }
 
     Ok(test_suite)
+}
+
+/// `(id, url)` of each scenario as authored, before any profile step ran.
+type OriginalScenarioKey = (Option<String>, Option<String>);
+
+fn original_scenario_keys(suite: &serde_json::Value) -> Vec<OriginalScenarioKey> {
+    let text = |scenario: &serde_json::Value, key: &str| {
+        scenario
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    };
+    suite["scenarios"]
+        .as_array()
+        .map(|scenarios| {
+            scenarios
+                .iter()
+                .map(|scenario| (text(scenario, "id"), text(scenario, "url")))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Gives each scenario the identity and baseline URL it had before the profile ran, so
+/// generated ids and report links match between `ref` and `test`. Scenarios a script
+/// added, removed, or reordered cannot be matched and keep their transformed URL.
+fn pin_original_urls(
+    suite: &mut TestSuite,
+    original: &[OriginalScenarioKey],
+    items: &[config::replacements::ReplacementProfileItem],
+) -> Result<()> {
+    if original.len() != suite.scenarios.len() {
+        return Ok(());
+    }
+    for (scenario, (original_id, original_url)) in suite.scenarios.iter_mut().zip(original) {
+        let Some(original_url) = original_url else {
+            continue;
+        };
+        if let (Some(before), Some(after)) = (original_id, &scenario.id)
+            && before != after
+        {
+            continue;
+        }
+        if scenario.id.is_none() && scenario.label.is_none() {
+            scenario.id = Some(get_asset_version(original_url.as_bytes(), 20));
+        }
+        scenario.reference_url = Some(config::replacements::reference_url(original_url, items)?);
+    }
+    Ok(())
 }
 
 pub(crate) fn assign_scenario_ids(scenarios: &mut [TestScenario]) {

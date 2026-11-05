@@ -324,9 +324,14 @@ pub struct TestScenario {
     ))]
     pub selectors: Option<Selectors>,
 
-    /// Required page URL opened before actions, for example https://example.com. Test captures apply URL replacement rules first; reference captures use it as written.
+    /// Required page URL opened before actions, for example https://example.com. Test captures apply URL replacement rules first; reference captures apply only rules with find (find becomes ref) and otherwise use it as written.
     #[schemars(length(min = 1), example = "https://example.com")]
     pub url: String,
+
+    /// Runtime metadata: the baseline URL before a replacement profile rewrote `url`.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub reference_url: Option<String>,
 
     /// Apply the CSS override file to each page document. hideSelectors and removeSelectors still apply when false. Inherits the suite or workspace setting (default: true).
     pub use_css_override: Option<bool>,
@@ -334,6 +339,13 @@ pub struct TestScenario {
     /// Viewport label or list of labels from the viewport file. Replaces inherited selection; an empty list selects all viewports.
     #[schemars(example = vec!["phone", "desktop"])]
     pub viewport_names: Option<Selectors>,
+}
+
+impl TestScenario {
+    /// The URL reports present as the baseline page.
+    pub fn reference_page_url(&self) -> &str {
+        self.reference_url.as_deref().unwrap_or(&self.url)
+    }
 }
 
 /// A string or list of strings. The containing field defines their meaning

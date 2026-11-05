@@ -733,6 +733,14 @@ Each profile is an ordered list processed from first item to last item. Each ite
 - **URL replacement** (`ref` and `test`, plus optional `find`, `regex`, and `flags`): when `find` is set, `ref` replaces `find` with `ref` and `test` replaces `find` with `test`. When `find` is omitted, `ref` leaves the URL unchanged and `test` replaces `ref` with `test`.
 - **Script transformation** (`script`): a path to a script inside `common/` (for example `common/transform.js` or `transform.ps1`). Supported extensions are `.ps1` (PowerShell), `.bat`/`.cmd` (Batch), `.sh`/`.bash` (Bash), and `.js`/`.mjs`/`.cjs`/`.ts`/`.mts` (Bun, falling back to Node.js). Regressify passes the suite JSON object on `stdin` (with `REGRESSIFY_MODE`, `REGRESSIFY_PROFILE`, `REGRESSIFY_SUITE`, and `REGRESSIFY_ROOT` environment variables) and reads the transformed suite JSON object from `stdout`.
 
+Script details:
+
+- **Trust:** a script runs with your user's permissions whenever its profile is selected, so treat scripts in `common/` as trusted code and review changes to them like any other code.
+- **Limits:** a script is stopped after 60 seconds or when it writes more than 32 MiB to `stdout`; both fail the run.
+- **Errors:** a failing script reports only its name, profile, and exit status. Its output is never shown because it can echo the suite JSON or secrets. To debug, run it yourself with the suite JSON piped to `stdin`.
+- **Windows:** `.bat`/`.cmd` scripts cannot run from a folder whose path contains `%`, `!`, or a double quote. `.sh`/`.bash` scripts need Git Bash or another real `bash` on `PATH`; the WSL launcher in `System32` is not used.
+- **Identity:** a scenario without `id` or `label` keeps the ID derived from the URL as authored, and reports keep linking the baseline page, so profiles never change which baseline a scenario compares against. If a script reorders or removes scenarios, the affected scenarios fall back to their transformed URL, so set explicit `id` values in suites that such scripts change.
+
 ## Optimize
 
 `optimize` compresses PNGs only under the active Regressify output directory (`.regressify` or `.regressify__<site-env>`). It is lossless: it does not quantize colors, resize images, or remove color data, so decoded screenshot pixels remain unchanged.

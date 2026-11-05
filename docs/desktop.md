@@ -1603,6 +1603,10 @@ duplicates are repaired. Scenario dependencies are checked even without action
 viewport filters; dependency errors do not hide independent viewport errors.
 Semantic errors such as blank URLs, invalid replacement regexes, and duplicate
 viewport labels point to their source fields alongside schema errors.
+`common/_replacement-profiles.yaml` and `.yml` get the same live feedback: each
+profile item must be a URL rule (`ref` and `test`, optional `find`, `regex`,
+`flags`) or a `script`, never both, and regexes, flags, and script extensions are
+checked. Whether a script file exists is checked when a run starts.
 
 Live Source checks start after a roughly 200 ms typing pause and run in the
 background, with at most one check in progress per window. New edits replace
