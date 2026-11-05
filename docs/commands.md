@@ -206,8 +206,10 @@ never rebuild it; use Build Report or Deploy.
 
 `test` and `ref` create `<output>/.gitignore` with the managed ignore rules
 when it is missing, so persisted browser state and run artifacts stay out of
-Git before any report exists. An existing file is left unchanged; rebuilding
-the combined report still writes the managed rules.
+Git before any report exists. The file appears complete or not at all, even if
+a run is interrupted. An existing file is left unchanged, but the run prints a
+warning when it does not ignore `/states/`, where persisted cookies and storage
+are kept. Rebuilding the combined report still writes the managed rules.
 
 ## Run History and Cleanup
 

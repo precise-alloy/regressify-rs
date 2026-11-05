@@ -254,7 +254,12 @@ fn cli_rebuilds_the_report_only_after_whole_workspace_full_runs() {
     .unwrap();
     let output = root.path().join(".regressify");
     let published = |label: &str| {
-        ["index.html", "_snapshot/data/suites/suite-1.json"].map(|path| {
+        [
+            "index.html",
+            "_snapshot/data/suites/suite-0.json",
+            "_snapshot/data/suites/suite-1.json",
+        ]
+        .map(|path| {
             std::fs::read(output.join(path))
                 .unwrap_or_else(|error| panic!("{label}: missing published {path}: {error}"))
         })
@@ -363,7 +368,7 @@ fn cli_rebuilds_the_report_only_after_whole_workspace_full_runs() {
     ] {
         let stderr = run(command, label);
         assert!(!stderr.contains(hint), "{label}: {stderr}");
-        for suite in ["suite-0", "suite-2"] {
+        for suite in ["suite-0", "suite-1", "suite-2"] {
             let summary: serde_json::Value = serde_json::from_slice(
                 &std::fs::read(output.join(format!("_snapshot/data/suites/{suite}.json"))).unwrap(),
             )
@@ -1103,6 +1108,45 @@ fn desktop_test_and_reference_runs_skip_the_post_run_report() {
                 "{report}"
             );
         }
+    }
+
+    // The absence checks above cannot see a deleted or rewritten report, so seed one and repeat
+    // the whole-workspace runs after which the CLI would rebuild it.
+    let seeded = b"<!-- report built before the desktop runs -->";
+    std::fs::write(output.join("index.html"), seeded).unwrap();
+    for (command, run_id) in [
+        (RunCommand::Reference, "seeded-reference"),
+        (RunCommand::Test, "seeded-test"),
+    ] {
+        let request = RunRequest {
+            root: workspace.path().into(),
+            command,
+            options: RunOptions {
+                suites: vec!["scoped".into(), "other".into()],
+                run_id: run_id.into(),
+                fetch_browser: Some(false),
+                async_capture_limit: 1,
+                async_capture_ramp_ms: 0,
+                ..Default::default()
+            },
+        };
+        let result = invoke_with_events(executable, &request, None);
+        assert!(
+            result.status.success(),
+            "{run_id}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            std::fs::read(output.join("index.html")).unwrap(),
+            seeded,
+            "{run_id}: desktop {} run changed the existing report",
+            command.label()
+        );
+        assert!(
+            !output.join("_snapshot").exists(),
+            "{run_id}: desktop {} run generated report data",
+            command.label()
+        );
     }
 }
 
