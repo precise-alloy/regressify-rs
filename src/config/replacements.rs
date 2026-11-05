@@ -16,6 +16,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::helpers::UniqueJsonValue;
 use crate::types::UrlReplacement;
 
 /// Bounds one script run so a hung or runaway script cannot stall or exhaust a test run.
@@ -63,13 +64,13 @@ impl ReplacementMode {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ScriptReplacement {
-    /// Path to a script in the `common` folder (for example `common/transform.js` or `transform.ps1`).
+    /// Path to a script in the `common` folder (for example `common/transform.cjs` or `transform.ps1`).
     /// Supported extensions: `.ps1` (PowerShell), `.bat`/`.cmd` (Batch), `.sh`/`.bash` (Bash),
     /// and `.js`/`.mjs`/`.cjs`/`.ts`/`.mts` (Bun or Node.js).
     #[schemars(
         length(min = 1),
         regex(pattern = r"\S"),
-        example = "common/transform.js"
+        example = "common/transform.cjs"
     )]
     pub script: String,
 }
@@ -88,7 +89,7 @@ pub enum ReplacementProfileItem {
 impl<'de> Deserialize<'de> for ReplacementProfileItem {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
-        let value = Value::deserialize(deserializer)?;
+        let value = UniqueJsonValue::deserialize(deserializer)?.0;
         match value.as_object() {
             Some(map) if map.contains_key("script") => ScriptReplacement::deserialize(value)
                 .map(Self::Script)
@@ -141,7 +142,7 @@ impl ScriptKind {
 ///       test: "https://staging.example.com"
 ///       regex: true
 ///       flags: "i"
-///     - script: "common/transform.js"
+///     - script: "common/transform.cjs"
 /// ```
 #[derive(Serialize, Deserialize, Clone, Debug, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -643,12 +644,9 @@ pub fn run_profile_script_with_limits(
         std::thread::sleep(Duration::from_millis(10));
     };
 
-    // A grandchild that inherited the pipes can keep them open after the script exits.
-    let collect = |receiver: mpsc::Receiver<Vec<u8>>| {
-        receiver
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_or_default()
-    };
+    // A background process that inherited the pipes keeps them open after the script exits.
+    let collect =
+        |receiver: mpsc::Receiver<Vec<u8>>| receiver.recv_timeout(Duration::from_secs(2)).ok();
     let stdout = collect(stdout_rx);
     // Only drained so the script never blocks on a full pipe; its content is never reported.
     let _ = collect(stderr_rx);
@@ -665,6 +663,11 @@ pub fn run_profile_script_with_limits(
             "{describe} failed ({status}); its output is not shown. Run it manually with the suite JSON on stdin to debug"
         );
     }
+    let Some(stdout) = stdout else {
+        anyhow::bail!(
+            "{describe} exited but a background process it started still holds its output; stop background processes before the script ends"
+        );
+    };
 
     let transformed: Value = serde_json::from_slice(&stdout)
         .with_context(|| format!("{describe} did not output valid JSON on stdout"))?;
@@ -729,14 +732,35 @@ fn kill_process_tree(child: &mut std::process::Child) {
             .stderr(Stdio::null())
             .status();
     }
-    // The script leads its own process group (see `spawn_script_process`), so `-pid` reaches its descendants.
+    // The script stays in the worker's process group so desktop Stop and Ctrl-C reach it; only a
+    // timeout or overflow needs this explicit walk over its descendants.
     #[cfg(unix)]
     {
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", child.id())])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let mut pending = vec![child.id()];
+        let mut found = Vec::new();
+        while let Some(parent) = pending.pop() {
+            let children = Command::new("pgrep")
+                .args(["-P", &parent.to_string()])
+                .stderr(Stdio::null())
+                .output()
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default();
+            for pid in children
+                .split_whitespace()
+                .filter_map(|pid| pid.parse::<u32>().ok())
+            {
+                pending.push(pid);
+                found.push(pid);
+            }
+        }
+        if !found.is_empty() {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .args(found.iter().map(u32::to_string))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -850,11 +874,6 @@ fn spawn_script_process(
     for launcher in &candidates {
         let mut command = Command::new(&launcher.program);
         command.args(&launcher.args);
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
         #[cfg(windows)]
         if let Some(raw) = &launcher.raw_tail {
             use std::os::windows::process::CommandExt;
@@ -1548,6 +1567,46 @@ $obj | ConvertTo-Json -Depth 10 -Compress
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!alive(), "descendant {pid} survived the timeout");
+    }
+
+    #[test]
+    fn duplicate_keys_in_profile_items_are_rejected() {
+        let error = serde_yaml::from_str::<ReplacementProfilesFile>(
+            "profiles:\n  p:\n    - ref: a\n      ref: b\n      test: c\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("duplicate field `ref`"), "{error}");
+    }
+
+    #[test]
+    fn background_processes_holding_the_output_fail_the_run_explicitly() {
+        if !js_runtime_available() {
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let common = workspace.path().join("common");
+        std::fs::create_dir_all(&common).unwrap();
+        // Prints a valid suite, then exits while a detached child still holds stdout.
+        std::fs::write(
+            common.join("background.cjs"),
+            "require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 6000)'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true }).unref();\nprocess.stdout.write('{\"scenarios\": []}');\n",
+        )
+        .unwrap();
+        let error = run_profile_script(
+            workspace.path(),
+            &ScriptReplacement {
+                script: "background.cjs".into(),
+            },
+            &serde_json::json!({"scenarios": []}),
+            ReplacementMode::Test,
+            "p",
+            "s",
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("background process"), "{message}");
+        assert!(!message.contains("valid JSON"), "{message}");
     }
 
     #[test]

@@ -8156,6 +8156,45 @@ async fn replacement_profile_files_open_in_source_without_empty_fields_tabs(
         assert!(view.read(cx).source_issues.is_empty());
     })
     .unwrap();
+
+    // Save As keeps the profile kind, so the copy must also open in Source.
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("open-commands", cx);
+        window.input("Save As", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |window, _| {
+        window.try_find("command:Save As").is_some()
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("command:Save As", cx);
+    })
+    .unwrap();
+    settle_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("file-name", cx);
+        window.press(&format!("{modifier}-a"), cx);
+        window.input("common/profiles-copy.yaml", cx);
+        window.click("file-confirm", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+        !view.read(cx).busy
+            && view.read(cx).session.open.as_ref().unwrap().entry.path
+                == Path::new("common/profiles-copy.yaml")
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(view.read(cx).tab, 1);
+        assert!(window.try_find("advanced-fields").is_none());
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]

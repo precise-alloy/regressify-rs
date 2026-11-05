@@ -10,6 +10,7 @@ mod numbers;
 pub(crate) mod png;
 mod scenario_names;
 mod slugify;
+mod unique_json;
 
 #[cfg(unix)]
 mod mode;
@@ -30,6 +31,7 @@ pub(crate) use scenario_names::{
     ScenarioName, capture_details, generated_capture_label, scenario_names,
 };
 pub use slugify::slugify;
+pub(crate) use unique_json::UniqueJsonValue;
 
 #[cfg(unix)]
 pub use mode::cmod;

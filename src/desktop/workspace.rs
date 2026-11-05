@@ -754,6 +754,9 @@ impl Workspace {
             })?;
             crate::test::validate_suite_identifier("Suite name", Some(&suite_name))?;
             DocumentKind::Suite
+        } else if entry_kind(resolved_relative) == DocumentKind::ReplacementProfiles {
+            // The runtime loads this exact name, so a copy saved there must be a valid profile file.
+            DocumentKind::ReplacementProfiles
         } else {
             kind
         };
@@ -2220,6 +2223,27 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn saving_data_as_the_profile_file_validates_it_as_a_profile_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let path = Path::new("common/_replacement-profiles.yaml");
+        let error = workspace
+            .create_document(path, DocumentKind::Data, "profiles:\n  qa:\n    - ref: a\n")
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("test"), "{error:#}");
+        assert!(!directory.path().join(path).exists());
+
+        let open = workspace
+            .create_document(
+                path,
+                DocumentKind::Data,
+                "profiles:\n  qa:\n    - ref: a\n      test: b\n",
+            )
+            .unwrap();
+        assert_eq!(open.entry.kind, DocumentKind::ReplacementProfiles);
     }
 
     #[test]
