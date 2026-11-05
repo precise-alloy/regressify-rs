@@ -239,8 +239,8 @@ pub(super) fn build() -> Result<Value> {
         (
             "profile-script",
             "javascript",
-            "common/transform.js",
-            "Node.js or Bun script (not browser JavaScript) for a replacement profile item `- script: common/transform.js`. It reads the suite JSON object on stdin and writes the transformed object to stdout; REGRESSIFY_MODE is ref or test. Create it together with that profile item.",
+            "common/transform.cjs",
+            "Node.js or Bun script (not browser JavaScript) for a replacement profile item `- script: common/transform.cjs`. The .cjs extension keeps `require` working even when the workspace package.json sets \"type\": \"module\". It reads the suite JSON object on stdin and writes the transformed object to stdout; REGRESSIFY_MODE is ref or test. Create it together with that profile item.",
             "const input = require(\"fs\").readFileSync(0, \"utf8\");\nconst suite = JSON.parse(input);\nconst host = process.env.REGRESSIFY_MODE === \"ref\" ? \"https://example.com\" : \"https://staging.example.com\";\nfor (const scenario of suite.scenarios) scenario.url = scenario.url.replace(\"{HOST}\", host);\nprocess.stdout.write(JSON.stringify(suite));\n",
         ),
         (

@@ -4527,13 +4527,26 @@ scenarios:
     #[test]
     fn unlabeled_scenarios_keep_one_id_and_baseline_url_in_ref_and_test_modes() {
         let [reference, test] = parse_in_both_modes(
-            "scenarios:\n  - url: https://prod.example.com/home\n  - url: '{HOST}/about'\n",
+            "scenarios:\n  - url: https://prod.example.com/home\n  - url: '{HOST}/about'\n  - id: null\n    url: https://prod.example.com/null-id\n  - label: null\n    url: https://prod.example.com/null-label\n",
             None,
         );
-        for index in 0..2 {
+        for index in 0..4 {
             assert_eq!(
                 reference.scenarios[index].id, test.scenarios[index].id,
                 "scenario {index}"
+            );
+        }
+        // Explicit nulls are absent values: they must pin the authored URL's hash too.
+        for (index, url) in [(2, "null-id"), (3, "null-label")] {
+            assert_eq!(
+                test.scenarios[index].id.as_deref(),
+                Some(
+                    crate::snapshot::get_asset_version(
+                        format!("https://prod.example.com/{url}").as_bytes(),
+                        20
+                    )
+                    .as_str()
+                )
             );
         }
         // Hashed from the authored URL, exactly as before profiles ran at parse time.
@@ -4634,6 +4647,65 @@ scenarios:
         assert!(message.contains("invalid type (value hidden)"), "{message}");
         assert!(!message.contains("hunter2-secret"), "{message}");
         assert!(!message.contains("secret-browser"), "{message}");
+
+        // A rejected value that imitates serde's own suffix must not be echoed back.
+        let imitation = "const s = JSON.parse(require('fs').readFileSync(0, 'utf8')); s.asyncCaptureLimit = 'oops, expected token=synthetic-secret'; process.stdout.write(JSON.stringify(s));\n";
+        let [reference, _] = parse_with_profile(
+            "scenarios:\n  - id: home\n    url: https://example.com\n",
+            "    - script: imitate.js\n",
+            &[("imitate.js", imitation)],
+        );
+        let message = format!(
+            "{:#}",
+            reference.err().expect("script output must be rejected")
+        );
+        assert!(!message.contains("synthetic-secret"), "{message}");
+        assert!(message.contains("expected usize"), "{message}");
+    }
+
+    #[test]
+    fn duplicate_properties_stay_errors_when_a_profile_is_active() {
+        let workspace = tempfile::tempdir().unwrap();
+        let common = workspace.path().join("common");
+        let visual_tests = workspace.path().join("visual_tests");
+        std::fs::create_dir_all(&common).unwrap();
+        std::fs::create_dir_all(&visual_tests).unwrap();
+        std::fs::write(
+            common.join("_replacement-profiles.yaml"),
+            format!("profiles:\n  default:\n{URL_RULES}"),
+        )
+        .unwrap();
+        for (file, source) in [
+            (
+                "json.tests.json",
+                "{\"scenarios\": [{\"url\": \"https://a.example\", \"url\": \"https://b.example\"}]}",
+            ),
+            (
+                "yaml.tests.yaml",
+                "scenarios:\n  - url: https://a.example\n    url: https://b.example\n",
+            ),
+        ] {
+            std::fs::write(visual_tests.join(file), source).unwrap();
+        }
+        let profiles = replacements::load_replacement_profiles(workspace.path())
+            .unwrap()
+            .unwrap();
+        let ctx = SuiteProfileContext {
+            root_dir: workspace.path(),
+            profiles: Some(&profiles),
+            cli_profile: None,
+            env_profile: None,
+            mode: replacements::ReplacementMode::Test,
+        };
+        for input in discover_test_suites(&visual_tests).unwrap() {
+            let error = parse_test_suites_with_profile(&visual_tests, vec![input], Some(&ctx))
+                .err()
+                .expect("duplicate url must be rejected");
+            assert!(
+                format!("{error:#}").contains("duplicate field"),
+                "{error:#}"
+            );
+        }
     }
 
     #[test]

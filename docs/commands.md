@@ -731,7 +731,7 @@ Profile selection order is CLI `--replacement-profile`, then the `REPLACEMENT_PR
 Each profile is an ordered list processed from first item to last item. Each item must be one of two types:
 
 - **URL replacement** (`ref` and `test`, plus optional `find`, `regex`, and `flags`): when `find` is set, `ref` replaces `find` with `ref` and `test` replaces `find` with `test`. When `find` is omitted, `ref` leaves the URL unchanged and `test` replaces `ref` with `test`.
-- **Script transformation** (`script`): a path to a script inside `common/` (for example `common/transform.js` or `transform.ps1`). Supported extensions are `.ps1` (PowerShell), `.bat`/`.cmd` (Batch), `.sh`/`.bash` (Bash), and `.js`/`.mjs`/`.cjs`/`.ts`/`.mts` (Bun, falling back to Node.js). Regressify passes the suite JSON object on `stdin` (with `REGRESSIFY_MODE`, `REGRESSIFY_PROFILE`, `REGRESSIFY_SUITE`, and `REGRESSIFY_ROOT` environment variables) and reads the transformed suite JSON object from `stdout`.
+- **Script transformation** (`script`): a path to a script inside `common/` (for example `common/transform.cjs` or `transform.ps1`). Supported extensions are `.ps1` (PowerShell), `.bat`/`.cmd` (Batch), `.sh`/`.bash` (Bash), and `.js`/`.mjs`/`.cjs`/`.ts`/`.mts` (Bun, falling back to Node.js); prefer `.cjs` for `require`-style scripts, because Node.js runs `.js` as an ES module when the nearest `package.json` sets `"type": "module"`. Regressify passes the suite JSON object on `stdin` (with `REGRESSIFY_MODE`, `REGRESSIFY_PROFILE`, `REGRESSIFY_SUITE`, and `REGRESSIFY_ROOT` environment variables) and reads the transformed suite JSON object from `stdout`.
 
 Script details:
 
@@ -741,7 +741,8 @@ Script details:
 - **Windows:** `.bat`/`.cmd` scripts cannot run from a folder whose path contains `%`, `!`, or a double quote. `.sh`/`.bash` scripts need Git Bash or another real `bash` on `PATH`; the WSL launcher in `System32` is not used.
 - **Identity:** before any item runs, a scenario without `id` or `label` receives the `id` its authored URL would produce, and scripts see that field. Because the `id` travels with the scenario, a script can reorder scenarios, even differently in `ref` and `test`, without pairing one with another's baseline. A script that drops the `id` of an unlabeled scenario loses that pairing, so keep `id` and `label` fields when rebuilding scenarios.
 - **Baseline links:** in `test` runs, reports link each scenario's baseline page. When a profile is active, Regressify runs it once more in `ref` mode (scripts included, `REGRESSIFY_MODE=ref`) to learn those URLs, so scripts must give the same result every time they run. If that extra run fails, reports link the tested pages and a warning is printed.
-- **Cancellation:** on timeout or output overflow the script and its descendants are stopped (a process group on Unix, `taskkill /T` on Windows).
+- **Cancellation:** on timeout or output overflow the script and its descendants are stopped (found with `pgrep` on Unix, `taskkill /T` on Windows). Scripts share the run's process group, so desktop Stop and Ctrl-C also reach them. A script must not leave background processes holding its output; that fails the run.
+- **Authored suites:** the desktop editor validates the suite as authored, before any script runs. Scripts should transform valid values, such as placeholders, rather than fill in required fields.
 - **Invalid output:** if a script's output is not a valid suite, the error names the problem but hides the rejected values.
 
 ## Optimize

@@ -60,8 +60,12 @@ pub fn parse_test_suite_with_profile(
     crate::progress::scenario_log!("Parsing test suite...");
     let mut test_suite: TestSuite = if let Some(ctx) = profile_ctx {
         let mut suite_value: serde_json::Value = match format {
-            crate::types::TestSuiteFormat::Yaml => serde_yaml::from_str(&test_suite_content)?,
-            crate::types::TestSuiteFormat::Json => serde_json::from_str(&test_suite_content)?,
+            crate::types::TestSuiteFormat::Yaml => {
+                serde_yaml::from_str::<crate::helpers::UniqueJsonValue>(&test_suite_content)?.0
+            }
+            crate::types::TestSuiteFormat::Json => {
+                serde_json::from_str::<crate::helpers::UniqueJsonValue>(&test_suite_content)?.0
+            }
         };
         let suite_profile = match suite_value.get("replacementProfile") {
             None | Some(serde_json::Value::Null) => None,
@@ -247,8 +251,10 @@ fn pin_authored_ids(suite: &mut serde_json::Value) {
         return;
     };
     for scenario in scenarios {
-        if scenario.get("id").is_none()
-            && scenario.get("label").is_none()
+        // A YAML `id: null` deserializes to no id, so it must count as absent here too.
+        let absent = |key: &str| scenario.get(key).is_none_or(serde_json::Value::is_null);
+        if absent("id")
+            && absent("label")
             && let Some(url) = scenario.get("url").and_then(|url| url.as_str())
         {
             let id = get_asset_version(url.as_bytes(), 20);
@@ -315,9 +321,12 @@ fn attach_baseline_urls(
 
 /// Hides the rejected value in serde messages such as `invalid type: string "x", expected usize`.
 fn without_values(message: &str) -> String {
+    // The expectation is serde's own text and comes last; a rejected value may itself contain ", expected".
     let tail = message
-        .find(", expected")
-        .map_or("", |index| &message[index..]);
+        .rfind(", expected")
+        .map(|index| &message[index..])
+        .filter(|tail| tail.len() <= 200)
+        .unwrap_or("");
     for prefix in ["invalid type", "invalid value", "unknown variant"] {
         if message.starts_with(prefix) {
             return format!("{prefix} (value hidden){tail}");

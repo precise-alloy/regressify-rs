@@ -86,7 +86,7 @@ Select a profile with `--replacement-profile staging` (in `ref` or `test`),
 `REPLACEMENT_PROFILE`, or suite `replacementProfile`. Each profile is processed
 in order from first item to last item: URL items replace `find -> ref` in `ref`
 mode and `find -> test` (or `ref -> test` when `find` is omitted) in `test`
-mode. A `script` item, written as `- script: common/transform.js`, runs a script
+mode. A `script` item, written as `- script: common/transform.cjs`, runs a script
 from `common/` (`.ps1`, `.bat`/`.cmd`, `.sh`/`.bash`, or
 `.js`/`.mjs`/`.cjs`/`.ts`/`.mts` via Bun or Node.js), passing the suite JSON on
 `stdin` and reading the transformed suite JSON from `stdout`. Every item must
