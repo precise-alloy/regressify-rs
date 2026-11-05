@@ -79,17 +79,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: ⚡ Cache
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ matrix.application }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-
       - name: Install Linux desktop dependencies
         if: ${{ matrix.application == 'desktop' && startsWith(matrix.os, 'ubuntu') }}
         run: |
@@ -106,6 +95,13 @@ jobs:
           TOOLCHAIN: stable
           TARGET: ${{ matrix.target }}
         shell: bash
+
+      # Later tags cannot read tag-scoped caches; release-cache.yml warms master-scoped ones.
+      - name: ⚡ Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.application }}-${{ matrix.target }}-${{ matrix.installer && 'static' || 'native' }}
+          save-if: ${{ github.ref_type != 'tag' }}
 
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v3
@@ -292,6 +288,8 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref_type != 'tag' }}
       - name: Build release MCP catalog
         env:
           REGRESSIFY_DISABLE_DIAGNOSTIC_ARCHIVE: 'true'

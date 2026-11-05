@@ -7,13 +7,22 @@ description: 'Use when changing GitHub Actions release matrices, Rust target bui
 
 ## Start Here
 
-[GitHub release](../../workflows/tuyen-release.yml), [build script](../../../ci/make-release.sh), [release feed helper](../../../ci/release_feed.py), [Cloudflare deploy script](../../../ci/deploy-cloudflare.sh), [website Worker config](../../../website/wrangler.jsonc), and [offline release tests](../../../ci/test-release.py). Frontend asset publication uses [snapshot-assets.yml](../../workflows/snapshot-assets.yml). Website-only deploys use [website-deploy.yml](../../workflows/website-deploy.yml).
+[GitHub release](../../workflows/tuyen-release.yml), [build script](../../../ci/make-release.sh), [release feed helper](../../../ci/release_feed.py), [Cloudflare deploy script](../../../ci/deploy-cloudflare.sh), [website Worker config](../../../website/wrangler.jsonc), and [offline release tests](../../../ci/test-release.py). Frontend asset publication uses [snapshot-assets.yml](../../workflows/snapshot-assets.yml). Website-only deploys use [website-deploy.yml](../../workflows/website-deploy.yml). [release-cache.yml](../../workflows/release-cache.yml) warms release caches.
 
 ## Procedure and Invariants
 
 1. Trace matrix inputs to target/toolchain/features, artifact names, upload fields, installer versions, and update manifests. Do not assume CLI/desktop targets match.
    Build jobs use GitHub Actions' default timeout: neither `timeout-minutes` nor
    a matrix `timeout` field is set. Keep matrix tests aligned with this contract.
+   Rust caches use `Swatinem/rust-cache` after `Install Rust` with `save-if` false
+   on tags: a tag run cannot restore another tag's cache, only master-scoped ones.
+   The scheduled warm-up mirrors tag build steps, matrix, and `shared-key`; a
+   parity test fails on drift. Include the runtime mode in `shared-key`: manual
+   Windows builds lack `crt-static`, and step-only flags are invisible to the
+   cache action. Never add a push trigger: it would compete with
+   the release for macOS runners. Keep `[profile.release]` at maximum optimization.
+   Scope warm-up cancellation by ref. Assert the warm-up cache step's `id: cache`
+   before normalizing IDs in parity tests; build guards depend on that ID.
 1. Desktop selections also schedule a CLI job for each supported target without duplicates. Targets are Windows x64, Linux x64 GNU, and macOS Intel/Apple silicon. Musl releases are retired; Linux ARM64 has no managed Chromium support. Do not restore these matrix rows without native TLS/toolchain and browser-runtime verification. Tagged Windows payloads build independently with static runtimes; packaging must consume both exact artifacts from the same run and stop on either failure.
 1. Preserve `--locked`, static-runtime flags where required, archive contents (the executable plus `LICENSE` and `LICENSING.md`), executable resource versions, and immutable installer naming/hash/size contracts.
 1. Only automatic tag builds in `precise-alloy/regressify-rs` publish. Eight application/target builds and independent offline checks run in parallel; `publish` depends on all builds, checks, and Windows packaging. `deploy` depends on publication. Never bypass failures with `always()` or continue-on-error. Manual runs retain workflow artifacts only.

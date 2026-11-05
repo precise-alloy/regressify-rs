@@ -54,6 +54,23 @@ Verified: 2026-10-29
   `website-production` with `https://regressify.eshn.dev` as their environment URL
   (verified 2026-11-04). This supplies GitHub's run-graph link without GitHub Pages;
   environment protection rules apply to both workflows, including release tags.
+- Release timing (v2.3.0, verified 2026-11-05 via `gh run view`): ~29 min total;
+  the critical path is the macOS Intel desktop build (~9 min dependencies, ~13.5 min
+  for the LTO'd `regressify` crate). Packaging, publish, and deploy take ~3 min.
+  Every release missed its cache: Actions caches are scoped per tag ref, and
+  version bumps change `Cargo.lock`. Tag runs now skip saving and restore the
+  master-scoped caches from [release-cache.yml](../../.github/workflows/release-cache.yml)
+  (Mon/Fri schedule). Warm, each leg is bound by the final crate (macOS ~13.5 min),
+  so cross-compiling macOS Intel on ARM would not help. The maintainer keeps full LTO,
+  `codegen-units = 1`, and `opt-level = "z"`.
+- Cache runtime isolation (verified 2026-11-05): both workflows suffix their
+  shared key with `static` for installer payloads and `native` otherwise.
+  Step-local `RUSTFLAGS` do not enter the action's key. The regression test
+  `test_release_cache_separates_manual_windows_runtime` fails with the old key
+  for both Windows applications; non-Windows manual/tag cache sharing remains.
+- Warm-up cancellation is ref-scoped so feature-branch dispatches cannot cancel
+  master runs. Parity tests assert `id: cache` before stripping IDs, preserving
+  the cache-hit guard dependency (verified 2026-11-05).
 - Workerd rejects `fetch` with `redirect: 'error'`; the admin feed uses `manual`
   and rejects non-2xx responses without forwarding bearer credentials. Website
   tests are scoped to `src` so MCP test files cannot pollute discovery.

@@ -517,6 +517,7 @@ gh() {
         self.assertIn("'https://regressify.eshn.dev'", (ROOT / "website/src/lib/release.ts").read_text(encoding="utf-8"))
 
     def test_selector_and_parallel_job_contract(self):
+        """Preserve release selection, parallelism, and toolchain-aware cache policy."""
         selector = WORKFLOW["on"]["workflow_dispatch"]["inputs"]["build"]
         self.assertEqual(selector["type"], "choice")
         self.assertEqual(selector["default"], "both")
@@ -545,8 +546,92 @@ gh() {
             build["env"]["REGRESSIFY_UPDATE_ORIGIN"],
             "${{ matrix.application == 'desktop' && startsWith(matrix.os, 'macos') && env.RELEASE_ORIGIN || '' }}",
         )
-        cache = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/cache@"))
-        self.assertIn("matrix.application", cache["with"]["key"])
+        names = [step.get("name") for step in job["steps"]]
+        cache = next(step for step in job["steps"] if step.get("uses", "").startswith("Swatinem/rust-cache@"))
+        self.assertEqual(cache["with"]["shared-key"], "release-${{ matrix.application }}-${{ matrix.target }}-${{ matrix.installer && 'static' || 'native' }}")
+        # rust-cache keys on the installed rustc, so it must follow the toolchain update.
+        self.assertGreater(names.index(cache["name"]), names.index("Install Rust"))
+        catalog = next(step for step in WORKFLOW["jobs"]["mcp-catalog"]["steps"] if step.get("uses", "").startswith("Swatinem/rust-cache@"))
+        for step in (cache, catalog):
+            self.assertEqual(step["with"]["save-if"], "${{ github.ref_type != 'tag' }}")
+        self.assertFalse(any(step.get("uses", "").startswith("actions/cache@") for other in WORKFLOW["jobs"].values() for step in other["steps"]))
+
+    def test_release_cache_warmup_mirrors_tag_builds(self):
+        """Keep warm-up builds and cache-hit guards aligned with tagged releases."""
+        warm = yaml.load(
+            (ROOT / ".github/workflows/release-cache.yml").read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        # Only default-branch triggers can save caches that tag runs may restore.
+        self.assertEqual(set(warm["on"]), {"schedule", "workflow_dispatch"})
+        self.assertEqual(warm["concurrency"], {
+            "group": "${{ github.workflow }}-${{ github.ref }}",
+            "cancel-in-progress": "true",
+        })
+        self.assertEqual(warm["permissions"], {"contents": "read"})
+        self.assertEqual(warm["env"], WORKFLOW["env"])
+        job = warm["jobs"]["warm"]
+        self.assertEqual(job["if"], "${{ github.repository == 'precise-alloy/regressify-rs' }}")
+        self.assertEqual(job["runs-on"], "${{ matrix.os }}")
+        result, rows = self.matrix("both", [], event="push", ref_type="tag")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = sorted((row["application"], row["os"], row["target"], row["features"], str(row["installer"]).lower()) for row in rows)
+        actual = sorted((row["application"], row["os"], row["target"], row["features"], row["installer"]) for row in job["strategy"]["matrix"]["include"])
+        self.assertEqual(actual, expected)
+        release = WORKFLOW["jobs"]["release"]["steps"]
+        mirrored = ["Install Linux desktop dependencies", "Install Rust", "⚡ Cache", "Add msbuild to PATH",
+                    "Build artifacts", "Build Windows desktop release", "Build Windows CLI release"]
+        self.assertEqual([step.get("name") for step in job["steps"][1:]], mirrored)
+        self.assertEqual(job["steps"][0], release[0])
+        for name in mirrored:
+            with self.subTest(step=name):
+                expected_step = dict(next(step for step in release if step.get("name") == name))
+                actual_step = dict(next(step for step in job["steps"] if step.get("name") == name))
+                if name == "⚡ Cache":
+                    self.assertEqual(actual_step.get("id"), "cache")
+                actual_step.pop("id", None)
+                if "env" in expected_step:
+                    # The release version and update origin only reach the regressify crate, which is never cached.
+                    expected_step["env"] = {key: value for key, value in expected_step["env"].items() if key not in ("REGRESSIFY_DESKTOP_VERSION", "REGRESSIFY_UPDATE_ORIGIN")}
+                    if "env" in actual_step:
+                        actual_step["env"] = {key: value for key, value in actual_step["env"].items() if key != "REGRESSIFY_UPDATE_ORIGIN"}
+                if name.startswith("Build "):
+                    condition = expected_step["if"].removeprefix("${{ ").removesuffix(" }}")
+                    expected_step["if"] = "${{ steps.cache.outputs.cache-hit != 'true' && " + condition + " }}"
+                self.assertEqual(actual_step, expected_step)
+
+    def test_release_cache_separates_manual_windows_runtime(self):
+        """Isolate Windows runtime caches while retaining other platform cache sharing."""
+        cache = next(step for step in WORKFLOW["jobs"]["release"]["steps"]
+                     if step.get("uses", "").startswith("Swatinem/rust-cache@"))
+        template = cache["with"]["shared-key"]
+
+        def keys(rows):
+            """Render the shared-key expressions for concrete release matrix rows."""
+            result = {}
+            for row in rows:
+                values = {
+                    "matrix.application": row["application"],
+                    "matrix.target": row["target"],
+                    "matrix.installer && 'static' || 'native'": "static" if row["installer"] else "native",
+                }
+                result[(row["application"], row["target"])] = re.sub(
+                    r"\$\{\{\s*(.*?)\s*\}\}", lambda match: values[match[1]], template,
+                )
+            return result
+
+        manual_result, manual = self.matrix("both", list(TARGETS))
+        tagged_result, tagged = self.matrix("both", [], event="push", ref_type="tag")
+        self.assertEqual(manual_result.returncode, 0, manual_result.stderr)
+        self.assertEqual(tagged_result.returncode, 0, tagged_result.stderr)
+        manual_keys, tagged_keys = keys(manual), keys(tagged)
+        self.assertEqual(set(manual_keys), set(tagged_keys))
+        for identity in tagged_keys:
+            with self.subTest(application=identity[0], target=identity[1]):
+                if identity[1] == TARGETS["WINDOWS_X86_64"]:
+                    self.assertNotEqual(manual_keys[identity], tagged_keys[identity])
+                else:
+                    self.assertEqual(manual_keys[identity], tagged_keys[identity])
 
     def test_every_application_and_platform_selection(self):
         for build in ("cli", "desktop", "both"):
