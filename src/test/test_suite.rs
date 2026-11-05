@@ -118,7 +118,15 @@ pub fn parse_test_suite_with_profile(
                 active_items,
                 &format!("replacement profile '{}'", profile_name),
             )?;
-            let original_scenarios = original_scenario_keys(&suite_value);
+            let has_script = active_items.iter().any(|item| {
+                matches!(
+                    item,
+                    config::replacements::ReplacementProfileItem::Script(_)
+                )
+            });
+            // Ids travel with each scenario object, so a script cannot pair one with another's baseline.
+            pin_authored_ids(&mut suite_value);
+            let authored = suite_value.clone();
             config::replacements::apply_profile_items_to_suite_value(
                 ctx.root_dir,
                 active_items,
@@ -127,8 +135,27 @@ pub fn parse_test_suite_with_profile(
                 &profile_name,
                 name,
             )?;
-            let mut transformed: TestSuite = serde_json::from_value(suite_value)?;
-            pin_original_urls(&mut transformed, &original_scenarios, active_items)?;
+            let mut transformed: TestSuite = serde_json::from_value(suite_value).map_err(|error| {
+                if has_script {
+                    // Script output can carry secrets and serde echoes rejected values.
+                    anyhow!(
+                        "Test suite '{name}' is invalid after the scripts of replacement profile '{profile_name}' ran: {}. Run the script manually and compare its output with the suite schema",
+                        without_values(&error.to_string())
+                    )
+                } else {
+                    anyhow!(error)
+                }
+            })?;
+            if ctx.mode == config::replacements::ReplacementMode::Test {
+                attach_baseline_urls(
+                    &mut transformed,
+                    &authored,
+                    ctx,
+                    active_items,
+                    &profile_name,
+                    name,
+                );
+            }
             transformed
         } else {
             match format {
@@ -205,53 +232,98 @@ pub fn parse_test_suite_with_profile(
     Ok(test_suite)
 }
 
-/// `(id, url)` of each scenario as authored, before any profile step ran.
-type OriginalScenarioKey = (Option<String>, Option<String>);
-
-fn original_scenario_keys(suite: &serde_json::Value) -> Vec<OriginalScenarioKey> {
-    let text = |scenario: &serde_json::Value, key: &str| {
-        scenario
-            .get(key)
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-    };
-    suite["scenarios"]
-        .as_array()
-        .map(|scenarios| {
-            scenarios
-                .iter()
-                .map(|scenario| (text(scenario, "id"), text(scenario, "url")))
-                .collect()
-        })
-        .unwrap_or_default()
+/// The id a scenario ends up with, lowercased; `None` when it has neither an id nor a label.
+fn scenario_key(scenario: &serde_json::Value) -> Option<String> {
+    let text = |key: &str| scenario.get(key).and_then(|value| value.as_str());
+    text("id")
+        .map(str::to_string)
+        .or_else(|| text("label").map(slugify))
+        .map(|id| id.to_lowercase())
 }
 
-/// Gives each scenario the identity and baseline URL it had before the profile ran, so
-/// generated ids and report links match between `ref` and `test`. Scenarios a script
-/// added, removed, or reordered cannot be matched and keep their transformed URL.
-fn pin_original_urls(
-    suite: &mut TestSuite,
-    original: &[OriginalScenarioKey],
-    items: &[config::replacements::ReplacementProfileItem],
-) -> Result<()> {
-    if original.len() != suite.scenarios.len() {
-        return Ok(());
+/// Gives scenarios without an id or label the id their authored URL would produce.
+fn pin_authored_ids(suite: &mut serde_json::Value) {
+    let Some(scenarios) = suite["scenarios"].as_array_mut() else {
+        return;
+    };
+    for scenario in scenarios {
+        if scenario.get("id").is_none()
+            && scenario.get("label").is_none()
+            && let Some(url) = scenario.get("url").and_then(|url| url.as_str())
+        {
+            let id = get_asset_version(url.as_bytes(), 20);
+            scenario["id"] = serde_json::Value::String(id);
+        }
     }
-    for (scenario, (original_id, original_url)) in suite.scenarios.iter_mut().zip(original) {
-        let Some(original_url) = original_url else {
+}
+
+/// URL by scenario key; keys that appear twice cannot be matched and are dropped.
+fn urls_by_key(suite: &serde_json::Value) -> std::collections::HashMap<String, String> {
+    let mut urls = std::collections::HashMap::new();
+    let mut ambiguous = std::collections::HashSet::new();
+    for scenario in suite["scenarios"].as_array().into_iter().flatten() {
+        let (Some(key), Some(url)) = (
+            scenario_key(scenario),
+            scenario.get("url").and_then(|url| url.as_str()),
+        ) else {
             continue;
         };
-        if let (Some(before), Some(after)) = (original_id, &scenario.id)
-            && before != after
-        {
-            continue;
+        if urls.insert(key.clone(), url.to_string()).is_some() {
+            ambiguous.insert(key);
         }
-        if scenario.id.is_none() && scenario.label.is_none() {
-            scenario.id = Some(get_asset_version(original_url.as_bytes(), 20));
-        }
-        scenario.reference_url = Some(config::replacements::reference_url(original_url, items)?);
     }
-    Ok(())
+    urls.retain(|key, _| !ambiguous.contains(key));
+    urls
+}
+
+/// Test reports link the page the baseline captured, which only a ref-mode pass over the
+/// profile (scripts included) can reproduce. A failure there only costs the report link.
+fn attach_baseline_urls(
+    suite: &mut TestSuite,
+    authored: &serde_json::Value,
+    ctx: &SuiteProfileContext<'_>,
+    items: &[config::replacements::ReplacementProfileItem],
+    profile_name: &str,
+    suite_name: &str,
+) {
+    let mut baseline = authored.clone();
+    if config::replacements::apply_profile_items_to_suite_value(
+        ctx.root_dir,
+        items,
+        &mut baseline,
+        config::replacements::ReplacementMode::Ref,
+        profile_name,
+        suite_name,
+    )
+    .is_err()
+    {
+        eprintln!(
+            "Reports for test suite '{suite_name}' link the tested pages because replacement profile '{profile_name}' failed in ref mode"
+        );
+        return;
+    }
+    let baseline = urls_by_key(&baseline);
+    for scenario in &mut suite.scenarios {
+        let key = scenario
+            .id
+            .clone()
+            .or_else(|| scenario.label.as_deref().map(slugify))
+            .map(|id| id.to_lowercase());
+        scenario.reference_url = key.and_then(|key| baseline.get(&key).cloned());
+    }
+}
+
+/// Hides the rejected value in serde messages such as `invalid type: string "x", expected usize`.
+fn without_values(message: &str) -> String {
+    let tail = message
+        .find(", expected")
+        .map_or("", |index| &message[index..]);
+    for prefix in ["invalid type", "invalid value", "unknown variant"] {
+        if message.starts_with(prefix) {
+            return format!("{prefix} (value hidden){tail}");
+        }
+    }
+    message.to_string()
 }
 
 pub(crate) fn assign_scenario_ids(scenarios: &mut [TestScenario]) {
