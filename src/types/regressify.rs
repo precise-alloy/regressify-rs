@@ -131,7 +131,11 @@ pub struct TestSuite {
     #[schemars(example = "signed-in")]
     pub state: Option<Needs>,
 
-    /// URL replacement rules for test captures, applied in order after the replacement profile and workspace rules. Each object requires ref (text to match) and test (replacement).
+    /// Replacement profile name from common/_replacement-profiles.yaml for this suite. Overrides the default profile; overridden by --replacement-profile and REPLACEMENT_PROFILE.
+    #[schemars(length(min = 1), regex(pattern = r"\S"), example = &"staging")]
+    pub replacement_profile: Option<String>,
+
+    /// URL replacement rules applied in order after the active replacement profile and workspace rules. When find is set, ref captures replace find with ref and test captures replace find with test; otherwise test captures replace ref with test.
     pub url_replacements: Option<Vec<UrlReplacement>>,
 
     /// Apply the CSS override file to each page document. hideSelectors and removeSelectors still apply when false. Inherits the workspace setting (default: true).
@@ -456,23 +460,35 @@ impl BasicAuthConfig {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[derive(schemars::JsonSchema)]
 pub struct UrlReplacement {
-    /// Text to find in the URL (every occurrence), or a Rust regular expression when regex is true; look-around and backreferences are unsupported.
+    /// Optional text or Rust regular expression to match in both ref and test modes. When set, ref captures replace find with ref and test captures replace find with test. When omitted, ref captures leave URLs unchanged and test captures replace ref with test.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(example = "{BASE_URL}")]
+    pub find: Option<String>,
+
+    /// Text to find in test mode when find is omitted (or a Rust regular expression when regex is true), or the replacement text for ref captures when find is set. Look-around and backreferences are unsupported in regex patterns.
     #[serde(rename = "ref")]
     #[schemars(example = "https://production.example.com")]
     pub ref_pattern: String,
 
-    /// Replacement text. With regex, use ${1} or ${name} for capture groups: a bare $1 followed by a letter, digit, or underscore is read as a longer group name.
+    /// Replacement text for test captures. With regex, use ${1} or ${name} for capture groups: a bare $1 followed by a letter, digit, or underscore is read as a longer group name.
     #[schemars(example = "https://staging.example.com")]
     pub test: String,
 
-    /// Treat ref as a regular expression (default: false). Otherwise perform a literal replacement.
+    /// Treat the match pattern (find when set, otherwise ref) as a regular expression (default: false). Otherwise perform a literal replacement.
     pub regex: Option<bool>,
 
     /// Regular-expression flags, such as i for case-insensitive matching. Only used when regex is true.
     #[schemars(example = &"i")]
     pub flags: Option<String>,
+}
+
+impl UrlReplacement {
+    /// Return the active match pattern (`find` when configured, otherwise `ref`).
+    pub fn pattern(&self) -> &str {
+        self.find.as_deref().unwrap_or(&self.ref_pattern)
+    }
 }

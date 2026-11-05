@@ -496,11 +496,15 @@ pub async fn exec_test_scenario(browser: &Browser, req: ScenarioRequest<'_>) -> 
     // Resolve configuration cascade: scenario -> suite -> workspace -> defaults
     let resolved = config::resolve_config(workspace_config, test_suite, scenario);
 
-    let url_replacements = if should_apply_url_replacements {
-        collect_url_replacements(test_suite, workspace_config, replacement_profile)
+    let replacement_mode = if should_apply_url_replacements {
+        config::replacements::ReplacementMode::Test
     } else {
-        Vec::new()
+        config::replacements::ReplacementMode::Ref
     };
+    let url_replacements = config::replacements::bind_replacements_for_mode(
+        &collect_url_replacements(test_suite, workspace_config, replacement_profile),
+        replacement_mode,
+    );
     let url = apply_url_replacements(&scenario.url, &url_replacements)?;
 
     // This request captures exactly one scenario/viewport pair. When a viewport

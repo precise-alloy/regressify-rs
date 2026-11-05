@@ -719,13 +719,19 @@ a different browser or revision may need to be regenerated and reviewed.
 
 ## Replacement profiles
 
-The `test` command can apply URL replacement profiles from `common/_replacement-profiles.yaml` or `common/_replacement-profiles.yml`:
+Both `ref` and `test` can apply replacement profiles from `common/_replacement-profiles.yaml` or `common/_replacement-profiles.yml`:
 
 ```bash wrap
+regressify ref --test-suite alloy --replacement-profile staging
 regressify test --test-suite alloy --replacement-profile staging
 ```
 
-Profile selection order is CLI `--replacement-profile`, then the `REPLACEMENT_PROFILE` environment variable, then `default`. The `test` command applies replacements to scenario URLs and action `wait.url` values. The `ref` command ignores replacements so references are captured from raw suite URLs.
+Profile selection order is CLI `--replacement-profile`, then the `REPLACEMENT_PROFILE` environment variable, then the test suite's `replacementProfile` field, then `default`. When a test suite sets `replacementProfile`, it ignores the `default` profile; `--replacement-profile` and `REPLACEMENT_PROFILE` override the suite setting.
+
+Each profile is an ordered list processed from first item to last item. Each item must be one of two types:
+
+- **URL replacement** (`ref` and `test`, plus optional `find`, `regex`, and `flags`): when `find` is set, `ref` replaces `find` with `ref` and `test` replaces `find` with `test`. When `find` is omitted, `ref` leaves the URL unchanged and `test` replaces `ref` with `test`.
+- **Script transformation** (`script`): a path to a script inside `common/` (for example `common/transform.js` or `transform.ps1`). Supported extensions are `.ps1` (PowerShell), `.bat`/`.cmd` (Batch), `.sh`/`.bash` (Bash), and `.js`/`.mjs`/`.cjs`/`.ts`/`.mts` (Bun, falling back to Node.js). Regressify passes the suite JSON object on `stdin` (with `REGRESSIFY_MODE`, `REGRESSIFY_PROFILE`, `REGRESSIFY_SUITE`, and `REGRESSIFY_ROOT` environment variables) and reads the transformed suite JSON object from `stdout`.
 
 ## Optimize
 

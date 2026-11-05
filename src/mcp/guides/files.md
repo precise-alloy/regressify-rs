@@ -75,14 +75,24 @@ layouts by user agent show their desktop markup at phone widths.
 profiles:
   default: []
   staging:
+    - find: "{HOST}"
+      ref: https://example.com
+      test: https://staging.example.com
     - ref: https://example.com
       test: https://staging.example.com
+    - script: common/transform.js
 ```
 
-Select the second profile with `regressify test --replacement-profile staging`.
-Only test captures rewrite reference URLs. Profile rules run before workspace
-rules and then suite rules. Use the matching schemas and the `viewports` and
-`replacement-profiles` examples for complete values.
+Select a profile with `--replacement-profile staging` (in `ref` or `test`),
+`REPLACEMENT_PROFILE`, or suite `replacementProfile`. Each profile is processed
+in order from first item to last item: URL items replace `find -> ref` in `ref`
+mode and `find -> test` (or `ref -> test` when `find` is omitted) in `test`
+mode; `script` items run a script in `common/` (`.ps1`, `.bat`/`.cmd`,
+`.sh`/`.bash`, or `.js`/`.mjs`/`.cjs`/`.ts`/`.mts` via Bun or Node.js), passing
+the suite JSON on `stdin` and reading the transformed suite JSON from `stdout`.
+Profile steps run before workspace rules and then suite rules. Use the matching
+schemas and the `viewports` and `replacement-profiles` examples for complete
+values.
 
 ## Cookies
 

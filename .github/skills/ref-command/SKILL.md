@@ -14,8 +14,7 @@ description: 'Use when changing or reviewing regressify ref, baseline capture, r
 
 1. Validate selected suites, IDs, dependencies, viewports, and configuration before
    browser fetch or reference mutation. Preserve exact scenario selection.
-1. Reference mode uses raw scenario/goto/wait URLs. The accepted replacement-profile
-   option must not silently apply test-environment substitutions in reference mode.
+1. Reference mode applies the active replacement profile in order (`--replacement-profile` -> `REPLACEMENT_PROFILE` -> suite `replacementProfile` -> `default`), running `script` items (`REGRESSIFY_MODE=ref`) and URL rules that specify `find` (`find -> ref`), while leaving rules without `find` untouched so `ref -> test` substitutions never leak into reference mode.
 1. Capture before promotion. Only successful screenshots may replace references;
    never delete good baselines first or promote error placeholders/sidecars.
 1. `promote_reference_captures` copies each PNG atomically, then rewrites its
