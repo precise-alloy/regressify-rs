@@ -240,8 +240,17 @@ fn ensure_no_recovery_pending(bundle: &Path) -> Result<()> {
         return Ok(());
     }
     let kept = kept.trim();
+    let backup = parent.join(BACKUP_NAME);
     let detail = if Path::new(kept).exists() {
         format!("the previous copy is kept at {kept}")
+    } else if !previous.is_empty() && installed_version(&backup).as_deref() == Some(previous) {
+        // The stage was already retired into the backup slot, but the updater stopped before the
+        // mark was removed (or the folder flush after the rename failed): the backup IS the
+        // recorded previous copy, so name it instead of claiming it is gone.
+        format!(
+            "the previous copy was already moved to {} (it matches the recorded previous version {previous})",
+            backup.display()
+        )
     } else {
         format!(
             "its recorded previous copy {kept} is gone; if the app runs correctly, just delete the mark"
@@ -1948,6 +1957,45 @@ mod tests {
         assert!(error.downcast_ref::<RecoveryNeeded>().is_some());
         assert!(format!("{error:#}").contains(&staged.display().to_string()));
         assert_eq!(binary_of(&staged), b"old", "the previous app survives");
+    }
+
+    #[test]
+    fn a_stop_after_retiring_the_stage_names_the_backup_not_a_missing_copy() {
+        // The stage was renamed to the backup slot, then the folder flush failed (the same state
+        // as a kill before the mark is removed): the mark still names the vanished stage.
+        struct FlushFails(Cell<bool>);
+        impl SwapOps for FlushFails {
+            fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+                self.0.set(true);
+                fs::rename(from, to)
+            }
+            fn exchange(&self, a: &Path, b: &Path) -> io::Result<()> {
+                RealOps.exchange(a, b)
+            }
+            fn sync_path(&self, path: &Path) -> io::Result<()> {
+                if self.0.get() && path.is_dir() {
+                    return Err(io::Error::other("injected"));
+                }
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (app, staged) = staged_pair(dir.path());
+        let error =
+            swap_bundle(&app, &staged, &FlushFails(Cell::new(false)), &ok_step).unwrap_err();
+        assert!(error.downcast_ref::<RecoveryNeeded>().is_some());
+        assert!(!staged.exists(), "the stage was retired into the backup");
+        assert_eq!(binary_of(&dir.path().join(BACKUP_NAME)), b"old");
+        let lock = InstallLock::acquire(&app).unwrap();
+        let error = recover_interrupted(&lock, &app).unwrap_err();
+        assert!(error.downcast_ref::<RecoveryNeeded>().is_some());
+        let text = format!("{error:#}");
+        let backup = dir.path().join(BACKUP_NAME).display().to_string();
+        assert!(text.contains(&backup), "{text}");
+        assert!(!text.contains("is gone"), "{text}");
+        // Still blocking: nothing was deleted, the mark stays until the user acts.
+        assert_eq!(binary_of(&dir.path().join(BACKUP_NAME)), b"old");
+        assert!(dir.path().join(RECOVERY_MARK_NAME).exists());
     }
 
     #[test]

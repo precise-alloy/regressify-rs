@@ -308,6 +308,12 @@ fn install_locked(
     deps: &macos_install::Deps,
     handle: &InstallHandle,
 ) -> Result<()> {
+    // Ownership was only probed when the panel was built; a long-lived window must not install
+    // over an app another account replaced since (e.g. via `install.sh`). Re-probe under the lock.
+    ensure!(
+        macos_install::bundle_replaceable(bundle),
+        "Cannot install here: this copy of Regressify is no longer one you can replace"
+    );
     macos_install::recover_interrupted(lock, bundle)?;
     let installed = macos_install::installed_version(bundle)
         .and_then(|version| version.parse::<Version>().ok())
@@ -3190,6 +3196,53 @@ mod tests {
                 &InstallHandle::new()
             )
             .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_revalidates_bundle_ownership_under_the_lock() {
+        use super::{InstallHandle, install_locked};
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        let (plan, bytes) = plan_serving("2.5.0", b"c");
+        let opened = std::cell::Cell::new(false);
+        let open = |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+            opened.set(true);
+            Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+        };
+        let ok = |_: &std::path::Path| Ok(());
+        let deps = macos_install::Deps {
+            open: &open,
+            sign: &ok,
+            verify: &ok,
+            ops: &macos_install::RealOps,
+        };
+        let lock = macos_install::InstallLock::acquire(&app).unwrap();
+        // Someone swapped the bundle for a link after the panel was built: same rule as
+        // `bundle_replaceable`, so the install refuses before recovery or staging.
+        let moved = dir.path().join("elsewhere.app");
+        std::fs::rename(&app, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &app).unwrap();
+        let error = install_locked(
+            &lock,
+            &app,
+            cache.path(),
+            current(),
+            &plan,
+            &deps,
+            &InstallHandle::new(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Cannot install here"),
+            "{error:#}"
+        );
+        assert!(!opened.get());
+        assert_eq!(
+            std::fs::read(moved.join("Contents/MacOS/regressify-desktop")).unwrap(),
+            b"old"
         );
     }
 

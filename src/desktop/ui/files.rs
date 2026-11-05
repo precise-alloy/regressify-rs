@@ -347,6 +347,12 @@ impl Workbench {
         .detach();
     }
 
+    /// What the panels were last told: lets tests prove `sync_modal` ran after `busy` changed.
+    #[cfg(all(test, feature = "gui-tests"))]
+    pub(super) fn modal_busy(&self, cx: &App) -> bool {
+        self.modal.read(cx).busy
+    }
+
     pub(super) fn sync_modal(&self, cx: &mut Context<Self>) {
         let disabled = self.busy || self.runs.read(cx).running();
         self.git

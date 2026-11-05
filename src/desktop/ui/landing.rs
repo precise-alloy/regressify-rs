@@ -680,9 +680,17 @@ mod tests {
         })
         .unwrap();
         wait_for_relaunch(cx, handle, &calls).await;
+        // The relaunch failed: the window must be usable again, and the panels (synced while the
+        // save task ran with `busy` set) must be told so, not left disabled.
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            view.read(cx).status.starts_with("Cannot restart")
+        })
+        .await;
         cx.update_window(handle.into(), |_, _, cx| {
             let state = view.read(cx).landing.read(cx);
             assert!(state.pending.is_none() && !state.dirty(cx) && state.open.is_some());
+            assert!(!view.read(cx).busy);
+            assert!(!view.read(cx).modal_busy(cx));
         })
         .unwrap();
     }

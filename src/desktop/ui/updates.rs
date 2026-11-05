@@ -161,7 +161,12 @@ impl UpdatePanel {
             {
                 self.notice = None;
                 self.dismissed_notice = Some(notice);
-                self.notice_message = DISMISSED_MESSAGE.into();
+                // A cached poll must not erase the failure of the manual check that preceded it.
+                self.notice_message = notice_message_after_success(
+                    dispatched,
+                    &self.notice_message,
+                    DISMISSED_MESSAGE,
+                );
             }
             Ok(NoticeOutcome::Available(notice)) => {
                 self.dismissed_notice = None;
@@ -183,7 +188,12 @@ impl UpdatePanel {
             Ok(NoticeOutcome::Dismissed(notice)) => {
                 self.notice = None;
                 self.dismissed_notice = Some(notice);
-                self.notice_message = DISMISSED_MESSAGE.into();
+                // A cached poll must not erase the failure of the manual check that preceded it.
+                self.notice_message = notice_message_after_success(
+                    dispatched,
+                    &self.notice_message,
+                    DISMISSED_MESSAGE,
+                );
             }
             // Silent in the banner; the dialog shows it and the next check retries.
             Err(error) => {
@@ -1348,6 +1358,9 @@ impl Workbench {
                         this.busy = false;
                     }
                     this.status = "Cannot restart the updated app; open Regressify manually".into();
+                    // The save task synced the panels while `busy` was set; resync now that it
+                    // is cleared so Activity/Results/Git are usable again.
+                    this.sync_modal(cx);
                     cx.notify();
                 });
             })
@@ -1526,6 +1539,53 @@ mod tests {
             assert!(updates.notice.is_none() && updates.dismissed_notice.is_some());
             assert_eq!(updates.notice_message, super::DISMISSED_MESSAGE);
             assert!(window.try_find("update-notice").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_cached_dismissed_result_keeps_a_failed_manual_check_message(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::desktop::updates::{CHECK_FAILED_PREFIX, NoticeAttempt, NoticeOutcome};
+
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, window, cx| {
+            let notice = view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, _| {
+                    updates.seed_macos(None);
+                    updates.notice.clone().unwrap()
+                })
+            });
+            let feed = |dispatched, outcome, cx: &mut gpui_kit::App| {
+                view.update(cx, |this, cx| {
+                    this.updates.update(cx, |updates, cx| {
+                        updates.apply_notice_attempt(
+                            NoticeAttempt {
+                                dispatched,
+                                outcome,
+                            },
+                            cx,
+                        )
+                    })
+                })
+            };
+            // A manual check fails after the notice was dismissed...
+            feed(true, Err(anyhow::anyhow!("offline")), cx);
+            // ...then the 5-second cached poll reports the dismissed release without a request.
+            feed(false, Ok(NoticeOutcome::Dismissed(notice.clone())), cx);
+            let message =
+                |cx: &gpui_kit::App| view.read(cx).updates.read(cx).notice_message.clone();
+            assert!(
+                message(cx).starts_with(CHECK_FAILED_PREFIX),
+                "{}",
+                message(cx)
+            );
+            // A real check that succeeds replaces it.
+            feed(true, Ok(NoticeOutcome::Dismissed(notice)), cx);
+            assert_eq!(message(cx), super::DISMISSED_MESSAGE);
+            window.render_frame(cx);
         })
         .unwrap();
     }
