@@ -21,6 +21,8 @@ description: 'Use when changing GitHub Actions release matrices, Rust target bui
    Windows builds lack `crt-static`, and step-only flags are invisible to the
    cache action. Never add a push trigger: it would compete with
    the release for macOS runners. Keep `[profile.release]` at maximum optimization.
+   Scope warm-up cancellation by ref. Assert the warm-up cache step's `id: cache`
+   before normalizing IDs in parity tests; build guards depend on that ID.
 1. Desktop selections also schedule a CLI job for each supported target without duplicates. Targets are Windows x64, Linux x64 GNU, and macOS Intel/Apple silicon. Musl releases are retired; Linux ARM64 has no managed Chromium support. Do not restore these matrix rows without native TLS/toolchain and browser-runtime verification. Tagged Windows payloads build independently with static runtimes; packaging must consume both exact artifacts from the same run and stop on either failure.
 1. Preserve `--locked`, static-runtime flags where required, archive contents (the executable plus `LICENSE` and `LICENSING.md`), executable resource versions, and immutable installer naming/hash/size contracts.
 1. Only automatic tag builds in `precise-alloy/regressify-rs` publish. Eight application/target builds and independent offline checks run in parallel; `publish` depends on all builds, checks, and Windows packaging. `deploy` depends on publication. Never bypass failures with `always()` or continue-on-error. Manual runs retain workflow artifacts only.
