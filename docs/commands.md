@@ -739,7 +739,10 @@ Script details:
 - **Limits:** a script is stopped after 60 seconds or when it writes more than 32 MiB to `stdout`; both fail the run.
 - **Errors:** a failing script reports only its name, profile, and exit status. Its output is never shown because it can echo the suite JSON or secrets. To debug, run it yourself with the suite JSON piped to `stdin`.
 - **Windows:** `.bat`/`.cmd` scripts cannot run from a folder whose path contains `%`, `!`, or a double quote. `.sh`/`.bash` scripts need Git Bash or another real `bash` on `PATH`; the WSL launcher in `System32` is not used.
-- **Identity:** a scenario without `id` or `label` keeps the ID derived from the URL as authored, and reports keep linking the baseline page, so profiles never change which baseline a scenario compares against. If a script reorders or removes scenarios, the affected scenarios fall back to their transformed URL, so set explicit `id` values in suites that such scripts change.
+- **Identity:** before any item runs, a scenario without `id` or `label` receives the `id` its authored URL would produce, and scripts see that field. Because the `id` travels with the scenario, a script can reorder scenarios, even differently in `ref` and `test`, without pairing one with another's baseline. A script that drops the `id` of an unlabeled scenario loses that pairing, so keep `id` and `label` fields when rebuilding scenarios.
+- **Baseline links:** in `test` runs, reports link each scenario's baseline page. When a profile is active, Regressify runs it once more in `ref` mode (scripts included, `REGRESSIFY_MODE=ref`) to learn those URLs, so scripts must give the same result every time they run. If that extra run fails, reports link the tested pages and a warning is printed.
+- **Cancellation:** on timeout or output overflow the script and its descendants are stopped (a process group on Unix, `taskkill /T` on Windows).
+- **Invalid output:** if a script's output is not a valid suite, the error names the problem but hides the rejected values.
 
 ## Optimize
 

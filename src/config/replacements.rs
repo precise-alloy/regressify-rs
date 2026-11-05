@@ -511,22 +511,6 @@ pub fn resolve_profile_script_path(
     Ok((canonical_path, kind))
 }
 
-/// Report URL for `url` as the baseline environment sees it: only `find` rules apply.
-/// Scripts are skipped because they cannot be re-run per URL.
-pub fn reference_url(url: &str, items: &[ReplacementProfileItem]) -> Result<String> {
-    let mut result = url.to_string();
-    for item in items {
-        if let ReplacementProfileItem::Url(rule) = item {
-            result = apply_replacements_for_mode(
-                &result,
-                std::slice::from_ref(rule),
-                ReplacementMode::Ref,
-            )?;
-        }
-    }
-    Ok(result)
-}
-
 /// Apply a single URL replacement rule to all URL-bearing fields in a raw test suite JSON value
 /// (`scenarios[*].url`, `scenarios[*].actions[*].goto`, and `url` on `wait`/`switchTab` actions).
 pub fn apply_url_replacement_to_suite_value(
@@ -745,6 +729,15 @@ fn kill_process_tree(child: &mut std::process::Child) {
             .stderr(Stdio::null())
             .status();
     }
+    // The script leads its own process group (see `spawn_script_process`), so `-pid` reaches its descendants.
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -857,6 +850,11 @@ fn spawn_script_process(
     for launcher in &candidates {
         let mut command = Command::new(&launcher.program);
         command.args(&launcher.args);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         #[cfg(windows)]
         if let Some(raw) = &launcher.raw_tail {
             use std::os::windows::process::CommandExt;
@@ -1503,31 +1501,53 @@ $obj | ConvertTo-Json -Depth 10 -Compress
         assert!(scalar.contains("must be an object"), "{scalar}");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn reference_url_applies_only_find_rules_and_skips_scripts() {
-        let items = vec![
-            ReplacementProfileItem::Url(UrlReplacement {
-                find: Some("{HOST}".into()),
-                ref_pattern: "https://prod.example.com".into(),
-                test: "https://staging.example.com".into(),
-                regex: None,
-                flags: None,
-            }),
-            ReplacementProfileItem::Url(UrlReplacement {
-                find: None,
-                ref_pattern: "prod".into(),
-                test: "staging".into(),
-                regex: None,
-                flags: None,
-            }),
-            ReplacementProfileItem::Script(ScriptReplacement {
-                script: "common/x.js".into(),
-            }),
-        ];
-        assert_eq!(
-            reference_url("{HOST}/prod/home", &items).unwrap(),
-            "https://prod.example.com/prod/home"
-        );
+    fn timed_out_scripts_do_not_leave_descendants_running() {
+        if Command::new("bash").arg("--version").output().is_err() {
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let common = workspace.path().join("common");
+        std::fs::create_dir_all(&common).unwrap();
+        let pid_file = workspace.path().join("child.pid");
+        std::fs::write(
+            common.join("spawn.sh"),
+            format!("sleep 60 &\necho $! > '{}'\nwait\n", pid_file.display()),
+        )
+        .unwrap();
+        let error = run_profile_script_with_limits(
+            workspace.path(),
+            &ScriptReplacement {
+                script: "spawn.sh".into(),
+            },
+            &serde_json::json!({"scenarios": []}),
+            ReplacementMode::Test,
+            "p",
+            "s",
+            ScriptLimits {
+                timeout: Duration::from_millis(1000),
+                ..ScriptLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("timed out"));
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_string();
+        let alive = || {
+            Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "descendant {pid} survived the timeout");
     }
 
     #[test]
