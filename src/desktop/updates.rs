@@ -211,10 +211,12 @@ impl InstallState {
     }
 }
 
-/// Whether a stored install state belongs to a release other than the one just announced and
-/// is no longer running, so it must not be shown for (or mask checks of) the announced one.
+/// Whether a finished or failed install is superseded by the announced release: only a release
+/// NEWER than its target retires it. A cached poll can still announce an older release than the
+/// one just installed (the plan comes from a fresh manifest; `notice.json` is not updated), and
+/// that must not drop Restart/Failed. A running install is never stale.
 pub fn install_is_stale(state: &InstallState, target: Option<Version>, announced: Version) -> bool {
-    !state.in_progress() && target.is_some_and(|target| target != announced)
+    !state.in_progress() && target.is_some_and(|target| announced > target)
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +254,14 @@ impl InstallHandle {
     pub fn restarted() -> Self {
         let handle = Self::new();
         handle.set(InstallState::Restart);
+        handle
+    }
+
+    /// A finished install of `version` (the planned release), for GUI tests.
+    #[cfg(all(test, feature = "gui-tests"))]
+    pub fn restarted_for(version: Version) -> Self {
+        let handle = Self::restarted();
+        *handle.1.lock().unwrap() = Some(version);
         handle
     }
 
@@ -3480,19 +3490,25 @@ mod tests {
     }
 
     #[test]
-    fn an_install_row_only_describes_the_release_it_was_started_for() {
+    fn an_install_row_is_retired_only_by_a_newer_announcement() {
         use super::{InstallState, install_is_stale};
-        let old: Version = "2.2.0.0".parse().unwrap();
-        let newer: Version = "2.3.0.0".parse().unwrap();
-        let running = InstallState::Installing;
+        let v = |text: &str| -> Version { text.parse().unwrap() };
+        let (older, same, newer) = (v("2.2.0.0"), v("2.3.0.0"), v("2.4.0.0"));
         let failed = InstallState::Failed("x".into());
-        // Finished or failed installs of another release are stale...
-        assert!(install_is_stale(&InstallState::Restart, Some(old), newer));
-        assert!(install_is_stale(&failed, Some(old), newer));
-        // ...but not for the same release, not while running, and not when unscoped.
-        assert!(!install_is_stale(&InstallState::Restart, Some(old), old));
-        assert!(!install_is_stale(&running, Some(old), newer));
-        assert!(!install_is_stale(&failed, None, newer));
+        for state in [&InstallState::Restart, &failed] {
+            // announced < target and announced == target keep the row; announced > target retires it.
+            assert!(!install_is_stale(state, Some(same), older));
+            assert!(!install_is_stale(state, Some(same), same));
+            assert!(install_is_stale(state, Some(same), newer));
+            // Unscoped rows are never retired here.
+            assert!(!install_is_stale(state, None, newer));
+        }
+        // A running install is never stale, whatever is announced.
+        assert!(!install_is_stale(
+            &InstallState::Installing,
+            Some(same),
+            newer
+        ));
     }
 
     #[test]
@@ -3526,10 +3542,12 @@ mod tests {
         let planned = handle.target().unwrap();
         assert_eq!(planned, plan.version);
         assert_ne!(planned, clicked);
-        // Scoped to the clicked notice, the next announcement of 2.5.0 would drop the Restart;
-        // scoped to the plan it is kept.
-        assert!(install_is_stale(&handle.get(), Some(clicked), planned));
+        // A cached poll still announces the clicked 2.3.0: older than the install, it keeps the
+        // Restart. The installed 2.5.0 itself keeps it too; only a newer release retires it.
+        assert!(!install_is_stale(&handle.get(), handle.target(), clicked));
         assert!(!install_is_stale(&handle.get(), handle.target(), planned));
+        let newer: Version = "2.6.0.0".parse().unwrap();
+        assert!(install_is_stale(&handle.get(), handle.target(), newer));
     }
 
     #[test]

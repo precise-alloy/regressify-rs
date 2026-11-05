@@ -1781,6 +1781,70 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn only_a_release_newer_than_the_installed_one_retires_the_restart(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::desktop::updates::{NoticeAttempt, NoticeOutcome, Version};
+
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, window, cx| {
+            let relaunch: super::Relauncher =
+                std::sync::Arc::new(|_: &std::path::Path, _: Option<&std::path::Path>| false);
+            let feed = view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, _| {
+                    updates.seed_macos(Some(relaunch));
+                    updates.notice_feed.clone().unwrap()
+                })
+            });
+            let notice = |version: &str| {
+                feed.parse_notice_manifest(&format!("version={version}\ntag=v{version}\n"))
+                    .unwrap()
+            };
+            let planned: Version = "2.5.0.0".parse().unwrap();
+            // The banner was clicked at 2.3.0, but the fresh plan installed 2.5.0.
+            view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, _| {
+                    updates.install = Some(InstallHandle::restarted_for(planned));
+                    updates.install_for = Some("2.3.0.0".parse().unwrap());
+                })
+            });
+            let announce = |version: &str, cx: &mut gpui_kit::App| {
+                let outcome = Ok(NoticeOutcome::Available(notice(version)));
+                view.update(cx, |this, cx| {
+                    this.updates.update(cx, |updates, cx| {
+                        updates.apply_notice_attempt(
+                            NoticeAttempt {
+                                dispatched: false,
+                                outcome,
+                            },
+                            cx,
+                        )
+                    })
+                })
+            };
+            let restart_kept = |cx: &gpui_kit::App| {
+                matches!(
+                    view.read(cx).updates.read(cx).install_state(),
+                    Some(crate::desktop::updates::InstallState::Restart)
+                )
+            };
+            // A cached poll still announcing the older clicked release keeps the Restart.
+            announce("2.3.0.0", cx);
+            assert!(restart_kept(cx));
+            // So does the installed release itself.
+            announce("2.5.0.0", cx);
+            assert!(restart_kept(cx));
+            // Only a newer release retires it.
+            announce("2.6.0.0", cx);
+            assert!(!restart_kept(cx));
+            assert!(view.read(cx).updates.read(cx).install_state().is_none());
+            window.render_frame(cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     async fn restart_with_an_invalid_field_draft_opens_the_unsaved_guard(cx: &mut TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let (handle, view) = editor(cx, directory.path());
