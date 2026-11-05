@@ -4,7 +4,7 @@ use crate::desktop::updates::{
     InstallState, NoticeAttempt, NoticeOutcome, PreparedUpdate, Release, RetryScheduled,
     SHARED_POLL_INTERVAL, SharedUpdateCheck, SkippedUpdate, UpdateCheck, UpdateFeed, UpdateLease,
     UpdateNotice, UpdatePlatform, Version, dismissal_hides, install_is_stale, install_macos_update,
-    macos_install, notice_message_after_success,
+    install_scope, macos_install, notice_message_after_success,
 };
 use futures::FutureExt;
 
@@ -158,11 +158,11 @@ impl UpdatePanel {
             && let Some(state) = self.install_state()
             && install_is_stale(
                 &state,
-                // The installed release (from the fresh plan) wins over the clicked notice.
-                self.install
-                    .as_ref()
-                    .and_then(InstallHandle::target)
-                    .or(self.install_for),
+                // The higher of the installed release (fresh plan) and the clicked notice.
+                install_scope(
+                    self.install.as_ref().and_then(InstallHandle::target),
+                    self.install_for,
+                ),
                 notice.version,
             )
         {
@@ -1740,8 +1740,13 @@ mod tests {
             let newer = view.update(cx, |this, cx| {
                 this.updates.update(cx, |updates, _| {
                     updates.seed_macos(Some(relaunch));
+                    // The seeded notice is the maximum version, so scope the finished install
+                    // to a lower release and announce a genuinely higher one.
+                    let installed: crate::desktop::updates::Version = "2.2.0.0".parse().unwrap();
+                    updates.install = Some(InstallHandle::restarted_for(installed));
+                    updates.install_for = Some(installed);
                     let feed = updates.notice_feed.clone().unwrap();
-                    feed.parse_notice_manifest("version=1.0.0.0\ntag=v1.0.0.0\n")
+                    feed.parse_notice_manifest("version=2.3.0.0\ntag=v2.3.0.0\n")
                         .unwrap()
                 })
             });
@@ -1758,7 +1763,7 @@ mod tests {
                     })
                 })
             };
-            // Restart was for the seeded release; a different announcement must not inherit it.
+            // Restart was for 2.2.0; a newer announcement must not inherit it.
             feed(Ok(NoticeOutcome::Available(newer)), cx);
             let updates = view.read(cx).updates.read(cx);
             assert!(updates.install_state().is_none());
@@ -1839,6 +1844,20 @@ mod tests {
             announce("2.6.0.0", cx);
             assert!(!restart_kept(cx));
             assert!(view.read(cx).updates.read(cx).install_state().is_none());
+            // Inverse: clicked 2.5.0, but an older fresh plan installed 2.3.0.
+            view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, _| {
+                    updates.install =
+                        Some(InstallHandle::restarted_for("2.3.0.0".parse().unwrap()));
+                    updates.install_for = Some("2.5.0.0".parse().unwrap());
+                })
+            });
+            // The cached poll announcing the clicked release keeps the Restart.
+            announce("2.5.0.0", cx);
+            assert!(restart_kept(cx));
+            // Only a release newer than both retires it.
+            announce("2.6.0.0", cx);
+            assert!(!restart_kept(cx));
             window.render_frame(cx);
         })
         .unwrap();

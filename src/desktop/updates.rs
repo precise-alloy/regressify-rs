@@ -219,6 +219,13 @@ pub fn install_is_stale(state: &InstallState, target: Option<Version>, announced
     !state.in_progress() && target.is_some_and(|target| announced > target)
 }
 
+/// The release an install row is scoped to: the higher of the planned target and the version
+/// clicked. The fresh plan can be older than the clicked notice (an older manifest), and a cached
+/// poll announcing the clicked release must not retire a successful install either way.
+pub fn install_scope(target: Option<Version>, clicked: Option<Version>) -> Option<Version> {
+    target.max(clicked)
+}
+
 #[derive(Clone, Debug)]
 pub struct InstallHandle(
     std::sync::Arc<std::sync::Mutex<InstallState>>,
@@ -3509,6 +3516,23 @@ mod tests {
             Some(same),
             newer
         ));
+    }
+
+    #[test]
+    fn the_install_scope_is_the_higher_of_the_planned_and_clicked_releases() {
+        use super::{InstallState, install_is_stale, install_scope};
+        let v = |text: &str| -> Option<Version> { Some(text.parse().unwrap()) };
+        // Plan newer than the click, plan older than the click, only one known, none known.
+        assert_eq!(install_scope(v("2.5.0.0"), v("2.3.0.0")), v("2.5.0.0"));
+        assert_eq!(install_scope(v("2.3.0.0"), v("2.5.0.0")), v("2.5.0.0"));
+        assert_eq!(install_scope(None, v("2.5.0.0")), v("2.5.0.0"));
+        assert_eq!(install_scope(v("2.3.0.0"), None), v("2.3.0.0"));
+        assert_eq!(install_scope(None, None), None);
+        // Clicked 2.5, plan 2.3: the cached 2.5 keeps the Restart, only 2.6 retires it.
+        let scope = install_scope(v("2.3.0.0"), v("2.5.0.0"));
+        let restart = InstallState::Restart;
+        assert!(!install_is_stale(&restart, scope, v("2.5.0.0").unwrap()));
+        assert!(install_is_stale(&restart, scope, v("2.6.0.0").unwrap()));
     }
 
     #[test]
