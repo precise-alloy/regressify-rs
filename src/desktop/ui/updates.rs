@@ -13,14 +13,15 @@ use futures::FutureExt;
 pub(super) type Relauncher =
     std::sync::Arc<dyn Fn(&std::path::Path, Option<&std::path::Path>) -> bool + Send + Sync>;
 
-/// Absolute path, argument vector, no shell; `-n` opens a fresh instance.
+/// `-n` opens a fresh instance. Bounded so a stalled `/usr/bin/open` ends in the failure path
+/// (which reclaims the workspace) instead of leaving the window busy.
 fn open_new_instance(app: &std::path::Path, workspace: Option<&std::path::Path>) -> bool {
-    let mut command = std::process::Command::new("/usr/bin/open");
-    command.arg("-n").arg(app);
-    if let Some(workspace) = workspace {
-        command.arg("--args").arg(workspace);
-    }
-    command.status().is_ok_and(|status| status.success())
+    crate::desktop::updates::open_new_instance_bounded(
+        std::path::Path::new("/usr/bin/open"),
+        app,
+        workspace,
+        crate::desktop::updates::RELAUNCH_TIMEOUT,
+    )
 }
 
 pub(super) struct UpdatePanel {
@@ -1324,6 +1325,10 @@ impl Workbench {
             // Cleared again if the launch fails.
             self.busy = true;
             self.status = "Restarting...".into();
+            // `busy` alone does not reach the retained panels (Git's Fetch, Results, Runs):
+            // push it to them before ownership is released, or they could start a workspace
+            // operation during the handoff.
+            self.sync_modal(cx);
             cx.notify();
             // `/usr/bin/open` can stall in LaunchServices: wait for it off the UI thread.
             let relaunch = self.updates.read(cx).relaunch.clone();
@@ -1610,6 +1615,40 @@ mod tests {
             feed(true, Ok(NoticeOutcome::Dismissed(notice)), cx);
             assert_eq!(message(cx), super::DISMISSED_MESSAGE);
             window.render_frame(cx);
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn restart_tells_the_panels_they_are_busy_before_the_handoff_and_frees_them_on_failure(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, _| {
+                    let relaunch: super::Relauncher =
+                        std::sync::Arc::new(|_: &std::path::Path, _: Option<&std::path::Path>| {
+                            false
+                        });
+                    updates.seed_macos(Some(relaunch));
+                })
+            });
+            window.render_frame(cx);
+            window.click("update-notice-restart", cx);
+            // Same turn: the relaunch task has not run yet, so the panels must already be told.
+            assert!(view.read(cx).busy);
+            assert!(view.read(cx).modal_busy(cx));
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            view.read(cx).status.starts_with("Cannot restart")
+        })
+        .await;
+        cx.update_window(handle.into(), |_, _, cx| {
+            assert!(!view.read(cx).busy);
+            assert!(!view.read(cx).modal_busy(cx));
         })
         .unwrap();
     }

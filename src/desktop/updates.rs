@@ -389,6 +389,36 @@ fn run_codesign(args: &[&str], path: &Path) -> Result<()> {
     run_bounded(command, CODESIGN_TIMEOUT, "codesign")
 }
 
+/// LaunchServices can stall `open`; past this the window gives up and reclaims its workspace.
+pub const RELAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Runs `<open_program> -n <app> [--args <workspace>]` (absolute path, argument vector, no
+/// shell) and reports whether it succeeded within `timeout`. A stalled `open` is killed and
+/// reaped and counts as a failure, so the caller's reclaim path runs. Residual risk: a launch
+/// that LaunchServices had already accepted may still start the replacement after the timeout.
+pub fn open_new_instance_bounded(
+    open_program: &Path,
+    app: &Path,
+    workspace: Option<&Path>,
+    timeout: Duration,
+) -> bool {
+    let mut command = std::process::Command::new(open_program);
+    command.arg("-n").arg(app);
+    if let Some(workspace) = workspace {
+        command.arg("--args").arg(workspace);
+    }
+    match run_bounded(command, timeout, "open") {
+        Ok(()) => true,
+        Err(error) => {
+            crate::diagnostics::startup::warning(
+                crate::diagnostics::record::SafeValue::Desktop,
+                &error,
+            );
+            false
+        }
+    }
+}
+
 /// How long to wait for the stderr pipe to close after the child exited or was killed. A
 /// descendant that inherited the pipe can keep it open indefinitely.
 const STDERR_DRAIN_GRACE: Duration = Duration::from_secs(2);
@@ -396,7 +426,11 @@ const STDERR_DRAIN_GRACE: Duration = Duration::from_secs(2);
 /// Runs `command` and fails unless it succeeds within `timeout`; on expiry the child (and, on
 /// unix, its process group) is killed and reaped. Only the first 300 characters of stderr are
 /// surfaced, and waiting for them is bounded: a descendant holding the pipe cannot hang this.
-fn run_bounded(mut command: std::process::Command, timeout: Duration, name: &str) -> Result<()> {
+pub(crate) fn run_bounded(
+    mut command: std::process::Command,
+    timeout: Duration,
+    name: &str,
+) -> Result<()> {
     use std::process::Stdio;
     use std::sync::{Arc, Mutex, mpsc};
     #[cfg(unix)]
@@ -3308,6 +3342,61 @@ mod tests {
         assert!(format!("{error:#}").contains("boom"), "{error:#}");
         let ok = std::process::Command::new("true");
         run_bounded(ok, Duration::from_secs(10), "tool").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_open_times_out_and_reports_failure_and_a_good_one_succeeds() {
+        use super::open_new_instance_bounded;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let app = dir.path().join("Regressify.app");
+        let workspace = dir.path().join("ws");
+        let record = dir.path().join("args");
+        let good = script(
+            "good",
+            &format!("printf '%s ' \"$@\" > {}", record.display()),
+        );
+        assert!(open_new_instance_bounded(
+            &good,
+            &app,
+            Some(&workspace),
+            Duration::from_secs(10)
+        ));
+        let args = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(
+            args.trim(),
+            format!("-n {} --args {}", app.display(), workspace.display())
+        );
+        let stalled = script("stalled", "sleep 30");
+        let started = Instant::now();
+        assert!(!open_new_instance_bounded(
+            &stalled,
+            &app,
+            None,
+            Duration::from_millis(300)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(8));
+        let failing = script("failing", "exit 1");
+        assert!(!open_new_instance_bounded(
+            &failing,
+            &app,
+            None,
+            Duration::from_secs(10)
+        ));
+        assert!(!open_new_instance_bounded(
+            &dir.path().join("missing"),
+            &app,
+            None,
+            Duration::from_secs(10)
+        ));
     }
 
     #[cfg(unix)]
