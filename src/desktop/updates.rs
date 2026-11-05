@@ -218,16 +218,27 @@ pub fn install_is_stale(state: &InstallState, target: Option<Version>, announced
 }
 
 #[derive(Clone, Debug)]
-pub struct InstallHandle(std::sync::Arc<std::sync::Mutex<InstallState>>);
+pub struct InstallHandle(
+    std::sync::Arc<std::sync::Mutex<InstallState>>,
+    /// The release actually being installed, known once the fresh manifest plan is built.
+    std::sync::Arc<std::sync::Mutex<Option<Version>>>,
+);
 
 impl InstallHandle {
     pub fn new() -> Self {
-        Self(std::sync::Arc::new(std::sync::Mutex::new(
-            InstallState::Downloading {
+        Self(
+            std::sync::Arc::new(std::sync::Mutex::new(InstallState::Downloading {
                 received: 0,
                 total: 1,
-            },
-        )))
+            })),
+            std::sync::Arc::default(),
+        )
+    }
+
+    /// The release this install is for, once the plan is known. It can be newer than the
+    /// notice the user clicked, because the plan comes from a fresh manifest.
+    pub fn target(&self) -> Option<Version> {
+        *self.1.lock().unwrap_or_else(|error| error.into_inner())
     }
 
     pub fn get(&self) -> InstallState {
@@ -274,6 +285,8 @@ pub fn perform_install(
     handle: &InstallHandle,
 ) -> Result<()> {
     use macos_install::Phase;
+    // Scope the install row to what is really installed, not to the notice that was clicked.
+    *handle.1.lock().unwrap_or_else(|error| error.into_inner()) = Some(plan.version);
     macos_install::install(
         bundle,
         cache,
@@ -3480,6 +3493,82 @@ mod tests {
         assert!(!install_is_stale(&InstallState::Restart, Some(old), old));
         assert!(!install_is_stale(&running, Some(old), newer));
         assert!(!install_is_stale(&failed, None, newer));
+    }
+
+    #[test]
+    fn the_install_row_follows_the_planned_release_not_the_clicked_notice() {
+        use super::{
+            InstallHandle, InstallState, install_is_stale, install_scoped, perform_install,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        // The banner announced 2.3.0, but the fresh manifest at click time is 2.5.0.
+        let clicked: Version = "2.3.0.0".parse().unwrap();
+        let (plan, bytes) = plan_serving("2.5.0", b"n");
+        let open = move |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+            Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+        };
+        let ok = |_: &std::path::Path| Ok(());
+        let deps = macos_install::Deps {
+            open: &open,
+            sign: &ok,
+            verify: &ok,
+            ops: &macos_install::RealOps,
+        };
+        let handle = InstallHandle::new();
+        assert_eq!(handle.target(), None);
+        install_scoped(&app, &handle, |_| {
+            perform_install(&app, cache.path(), &plan, &deps, &handle)
+        })
+        .unwrap();
+        assert!(matches!(handle.get(), InstallState::Restart));
+        let planned = handle.target().unwrap();
+        assert_eq!(planned, plan.version);
+        assert_ne!(planned, clicked);
+        // Scoped to the clicked notice, the next announcement of 2.5.0 would drop the Restart;
+        // scoped to the plan it is kept.
+        assert!(install_is_stale(&handle.get(), Some(clicked), planned));
+        assert!(!install_is_stale(&handle.get(), handle.target(), planned));
+    }
+
+    #[test]
+    fn perform_install_leaves_the_state_non_terminal_until_the_lock_is_released() {
+        use super::{InstallHandle, InstallState, install_scoped, perform_install};
+        for succeed in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let app = fake_installed_app(dir.path());
+            let lock_dir = dir.path().join(".Regressify.lock");
+            let cache = tempfile::tempdir().unwrap();
+            let (plan, bytes) = plan_serving("2.5.0", b"n");
+            let open = move |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+                if succeed {
+                    Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+                } else {
+                    anyhow::bail!("offline")
+                }
+            };
+            let ok = |_: &std::path::Path| Ok(());
+            let deps = macos_install::Deps {
+                open: &open,
+                sign: &ok,
+                verify: &ok,
+                ops: &macos_install::RealOps,
+            };
+            let handle = InstallHandle::new();
+            let result = install_scoped(&app, &handle, |_lock| {
+                let result = perform_install(&app, cache.path(), &plan, &deps, &handle);
+                // The real installer has finished but still owns the lock directory.
+                assert_eq!(result.is_ok(), succeed);
+                assert!(lock_dir.exists());
+                assert!(handle.get().in_progress(), "{:?}", handle.get());
+                result
+            });
+            assert_eq!(result.is_ok(), succeed);
+            assert!(!lock_dir.exists());
+            assert_eq!(matches!(handle.get(), InstallState::Restart), succeed);
+            assert_eq!(matches!(handle.get(), InstallState::Failed(_)), !succeed);
+        }
     }
 
     #[test]
