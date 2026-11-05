@@ -62,8 +62,9 @@ pub(super) struct UpdatePanel {
     install_bundle: Option<std::path::PathBuf>,
     /// Progress of an in-app install; shared with the worker thread.
     install: Option<InstallHandle>,
-    /// The release `install` was started for; a different announced release retires a finished
-    /// or failed install row instead of inheriting its Restart/Failed state.
+    /// The release `install` was started for (the clicked notice). The install row is scoped to
+    /// the higher of this and the release the plan actually installed: only a strictly newer
+    /// announced release retires a finished or failed row, an older or equal one keeps it.
     install_for: Option<Version>,
 }
 
@@ -153,7 +154,8 @@ impl UpdatePanel {
             outcome: result,
         } = attempt;
         self.notice_checking = false;
-        // A newly announced release retires a finished or failed install of another release.
+        // A release newer than the install scope retires a finished or failed install row; an older or
+        // equal (e.g. cached) announcement keeps its Restart/Failed state.
         if let Ok(NoticeOutcome::Available(notice)) = &result
             && let Some(state) = self.install_state()
             && install_is_stale(
