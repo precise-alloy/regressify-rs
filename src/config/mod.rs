@@ -123,7 +123,7 @@ pub struct WorkspaceConfig {
     /// Saved browser state name or list of names, without .json. Created by persist and loaded from the active output directory's states folder.
     #[schemars(example = "signed-in")]
     pub state: Option<Needs>,
-    /// URL replacement rules applied in order. Each entry requires ref and test; regex and flags are optional.
+    /// URL replacement rules applied in order. Each entry requires ref and test; find, regex, and flags are optional.
     pub url_replacements: Option<Vec<UrlReplacement>>,
     /// Apply the CSS override file to each page document (default: true). hideSelectors and removeSelectors still apply when false.
     pub use_css_override: Option<bool>,

@@ -43,8 +43,11 @@ as `hideSelectors`, `removeSelectors`, and `viewportNames` replace inherited
 lists. An explicit empty `viewportNames` selects all configured viewports.
 
 Important exceptions are described in the workspace guide: URL replacement
-lists concatenate, and Basic Auth credentials override by origin. `delay`,
-timeouts, and other workspace/scenario-only settings are not suite fields.
+lists concatenate, Basic Auth credentials override by origin, and suite
+`replacementProfile` selects a profile from `common/_replacement-profiles.yaml`
+(ignoring `default` unless overridden by `--replacement-profile` or
+`REPLACEMENT_PROFILE`). `delay`, timeouts, and other workspace/scenario-only
+settings are not suite fields.
 
 ```yaml
 viewportNames: [phone, desktop]

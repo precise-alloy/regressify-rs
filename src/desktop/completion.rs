@@ -249,6 +249,7 @@ impl CompletionCatalog {
             DocumentKind::Workspace,
             DocumentKind::Suite,
             DocumentKind::Viewports,
+            DocumentKind::ReplacementProfiles,
         ] {
             if let Some(schema) = validation::schema(kind)? {
                 schemas.push((kind, schema));
@@ -618,7 +619,11 @@ fn nodes_at<'schema>(
             .flat_map(|node| schema::variants(node, root))
             .filter(matches_action)
             .filter_map(|node| match segment {
-                Segment::Property(key) => node["properties"].get(key),
+                // Maps such as `profiles` describe their entries with `additionalProperties`.
+                Segment::Property(key) => node["properties"].get(key).or_else(|| {
+                    node.get("additionalProperties")
+                        .filter(|schema| schema.is_object())
+                }),
                 Segment::Item => node.get("items"),
             })
             .collect();
@@ -1267,6 +1272,33 @@ mod tests {
                 .iter()
                 .any(|item| item.label == "asyncCaptureLimit")
         );
+    }
+
+    #[test]
+    fn replacement_profile_items_complete_and_explain_their_fields() {
+        let catalog = CompletionCatalog::new().unwrap();
+        let source = "profiles:\n  qa:\n    - ref: a\n      te";
+        assert!(
+            catalog
+                .complete(
+                    DocumentKind::ReplacementProfiles,
+                    Format::Yaml,
+                    source,
+                    source.len()
+                )
+                .iter()
+                .any(|item| item.label == "test")
+        );
+        let source = "profiles:\n  qa:\n    - script: x.cjs\n";
+        let hint = catalog
+            .hint(
+                DocumentKind::ReplacementProfiles,
+                Format::Yaml,
+                source,
+                source.find("script").unwrap(),
+            )
+            .unwrap();
+        assert!(hint.text.contains("common"), "{}", hint.text);
     }
 
     #[test]

@@ -835,9 +835,11 @@ impl Workbench {
                 this.session.selection = selection;
                 this.session.reconcile_selection();
                 this.tab = if this.session.open.as_ref().is_some_and(|open| {
-                    open.entry.kind == DocumentKind::Data
-                        || (open.entry.kind == DocumentKind::Suite
-                            && this.session.selection == Selection::Root)
+                    matches!(
+                        open.entry.kind,
+                        DocumentKind::Data | DocumentKind::ReplacementProfiles
+                    ) || (open.entry.kind == DocumentKind::Suite
+                        && this.session.selection == Selection::Root)
                 }) {
                     1
                 } else {
@@ -1824,6 +1826,7 @@ impl Workbench {
                 self.tab = if self.session.selection == Selection::Root
                     && self.session.open.as_ref().is_some_and(|open| {
                         open.entry.kind == DocumentKind::Suite
+                            || open.entry.kind == DocumentKind::ReplacementProfiles
                             || open.document.format == Format::Text
                     }) {
                     1
@@ -2650,11 +2653,10 @@ impl Workbench {
             || self.session.open.is_none()
             || index > 2
             || (index != 1
-                && self
-                    .session
-                    .open
-                    .as_ref()
-                    .is_some_and(|open| open.document.format == Format::Text))
+                && self.session.open.as_ref().is_some_and(|open| {
+                    open.document.format == Format::Text
+                        || open.entry.kind == DocumentKind::ReplacementProfiles
+                }))
         {
             return false;
         }
@@ -2704,11 +2706,10 @@ impl Workbench {
                 )
             })
             .unwrap_or_else(|| "Workspace".into());
-        let text_document = self
-            .session
-            .open
-            .as_ref()
-            .is_some_and(|open| open.document.format == Format::Text);
+        let text_document = self.session.open.as_ref().is_some_and(|open| {
+            open.document.format == Format::Text
+                || open.entry.kind == DocumentKind::ReplacementProfiles
+        });
         let content = match self.tab {
             1 => self.render_source(cx),
             2 => div()

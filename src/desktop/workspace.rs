@@ -754,6 +754,9 @@ impl Workspace {
             })?;
             crate::test::validate_suite_identifier("Suite name", Some(&suite_name))?;
             DocumentKind::Suite
+        } else if entry_kind(resolved_relative) == DocumentKind::ReplacementProfiles {
+            // The runtime loads this exact name, so a copy saved there must be a valid profile file.
+            DocumentKind::ReplacementProfiles
         } else {
             kind
         };
@@ -1068,6 +1071,16 @@ fn entry_kind(relative: &Path) -> DocumentKind {
     {
         return DocumentKind::Viewports;
     }
+    // Only the exact names the runtime loads; `components` is exhausted when the file is directly in `common/`.
+    if in_folder("common")
+        && components.next().is_none()
+        && matches!(
+            name.as_str(),
+            "_replacement-profiles.yaml" | "_replacement-profiles.yml"
+        )
+    {
+        return DocumentKind::ReplacementProfiles;
+    }
     DocumentKind::Data
 }
 
@@ -1148,6 +1161,10 @@ fn validate_typed_source(document: &Document) -> Result<()> {
         DocumentKind::Suite => parse_typed_source::<crate::types::TestSuite>(document).map(|_| ()),
         DocumentKind::Viewports => {
             parse_typed_source::<Vec<crate::config::viewports::ViewportDef>>(document).map(|_| ())
+        }
+        DocumentKind::ReplacementProfiles => {
+            parse_typed_source::<crate::config::replacements::ReplacementProfilesFile>(document)
+                .map(|_| ())
         }
         DocumentKind::Data => Ok(()),
     }
@@ -1424,8 +1441,20 @@ mod tests {
             ("common/README", DocumentKind::Data),
             ("common/_on-ready.js", DocumentKind::Data),
             ("common/_override.css", DocumentKind::Data),
+            (
+                "common/_replacement-profiles.yaml",
+                DocumentKind::ReplacementProfiles,
+            ),
+            (
+                "common/_replacement-profiles.yml",
+                DocumentKind::ReplacementProfiles,
+            ),
             ("common/_viewports.yaml", DocumentKind::Viewports),
             ("common/data.json", DocumentKind::Data),
+            (
+                "common/nested/_replacement-profiles.yaml",
+                DocumentKind::Data,
+            ),
             ("common/nested/helper.tests.json", DocumentKind::Data),
             ("common/nested/hook.js", DocumentKind::Data),
             ("common/template.tests.yaml", DocumentKind::Data),
@@ -2194,6 +2223,27 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn saving_data_as_the_profile_file_validates_it_as_a_profile_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let path = Path::new("common/_replacement-profiles.yaml");
+        let error = workspace
+            .create_document(path, DocumentKind::Data, "profiles:\n  qa:\n    - ref: a\n")
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("test"), "{error:#}");
+        assert!(!directory.path().join(path).exists());
+
+        let open = workspace
+            .create_document(
+                path,
+                DocumentKind::Data,
+                "profiles:\n  qa:\n    - ref: a\n      test: b\n",
+            )
+            .unwrap();
+        assert_eq!(open.entry.kind, DocumentKind::ReplacementProfiles);
     }
 
     #[test]

@@ -12,7 +12,7 @@ description: 'Use when changing regressify test orchestration, scenario isolatio
 ## Procedure and Invariants
 
 1. Validate configuration and selection before launching browser jobs. Keep scenario/suite/output IDs distinct when translating exact selections.
-1. Test mode applies validated replacement profiles to initial, goto, wait, and new-tab URL filters. Keep raw reference URLs in capture metadata for later review links.
+1. Test mode resolves each suite's replacement profile (`--replacement-profile` -> `REPLACEMENT_PROFILE` -> suite `replacementProfile` -> `default`), processes profile items (`UrlReplacement` and `ScriptReplacement` with `REGRESSIFY_MODE=test`) from first to last, and applies workspace/suite `urlReplacements` (`find -> test` or `ref -> test`) to initial, goto, wait, and new-tab URL filters. Keep raw reference URLs in capture metadata for later review links.
 1. Bound capture concurrency and launch ramping. Isolate each job's browser and profile; stop subsequent actions only within the failing scenario.
 1. Compare captured output right after each scenario/viewport capture finishes unless `--skip-compare` is set. Stage diffs in `.compare-staging-*` and commit each suite's report when all of that suite's jobs finish without infrastructure failures, independently of peers. Missing references, mismatches, and website/action failures are report results, not non-zero exits. Follow [run retention](../run-retention/SKILL.md) for registry completion, full-suite defaults, deferred comparisons, and automatic cleanup.
 1. Preserve infrastructure/artifact error classification through spawned tasks and joins. A failed error-placeholder write must not masquerade as page failure.

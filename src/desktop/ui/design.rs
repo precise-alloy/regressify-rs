@@ -443,7 +443,7 @@ pub(super) fn group(key: &str) -> (usize, &'static str) {
         | "settleTimeout"
         | "scenarioTimeout" => (3, "Execution"),
         "hideSelectors" | "removeSelectors" | "cssOverridePath" | "jsOnReadyPath"
-        | "useCssOverride" | "urlReplacements" => (4, "Page setup"),
+        | "useCssOverride" | "replacementProfile" | "urlReplacements" => (4, "Page setup"),
         _ => (5, "Behavior"),
     }
 }

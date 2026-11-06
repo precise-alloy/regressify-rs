@@ -131,8 +131,8 @@ pub(super) fn build() -> Result<Value> {
             "replacement-profiles",
             "replacement-profiles",
             "common/_replacement-profiles.yaml",
-            "Reference captures use raw URLs. Test captures apply the selected profile, workspace rules, then suite rules.",
-            json!({"profiles": {"default": [], "staging": [{"ref": "https://example.com", "test": "https://staging.example.com"}]}}),
+            "Profile items run in order. URL items replace find->ref in ref mode and find/ref->test in test mode. To add a script item, see the profile-script example.",
+            json!({"profiles": {"default": [], "staging": [{"find": "{HOST}", "ref": "https://example.com", "test": "https://staging.example.com"}, {"ref": "https://example.com", "test": "https://staging.example.com"}]}}),
         ),
         (
             "cookies",
@@ -235,6 +235,13 @@ pub(super) fn build() -> Result<Value> {
             "common/hooks/on-before.js",
             "Standard browser JavaScript injected through onBeforeScript at initial document creation, before site scripts. Sets a synthetic browser value using window.regressify; the DOM may not exist yet.",
             "window.visualCaptureMode = window.regressify.isReference ? \"reference\" : \"test\";\n",
+        ),
+        (
+            "profile-script",
+            "javascript",
+            "common/transform.cjs",
+            "Node.js or Bun script (not browser JavaScript) for a replacement profile item `- script: common/transform.cjs`. The .cjs extension keeps `require` working even when the workspace package.json sets \"type\": \"module\". It reads the suite JSON object on stdin and writes the transformed object to stdout; REGRESSIFY_MODE is ref or test. Create it together with that profile item.",
+            "const input = require(\"fs\").readFileSync(0, \"utf8\");\nconst suite = JSON.parse(input);\nconst host = process.env.REGRESSIFY_MODE === \"ref\" ? \"https://example.com\" : \"https://staging.example.com\";\nfor (const scenario of suite.scenarios) scenario.url = scenario.url.replace(\"{HOST}\", host);\nprocess.stdout.write(JSON.stringify(suite));\n",
         ),
         (
             "scenario-ready-script",
@@ -397,7 +404,8 @@ mod tests {
                 "replacement-profiles" => {
                     let profiles: ReplacementProfilesFile = serde_json::from_value(value).unwrap();
                     for rules in profiles.profiles.values() {
-                        crate::config::replacements::validate_replacements(rules, name).unwrap();
+                        crate::config::replacements::validate_profile_items_syntax(rules, name)
+                            .unwrap();
                     }
                 }
                 "cookies" => {
@@ -939,8 +947,10 @@ mod tests {
                         let profiles: ReplacementProfilesFile =
                             serde_json::from_value(value).unwrap();
                         for rules in profiles.profiles.values() {
-                            crate::config::replacements::validate_replacements(rules, topic)
-                                .unwrap();
+                            crate::config::replacements::validate_profile_items_syntax(
+                                rules, topic,
+                            )
+                            .unwrap();
                         }
                     }
                     "viewports" => {

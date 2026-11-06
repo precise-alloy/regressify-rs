@@ -75,14 +75,27 @@ layouts by user agent show their desktop markup at phone widths.
 profiles:
   default: []
   staging:
+    - find: "{HOST}"
+      ref: https://example.com
+      test: https://staging.example.com
     - ref: https://example.com
       test: https://staging.example.com
 ```
 
-Select the second profile with `regressify test --replacement-profile staging`.
-Only test captures rewrite reference URLs. Profile rules run before workspace
-rules and then suite rules. Use the matching schemas and the `viewports` and
-`replacement-profiles` examples for complete values.
+Select a profile with `--replacement-profile staging` (in `ref` or `test`),
+`REPLACEMENT_PROFILE`, or suite `replacementProfile`. Each profile is processed
+in order from first item to last item: URL items replace `find -> ref` in `ref`
+mode and `find -> test` (or `ref -> test` when `find` is omitted) in `test`
+mode. A `script` item, written as `- script: common/transform.cjs`, runs a script
+from `common/` (`.ps1`, `.bat`/`.cmd`, `.sh`/`.bash`, or
+`.js`/`.mjs`/`.cjs`/`.ts`/`.mts` via Bun or Node.js), passing the suite JSON on
+`stdin` and reading the transformed suite JSON from `stdout`. Every item must
+exist before a run starts, so create the script file together with the item; see
+`get_example(task="profile-script")`. Scripts execute arbitrary code on the
+user's machine, and a failing script's output is never shown in errors; debug it
+by running it manually with the suite JSON on stdin. Profile steps run before
+workspace rules and then suite rules. Use the matching schemas and the
+`viewports` and `replacement-profiles` examples for complete values.
 
 ## Cookies
 
@@ -113,9 +126,11 @@ including subsequent navigation, before the next action or capture. A script may
 return a promise. Errors fail the capture; do not assume a failed script was
 applied.
 
-All scripts, including `onBeforeScript`, `onReadyScript`, and `jsOnReadyPath`,
+All browser hook scripts, `onBeforeScript`, `onReadyScript`, and `jsOnReadyPath`,
 execute inside Chromium with no Node or Playwright dependency. Node filesystem
-APIs, `require`, module exports, and callback arguments are unavailable.
+APIs, `require`, module exports, and callback arguments are unavailable there.
+Replacement profile scripts are different: they run on the host with Bun or
+Node.js.
 Read `get_authoring_guide(topic="hooks")` for browser context, lifecycle, and
 timeouts; both ready-script settings run before actions, after readiness.
 Upload files referenced by `input.file` live under `visual_tests/` and

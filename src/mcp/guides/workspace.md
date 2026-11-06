@@ -219,18 +219,22 @@ resolution. An absolute path is allowed only if it remains inside that workspace
 Missing optional defaults differ from explicit missing paths; consult the files
 guide before assuming a default file is required.
 
-`ref` captures raw reference URLs. `test` applies URL replacement rules in order,
-including supported navigation and URL-wait targets. Each rule has `ref` and
-`test` strings; literal rules replace every occurrence, and `regex: true` enables
-Rust regular expressions. Optional flags are `g`, `i`, `m`, `s`, and `u`;
-invalid/repeated flags or flags without regex fail. Do not assume
-JavaScript-only regex features such as look-around or backreferences work. In
-`test`, write capture groups as `${1}` when a letter, digit, or underscore
-follows, because `$1a` names a group `1a`.
-`--replacement-profile` overrides `REPLACEMENT_PROFILE`; otherwise the `default`
-profile applies when present. An explicitly selected profile, or its file, must
-exist; an absent implicit `default` simply adds no rules. `ref` ignores the
-profile option with a warning.
+`ref` and `test` process the active replacement profile in order from first item
+to last item, then apply workspace and suite `urlReplacements`. Each URL rule
+has `ref` and `test` strings, plus optional `find`: when `find` is set, `ref`
+replaces `find` with `ref` and `test` replaces `find` with `test`; when `find`
+is omitted, `ref` leaves URLs unchanged and `test` replaces `ref` with `test`.
+Literal rules replace every occurrence, and `regex: true` enables Rust regular
+expressions. Optional flags are `g`, `i`, `m`, `s`, and `u`; invalid/repeated
+flags or flags without regex fail. Do not assume JavaScript-only regex features
+such as look-around or backreferences work. Write capture groups as `${1}` when
+a letter, digit, or underscore follows, because `$1a` names a group `1a`.
+Profile items may also be `{script: "common/..."}` transformations that read
+the suite JSON from `stdin` and write the updated suite JSON to `stdout`.
+`--replacement-profile` overrides `REPLACEMENT_PROFILE`, which overrides suite
+`replacementProfile`; otherwise the `default` profile applies when present. An
+explicitly selected profile, or its file, must exist; an absent implicit
+`default` simply adds no rules.
 
 For HTTP Basic Auth, supply an object or array of objects with `origin`,
 `username`, and `password`. Use `${VARIABLE}` or `$VARIABLE` placeholders,

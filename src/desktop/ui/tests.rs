@@ -8116,6 +8116,88 @@ async fn workspace_files_text_documents_support_source_editing_and_save(cx: &mut
 }
 
 #[gpui_kit::test]
+async fn replacement_profile_files_open_in_source_without_empty_fields_tabs(
+    cx: &mut TestAppContext,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(directory.path().join("common")).unwrap();
+    let path = "common/_replacement-profiles.yaml";
+    std::fs::write(
+        directory.path().join(path),
+        "profiles:\n  default: []\n  qa:\n    - script: transform.js\n",
+    )
+    .unwrap();
+    let (handle, view) = editor(cx, directory.path());
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |this, cx| {
+            this.workspace_files_open = true;
+            this.focus_workspace_file(path.into(), window, cx);
+        });
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+        !view.read(cx).busy
+            && view.read(cx).session.open.as_ref().unwrap().entry.path == Path::new(path)
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(
+            view.read(cx).session.open.as_ref().unwrap().entry.kind,
+            super::DocumentKind::ReplacementProfiles
+        );
+        // Fields has nothing to show for this kind, so Source is the only editor.
+        assert_eq!(view.read(cx).tab, 1);
+        assert!(window.try_find("advanced-fields").is_none());
+        view.update(cx, |this, cx| {
+            assert!(!this.select_editor_tab(0, window, cx));
+            assert!(!this.select_editor_tab(2, window, cx));
+        });
+        assert!(view.read(cx).source_issues.is_empty());
+    })
+    .unwrap();
+
+    // Save As keeps the profile kind, so the copy must also open in Source.
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("open-commands", cx);
+        window.input("Save As", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |window, _| {
+        window.try_find("command:Save As").is_some()
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("command:Save As", cx);
+    })
+    .unwrap();
+    settle_dialog(cx, handle).await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("file-name", cx);
+        window.press(&format!("{modifier}-a"), cx);
+        window.input("common/profiles-copy.yaml", cx);
+        window.click("file-confirm", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(3), |_, cx| {
+        !view.read(cx).busy
+            && view.read(cx).session.open.as_ref().unwrap().entry.path
+                == Path::new("common/profiles-copy.yaml")
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        assert_eq!(view.read(cx).tab, 1);
+        assert!(window.try_find("advanced-fields").is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 async fn workspace_files_scroll_within_sidebar_at_both_window_sizes(cx: &mut TestAppContext) {
     use std::path::PathBuf;
 

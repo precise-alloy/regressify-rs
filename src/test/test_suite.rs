@@ -14,8 +14,29 @@ use crate::{
     types::{TestScenario, TestSuite, TestSuiteInput},
 };
 
+/// Workspace and replacement-profile context used when loading a test suite.
+pub struct SuiteProfileContext<'a> {
+    pub root_dir: &'a Path,
+    pub profiles: Option<&'a config::replacements::ReplacementProfilesFile>,
+    pub cli_profile: Option<&'a str>,
+    /// `REPLACEMENT_PROFILE`, captured once per run so parsing is deterministic.
+    pub env_profile: Option<&'a str>,
+    pub mode: config::replacements::ReplacementMode,
+}
+
 /// Parse a test suite file (YAML or JSON) and assign IDs to scenarios.
+#[cfg(test)]
 pub fn parse_test_suite(visual_tests_dir: &Path, input: &TestSuiteInput) -> Result<TestSuite> {
+    parse_test_suite_with_profile(visual_tests_dir, input, None)
+}
+
+/// Parse a test suite file (YAML or JSON), apply the active replacement profile's
+/// ordered steps (URL replacements and scripts), and assign IDs to scenarios.
+pub fn parse_test_suite_with_profile(
+    visual_tests_dir: &Path,
+    input: &TestSuiteInput,
+    profile_ctx: Option<&SuiteProfileContext<'_>>,
+) -> Result<TestSuite> {
     let TestSuiteInput { name, path, format } = input;
 
     let test_suite_path = if path.is_absolute() {
@@ -37,10 +58,129 @@ pub fn parse_test_suite(visual_tests_dir: &Path, input: &TestSuiteInput) -> Resu
     let test_suite_content = std::fs::read_to_string(&test_suite_path)?;
 
     crate::progress::scenario_log!("Parsing test suite...");
-    let mut test_suite: TestSuite = match format {
-        crate::types::TestSuiteFormat::Yaml => serde_yaml::from_str(&test_suite_content)?,
-        crate::types::TestSuiteFormat::Json => serde_json::from_str(&test_suite_content)?,
+    let mut test_suite: TestSuite = if let Some(ctx) = profile_ctx {
+        let mut suite_value: serde_json::Value = match format {
+            crate::types::TestSuiteFormat::Yaml => {
+                serde_yaml::from_str::<crate::helpers::UniqueJsonValue>(&test_suite_content)?.0
+            }
+            crate::types::TestSuiteFormat::Json => {
+                serde_json::from_str::<crate::helpers::UniqueJsonValue>(&test_suite_content)?.0
+            }
+        };
+        let suite_profile = match suite_value.get("replacementProfile") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(profile_str)) => {
+                if profile_str.trim().is_empty() {
+                    anyhow::bail!("Test suite '{}' replacementProfile must not be empty", name);
+                }
+                Some(profile_str.clone())
+            }
+            Some(_) => {
+                // Delegate non-string `replacementProfile` values to typed deserialization
+                // so serde reports the expected field type error.
+                let typed: TestSuite = match format {
+                    crate::types::TestSuiteFormat::Yaml => {
+                        serde_yaml::from_str(&test_suite_content)?
+                    }
+                    crate::types::TestSuiteFormat::Json => {
+                        serde_json::from_str(&test_suite_content)?
+                    }
+                };
+                typed.replacement_profile
+            }
+        };
+
+        let (profile_name, explicit_profile) = config::replacements::resolve_profile_selection(
+            ctx.cli_profile,
+            ctx.env_profile,
+            suite_profile.as_deref(),
+        );
+        if profile_name.trim().is_empty() {
+            anyhow::bail!("Replacement profile name must not be empty");
+        }
+
+        let active_items = match ctx.profiles {
+            Some(profiles) => match profiles.profiles.get(&profile_name) {
+                Some(items) => items.as_slice(),
+                None if explicit_profile => {
+                    anyhow::bail!("Replacement profile '{}' is not defined", profile_name)
+                }
+                None => &[],
+            },
+            None if explicit_profile => {
+                anyhow::bail!(
+                    "Replacement profile file not found: {}",
+                    config::replacements::PROFILE_FILE_DISPLAY
+                )
+            }
+            None => &[],
+        };
+
+        if !active_items.is_empty() {
+            config::replacements::validate_profile_items(
+                ctx.root_dir,
+                active_items,
+                &format!("replacement profile '{}'", profile_name),
+            )?;
+            let has_script = active_items.iter().any(|item| {
+                matches!(
+                    item,
+                    config::replacements::ReplacementProfileItem::Script(_)
+                )
+            });
+            // Ids travel with each scenario object, so a script cannot pair one with another's baseline.
+            pin_authored_ids(&mut suite_value);
+            let authored = suite_value.clone();
+            config::replacements::apply_profile_items_to_suite_value(
+                ctx.root_dir,
+                active_items,
+                &mut suite_value,
+                ctx.mode,
+                &profile_name,
+                name,
+            )?;
+            let mut transformed: TestSuite = serde_json::from_value(suite_value).map_err(|error| {
+                if has_script {
+                    // Script output can carry secrets and serde echoes rejected values.
+                    anyhow!(
+                        "Test suite '{name}' is invalid after the scripts of replacement profile '{profile_name}' ran: {}. Run the script manually and compare its output with the suite schema",
+                        without_values(&error.to_string())
+                    )
+                } else {
+                    anyhow!(error)
+                }
+            })?;
+            if ctx.mode == config::replacements::ReplacementMode::Test {
+                attach_baseline_urls(
+                    &mut transformed,
+                    &authored,
+                    ctx,
+                    active_items,
+                    &profile_name,
+                    name,
+                );
+            }
+            transformed
+        } else {
+            match format {
+                crate::types::TestSuiteFormat::Yaml => serde_yaml::from_str(&test_suite_content)?,
+                crate::types::TestSuiteFormat::Json => serde_json::from_str(&test_suite_content)?,
+            }
+        }
+    } else {
+        match format {
+            crate::types::TestSuiteFormat::Yaml => serde_yaml::from_str(&test_suite_content)?,
+            crate::types::TestSuiteFormat::Json => serde_json::from_str(&test_suite_content)?,
+        }
     };
+
+    if test_suite
+        .replacement_profile
+        .as_deref()
+        .is_some_and(|profile| profile.trim().is_empty())
+    {
+        anyhow::bail!("Test suite '{}' replacementProfile must not be empty", name);
+    }
 
     if test_suite.id.is_none() {
         test_suite.id = Some(name.clone());
@@ -94,6 +234,105 @@ pub fn parse_test_suite(visual_tests_dir: &Path, input: &TestSuiteInput) -> Resu
     }
 
     Ok(test_suite)
+}
+
+/// The id a scenario ends up with, lowercased; `None` when it has neither an id nor a label.
+fn scenario_key(scenario: &serde_json::Value) -> Option<String> {
+    let text = |key: &str| scenario.get(key).and_then(|value| value.as_str());
+    text("id")
+        .map(str::to_string)
+        .or_else(|| text("label").map(slugify))
+        .map(|id| id.to_lowercase())
+}
+
+/// Gives scenarios without an id or label the id their authored URL would produce.
+fn pin_authored_ids(suite: &mut serde_json::Value) {
+    let Some(scenarios) = suite["scenarios"].as_array_mut() else {
+        return;
+    };
+    for scenario in scenarios {
+        // A YAML `id: null` deserializes to no id, so it must count as absent here too.
+        let absent = |key: &str| scenario.get(key).is_none_or(serde_json::Value::is_null);
+        if absent("id")
+            && absent("label")
+            && let Some(url) = scenario.get("url").and_then(|url| url.as_str())
+        {
+            let id = get_asset_version(url.as_bytes(), 20);
+            scenario["id"] = serde_json::Value::String(id);
+        }
+    }
+}
+
+/// URL by scenario key; keys that appear twice cannot be matched and are dropped.
+fn urls_by_key(suite: &serde_json::Value) -> std::collections::HashMap<String, String> {
+    let mut urls = std::collections::HashMap::new();
+    let mut ambiguous = std::collections::HashSet::new();
+    for scenario in suite["scenarios"].as_array().into_iter().flatten() {
+        let (Some(key), Some(url)) = (
+            scenario_key(scenario),
+            scenario.get("url").and_then(|url| url.as_str()),
+        ) else {
+            continue;
+        };
+        if urls.insert(key.clone(), url.to_string()).is_some() {
+            ambiguous.insert(key);
+        }
+    }
+    urls.retain(|key, _| !ambiguous.contains(key));
+    urls
+}
+
+/// Test reports link the page the baseline captured, which only a ref-mode pass over the
+/// profile (scripts included) can reproduce. A failure there only costs the report link.
+fn attach_baseline_urls(
+    suite: &mut TestSuite,
+    authored: &serde_json::Value,
+    ctx: &SuiteProfileContext<'_>,
+    items: &[config::replacements::ReplacementProfileItem],
+    profile_name: &str,
+    suite_name: &str,
+) {
+    let mut baseline = authored.clone();
+    if config::replacements::apply_profile_items_to_suite_value(
+        ctx.root_dir,
+        items,
+        &mut baseline,
+        config::replacements::ReplacementMode::Ref,
+        profile_name,
+        suite_name,
+    )
+    .is_err()
+    {
+        eprintln!(
+            "Reports for test suite '{suite_name}' link the tested pages because replacement profile '{profile_name}' failed in ref mode"
+        );
+        return;
+    }
+    let baseline = urls_by_key(&baseline);
+    for scenario in &mut suite.scenarios {
+        let key = scenario
+            .id
+            .clone()
+            .or_else(|| scenario.label.as_deref().map(slugify))
+            .map(|id| id.to_lowercase());
+        scenario.reference_url = key.and_then(|key| baseline.get(&key).cloned());
+    }
+}
+
+/// Hides the rejected value in serde messages such as `invalid type: string "x", expected usize`.
+fn without_values(message: &str) -> String {
+    // The expectation is serde's own text and comes last; a rejected value may itself contain ", expected".
+    let tail = message
+        .rfind(", expected")
+        .map(|index| &message[index..])
+        .filter(|tail| tail.len() <= 200)
+        .unwrap_or("");
+    for prefix in ["invalid type", "invalid value", "unknown variant"] {
+        if message.starts_with(prefix) {
+            return format!("{prefix} (value hidden){tail}");
+        }
+    }
+    message.to_string()
 }
 
 pub(crate) fn assign_scenario_ids(scenarios: &mut [TestScenario]) {

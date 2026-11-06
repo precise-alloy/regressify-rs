@@ -14,7 +14,15 @@ use serde_json::{Value, json};
 use yaml_edit::{AsYaml, Document as YamlDocument, Sequence, SyntaxKind, YamlFile, YamlNode};
 
 use crate::{
-    config::{WorkspaceConfig, replacements::validate_replacements, viewports},
+    config::{
+        WorkspaceConfig,
+        replacements::{
+            ReplacementProfileItem, ReplacementProfilesFile, validate_profile_items_syntax,
+            validate_replacements,
+        },
+        viewports,
+    },
+    helpers::UniqueJsonValue,
     types::{Browser, TestSuite, UrlReplacement},
 };
 
@@ -27,6 +35,7 @@ pub enum DocumentKind {
     Workspace,
     Suite,
     Viewports,
+    ReplacementProfiles,
     Data,
 }
 
@@ -77,69 +86,6 @@ impl Format {
                 .map(str::to_string)
                 .ok_or_else(|| anyhow!("Expected plain text")),
         }
-    }
-}
-
-struct UniqueJsonValue(Value);
-
-impl<'de> Deserialize<'de> for UniqueJsonValue {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = Value;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("JSON with unique object properties")
-            }
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Value, E> {
-                Ok(Value::Null)
-            }
-            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Value, E> {
-                Ok(Value::Bool(value))
-            }
-            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Value, E> {
-                Ok(value.into())
-            }
-            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Value, E> {
-                Ok(value.into())
-            }
-            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Value, E> {
-                serde_json::Number::from_f64(value)
-                    .map(Value::Number)
-                    .ok_or_else(|| E::custom("Invalid JSON number"))
-            }
-            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Value, E> {
-                Ok(Value::String(value.into()))
-            }
-            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Value, E> {
-                Ok(Value::String(value))
-            }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut sequence: A,
-            ) -> Result<Value, A::Error> {
-                let mut values = Vec::new();
-                while let Some(value) = sequence.next_element::<UniqueJsonValue>()? {
-                    values.push(value.0);
-                }
-                Ok(Value::Array(values))
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Value, A::Error> {
-                let mut values = serde_json::Map::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    if values.contains_key(&key) {
-                        // Reject before Value can collapse a property that Fields would erase.
-                        return Err(serde::de::Error::custom("Duplicate JSON object property"));
-                    }
-                    values.insert(key, map.next_value::<UniqueJsonValue>()?.0);
-                }
-                Ok(Value::Object(values))
-            }
-        }
-        deserializer.deserialize_any(Visitor).map(Self)
     }
 }
 
@@ -801,6 +747,9 @@ pub(crate) fn validate_semantics(kind: DocumentKind, value: &Value) -> Result<()
         DocumentKind::Viewports => {
             Vec::<viewports::ViewportDef>::deserialize(value)?;
         }
+        DocumentKind::ReplacementProfiles => {
+            ReplacementProfilesFile::deserialize(value)?;
+        }
         DocumentKind::Data => {}
     }
     let issues = semantic_diagnostics(kind, value);
@@ -876,6 +825,29 @@ pub(crate) fn semantic_diagnostics(
                 semantic_issue(&mut issues, pointer, error.to_string());
             }
         }
+        DocumentKind::ReplacementProfiles => {
+            // Schema diagnostics own ill-typed items; check regexes, flags, and script names here.
+            // Whether a script file exists needs the workspace, so the run checks that.
+            for (name, items) in value["profiles"].as_object().into_iter().flatten() {
+                for (index, item) in items.as_array().into_iter().flatten().enumerate() {
+                    if issues.len() >= super::validation::MAX_DIAGNOSTICS {
+                        break;
+                    }
+                    let pointer = format!(
+                        "/profiles/{}/{index}",
+                        super::validation::escape_pointer(name)
+                    );
+                    if let Ok(item) = ReplacementProfileItem::deserialize(item)
+                        && let Err(error) = validate_profile_items_syntax(
+                            std::slice::from_ref(&item),
+                            &super::validation::display_path(&pointer),
+                        )
+                    {
+                        semantic_issue(&mut issues, pointer, format!("{error:#}"));
+                    }
+                }
+            }
+        }
         DocumentKind::Data => {
             if !value.is_object() && !value.is_array() {
                 semantic_issue(
@@ -886,7 +858,10 @@ pub(crate) fn semantic_diagnostics(
             }
         }
     }
-    number_semantics(value, "", &mut issues, 0);
+    // Profile names are arbitrary keys, so a profile called `delay` is a list, not a number.
+    if kind != DocumentKind::ReplacementProfiles {
+        number_semantics(value, "", &mut issues, 0);
+    }
     issues
 }
 
@@ -1230,6 +1205,17 @@ mod tests {
                 Document::new(DocumentKind::Workspace, Format::Json, source.into()).unwrap();
             assert!(document.validate().is_err(), "{source:?}");
         }
+    }
+
+    #[test]
+    fn profile_names_that_look_like_numeric_settings_are_valid() {
+        let value = json!({"profiles": {
+            "delay": [],
+            "asyncCaptureLimit": [{"ref": "a", "test": "b"}],
+            "misMatchThreshold": [{"script": "x.cjs"}]
+        }});
+        assert!(semantic_diagnostics(DocumentKind::ReplacementProfiles, &value).is_empty());
+        assert!(validate_value(DocumentKind::ReplacementProfiles, &value).is_ok());
     }
 
     #[test]

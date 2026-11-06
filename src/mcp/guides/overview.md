@@ -37,8 +37,8 @@ server's version; do not assume newer fields work in an older installed CLI.
   `minimal-suite`, `minimal-suite-json`, `responsive-checkout`,
   `navigation-menus`, `reuse-actions`, and `hooked-suite`. Shared configuration
   and hook tasks are `workspace`, `basic-auth`, `viewports`,
-  `replacement-profiles`, `cookies`, `css-override`, `ready-script`,
-  `before-script`, and `scenario-ready-script`. Fragment tasks are `scenario`
+  `replacement-profiles`, `profile-script`, `cookies`, `css-override`,
+  `ready-script`, `before-script`, and `scenario-ready-script`. Fragment tasks are `scenario`
   and `action-<name>` for each of the 25 actions (such as `action-click`,
   `action-input`, `action-wait`, `action-save`, and `action-switchTab`). Replace
   example URLs and selectors with values verified against the user's application.

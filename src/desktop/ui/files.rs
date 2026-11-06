@@ -999,12 +999,10 @@ impl Workbench {
                     .open
                     .as_ref()
                     .map(|open| open.entry.path.clone());
-                this.tab = if this
-                    .session
-                    .open
-                    .as_ref()
-                    .is_some_and(|open| open.document.format == Format::Text)
-                {
+                this.tab = if this.session.open.as_ref().is_some_and(|open| {
+                    open.document.format == Format::Text
+                        || open.entry.kind == DocumentKind::ReplacementProfiles
+                }) {
                     1
                 } else {
                     0
