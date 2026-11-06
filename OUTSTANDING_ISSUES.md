@@ -3,6 +3,21 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## macOS In-App Update Quit Gap (2026-11-06)
+
+- Open: the in-app install refuses window close while it runs, but GPUI registers no
+  app-level terminate hook, so Dock Quit, logout, shutdown, and a kill end the process
+  mid-install. `InstallLock` (`.Regressify.lock`, a `mkdir` directory shared with
+  `install.sh`) is then never removed and has no stale-owner detection, so later installs
+  fail until the user deletes it as the error says. A PID file cannot be written atomically
+  with the `mkdir`, and the script writes none, so only documented, not automated.
+- Resolved in source: killed downloads left `download-*`/`binary-*` files in the update
+  cache; each install now removes ones older than an hour first
+  (`install_sweeps_stale_temp_files_but_not_a_live_peers`).
+- Resolved in source: a window that finds a newer release already installed now shows
+  Restart (typed `AlreadyInstalled`) instead of an unrecoverable Failed row; the banner and
+  dialog name the planned release; the eight-hour schedule uses wall-clock time.
+
 ## Release Cache Runtime Isolation (2026-11-05)
 
 - Resolved in source: manual Windows builds could seed the tagged static-runtime

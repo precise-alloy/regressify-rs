@@ -346,7 +346,24 @@ reason (the install command is offered again after a failure). The same lock dir
 as `install.sh` (`.Regressify.lock` beside the app) allows one installer at a time, so the
 terminal installer and the in-app updater exclude each other; if neither is running and it
 was left behind by a crash, remove it. The version already installed is read from the
-bundle's `Info.plist` under that lock, so a stale window cannot reinstall or downgrade it.
+bundle's `Info.plist` under that lock, so a stale window cannot reinstall or downgrade it;
+a window that finds a newer release already installed (by another window or `install.sh`)
+shows **Restart** for that release instead of a failure. While an install row exists, the
+banner and dialog name the release the install actually used (the fresh manifest can differ
+from the cached announcement), and the dialog shows the running version without a trailing
+`.0`. The in-window eight-hour schedule uses wall-clock time, so it keeps counting while the
+Mac sleeps.
+
+Quitting during an install is guarded only for closing the window: the close is refused
+with "An update is installing; close again when it finishes". GPUI registers no app-level
+quit hook here, so Dock **Quit**, logout, shutdown, and a kill still end the process
+mid-install. That leaves `.Regressify.lock` behind (a plain directory shared with
+`install.sh`, with no stale-owner detection: a PID file cannot be written atomically with
+the `mkdir`, and `install.sh` creates none), so remove the path the error names before
+the next install. A kill mid-swap leaves the recovery mark described above. A killed
+download leaves `download-*`/`binary-*` temp files in the update cache's `macos-install`
+folder; the next install removes those untouched for an hour or more (the cache is shared
+by every bundle, so younger files may belong to a live install).
 There is no shell, script execution, sudo, osascript, background download, or host other
 than the update origin and GitHub releases. The install steps are covered by Linux unit
 tests with injected downloader and signer; the macOS UI and real `codesign`/`open`

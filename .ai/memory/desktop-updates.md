@@ -51,6 +51,12 @@ See the [updater skill](../../.github/skills/desktop-updates/SKILL.md) and
   as pending. A mark that cannot be written is removed and the install is refused with nothing
   changed; there is no in-process latch, so it does not block retries. A failed rollback keeps the
   old app and blocks later installs. `codesign` runs under a 120 s deadline (killed on expiry). A failed `Info.plist` stamp aborts before the swap.
+  Window close is refused during an install, but GPUI has no app-level quit hook here, so Dock
+  Quit/logout/shutdown/kill still end it mid-install and leave `.Regressify.lock` (a bare `mkdir`
+  directory shared with `install.sh`, no stale detection) and orphan `download-*`/`binary-*`
+  temp files; the next install sweeps temp files older than an hour. A peer-installed newer
+  release publishes Restart (typed `AlreadyInstalled`), the UI names the plan's target release,
+  and the in-window schedule is a unix timestamp (`Instant` stops during sleep on macOS).
   Logic is unit tested on Linux; the UI and real `codesign`/`open` behavior remain
   unverified on real hardware.
   Check: `cargo test --features desktop --lib desktop::updates::macos_install::tests`.
