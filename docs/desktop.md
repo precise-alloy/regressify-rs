@@ -362,8 +362,8 @@ mid-install. That leaves `.Regressify.lock` behind (a plain directory shared wit
 the `mkdir`, and `install.sh` creates none), so remove the path the error names before
 the next install. A kill mid-swap leaves the recovery mark described above. A killed
 download leaves `download-*`/`binary-*` temp files in the update cache's `macos-install`
-folder; the next install removes those untouched for an hour or more (the cache is shared
-by every bundle, so younger files may belong to a live install).
+folder; each bundle has its own subfolder there, and the next install of that bundle
+(which holds its install lock) removes the leftovers, never another bundle's files.
 There is no shell, script execution, sudo, osascript, background download, or host other
 than the update origin and GitHub releases. The install steps are covered by Linux unit
 tests with injected downloader and signer; the macOS UI and real `codesign`/`open`

@@ -37,13 +37,8 @@ const LOCK_NAME: &str = ".Regressify.lock";
 /// where that only good copy is and blocks every later install until a human clears it.
 const RECOVERY_MARK_NAME: &str = ".Regressify.app.recovery-needed";
 const WORK_DIR: &str = "macos-install";
-/// Prefixes of the temporary files `install` creates in the work dir.
+/// Prefixes of the temporary files `install` creates in a bundle's work dir.
 const TEMP_PREFIXES: [&str; 2] = ["download-", "binary-"];
-/// A temp file untouched for this long belongs to no live install: the download itself is bounded
-/// by 15 minutes, and signing plus verification add 2 x 120 s, so an hour is a safe margin. The
-/// cache is shared by every bundle (each under its own install lock), so age, not a blanket
-/// delete, decides what a killed install left behind.
-const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// Archive name for a CPU architecture, as published next to the installer.
 pub fn archive_name(arch: &str) -> Option<&'static str> {
@@ -301,22 +296,29 @@ pub fn recover_interrupted(_lock: &InstallLock, bundle: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Private per-user directory for the download; never a world-writable location.
-fn work_dir(cache: &Path) -> Result<PathBuf> {
-    let dir = cache.join(WORK_DIR);
+/// Private per-user directory for one bundle's downloads; never a world-writable location. The
+/// subfolder name is derived from the bundle path, so every install that can touch it holds that
+/// bundle's `InstallLock`: a sweep under the lock cannot meet a live peer's files, however long
+/// that peer was suspended. Other bundles sharing the cache use other subfolders.
+fn work_dir(cache: &Path, bundle: &Path) -> Result<PathBuf> {
+    let digest = hex(&Sha256::digest(bundle.as_os_str().as_encoded_bytes()));
+    let dir = cache.join(WORK_DIR).join(&digest[..16]);
     fs::create_dir_all(&dir).context("Cannot create the update download directory")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        for private in [dir.parent().unwrap_or(&dir), dir.as_path()] {
+            fs::set_permissions(private, fs::Permissions::from_mode(0o700))?;
+        }
     }
     Ok(dir)
 }
 
-/// Removes `download-*` / `binary-*` files older than `max_age` that a killed install (crash,
-/// Force Quit, logout) left in the work dir; their destructors never ran. Best effort: a file
-/// that cannot be removed only stays for the next sweep.
-fn sweep_stale_temp_files(dir: &Path, max_age: std::time::Duration) {
+/// Removes the `download-*` / `binary-*` files a killed install (crash, Force Quit, logout) left
+/// in this bundle's work dir; their destructors never ran. The caller holds the bundle's
+/// `InstallLock`, and only installs of this bundle use the directory, so nothing here is live.
+/// Best effort: a file that cannot be removed only stays for the next sweep.
+fn sweep_temp_files(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -325,13 +327,7 @@ fn sweep_stale_temp_files(dir: &Path, max_age: std::time::Duration) {
             .file_name()
             .to_str()
             .is_some_and(|name| TEMP_PREFIXES.iter().any(|prefix| name.starts_with(prefix)));
-        let old = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|age| age >= max_age);
-        if ours && old {
+        if ours {
             let _ = remove_own(&entry.path());
         }
     }
@@ -802,7 +798,8 @@ pub struct Deps<'a> {
 
 /// Downloads, verifies, stages, and swaps. On any error nothing about the installed app
 /// changes (or it is rolled back) and the temporary download is deleted. A process killed
-/// mid-install cannot delete it, so the next install sweeps stale leftovers first.
+/// mid-install cannot delete it, so the next install of the same bundle sweeps leftovers first.
+/// Call with the bundle's `InstallLock` held.
 pub fn install(
     bundle: &Path,
     cache: &Path,
@@ -817,8 +814,8 @@ pub fn install(
         "Update downloads must use HTTPS"
     );
     ensure_no_recovery_pending(bundle)?;
-    let dir = work_dir(cache)?;
-    sweep_stale_temp_files(&dir, STALE_TEMP_AGE);
+    let dir = work_dir(cache, bundle)?;
+    sweep_temp_files(&dir);
     let archive = tempfile::Builder::new()
         .prefix("download-")
         .tempfile_in(&dir)
@@ -1042,11 +1039,13 @@ mod tests {
     fn work_dir_is_private() {
         use std::os::unix::fs::PermissionsExt;
         let cache = tempfile::tempdir().unwrap();
-        let dir = work_dir(cache.path()).unwrap();
-        assert_eq!(
-            fs::metadata(dir).unwrap().permissions().mode() & 0o777,
-            0o700
-        );
+        let dir = work_dir(cache.path(), Path::new("/Applications/Regressify.app")).unwrap();
+        for private in [dir.parent().unwrap(), dir.as_path()] {
+            assert_eq!(
+                fs::metadata(private).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
     }
 
     #[test]
@@ -1061,23 +1060,28 @@ mod tests {
     }
 
     #[test]
-    fn install_sweeps_stale_temp_files_but_not_a_live_peers() {
+    fn install_sweeps_its_own_bundles_temp_files_but_not_another_bundles() {
         let dir = tempfile::tempdir().unwrap();
         let app = fake_app(dir.path());
+        let other_dir = tempfile::tempdir().unwrap();
+        let other_app = fake_app(other_dir.path());
         let cache = tempfile::tempdir().unwrap();
-        let work = work_dir(cache.path()).unwrap();
-        let old =
-            std::time::SystemTime::now() - STALE_TEMP_AGE - std::time::Duration::from_secs(60);
-        let make = |name: &str, modified: std::time::SystemTime| {
-            let file = File::create(work.join(name)).unwrap();
-            file.set_modified(modified).unwrap();
+        let work = work_dir(cache.path(), &app).unwrap();
+        let other_work = work_dir(cache.path(), &other_app).unwrap();
+        assert_ne!(work, other_work, "one subfolder per bundle");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 3600);
+        let make = |folder: &Path, name: &str| {
+            let file = File::create(folder.join(name)).unwrap();
+            file.set_modified(old).unwrap();
         };
-        // Left by a killed install: destructors never ran.
-        make("download-abc", old);
-        make("binary-def", old);
-        // Another bundle's install (separate lock, shared cache) is still writing these.
-        make("download-live", std::time::SystemTime::now());
-        make("unrelated.txt", old);
+        // Left by a killed install of this bundle: destructors never ran.
+        make(&work, "download-abc");
+        make(&work, "binary-def");
+        make(&work, "unrelated.txt");
+        // Another bundle's install (its own lock, the shared cache) may be suspended or still
+        // copying: however old its files look, this install must not touch them.
+        make(&other_work, "download-peer");
+        make(&other_work, "binary-peer");
         let bytes = zip_bytes(&[(BINARY_NAME, b"new-binary")]);
         let meta = meta_for(&bytes);
         let open =
@@ -1092,12 +1096,16 @@ mod tests {
             &mut |_| {},
         )
         .unwrap();
-        let mut left: Vec<String> = fs::read_dir(&work)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        left.sort();
-        assert_eq!(left, ["download-live", "unrelated.txt"]);
+        let names = |folder: &Path| {
+            let mut names: Vec<String> = fs::read_dir(folder)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(&work), ["unrelated.txt"]);
+        assert_eq!(names(&other_work), ["binary-peer", "download-peer"]);
     }
 
     #[cfg(unix)]
@@ -2354,7 +2362,9 @@ mod tests {
             &phases[phases.len() - 2..],
             [Phase::Verifying, Phase::Installing]
         );
-        let leftovers = fs::read_dir(cache.path().join(WORK_DIR)).unwrap().count();
+        let leftovers = fs::read_dir(work_dir(cache.path(), &app).unwrap())
+            .unwrap()
+            .count();
         assert_eq!(leftovers, 0, "temporary download deleted");
         assert!(stages_in(dir.path()).is_empty());
     }
@@ -2385,7 +2395,7 @@ mod tests {
                 assert!(!dir.path().join(BACKUP_NAME).exists());
                 assert!(stages_in(dir.path()).is_empty());
                 let leftovers =
-                    fs::read_dir(cache.path().join(WORK_DIR)).map_or(0, Iterator::count);
+                    fs::read_dir(work_dir(cache.path(), &app).unwrap()).map_or(0, Iterator::count);
                 assert_eq!(leftovers, 0, "temporary download deleted");
             }
             result

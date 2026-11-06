@@ -54,7 +54,7 @@ See the [updater skill](../../.github/skills/desktop-updates/SKILL.md) and
   Window close is refused during an install, but GPUI has no app-level quit hook here, so Dock
   Quit/logout/shutdown/kill still end it mid-install and leave `.Regressify.lock` (a bare `mkdir`
   directory shared with `install.sh`, no stale detection) and orphan `download-*`/`binary-*`
-  temp files; the next install sweeps temp files older than an hour. A peer-installed newer
+  temp files; the next install of the same bundle sweeps its own per-bundle subfolder of the cache work dir (name = hash of the bundle path, so the `InstallLock` excludes any live peer). A peer-installed newer
   release publishes Restart (typed `AlreadyInstalled`), the UI names the plan's target release,
   and the in-window schedule is a unix timestamp (`Instant` stops during sleep on macOS).
   Logic is unit tested on Linux; the UI and real `codesign`/`open` behavior remain

@@ -12,8 +12,9 @@ are historical evidence, not open implementation tasks.
   fail until the user deletes it as the error says. A PID file cannot be written atomically
   with the `mkdir`, and the script writes none, so only documented, not automated.
 - Resolved in source: killed downloads left `download-*`/`binary-*` files in the update
-  cache; each install now removes ones older than an hour first
-  (`install_sweeps_stale_temp_files_but_not_a_live_peers`).
+  cache; each bundle now has its own work subfolder, and its next install (under the bundle's
+  lock) removes the leftovers, never another bundle's files
+  (`install_sweeps_its_own_bundles_temp_files_but_not_another_bundles`).
 - Resolved in source: a window that finds a newer release already installed now shows
   Restart (typed `AlreadyInstalled`) instead of an unrecoverable Failed row; the banner and
   dialog name the planned release; the eight-hour schedule uses wall-clock time.
