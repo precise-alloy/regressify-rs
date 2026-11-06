@@ -37,6 +37,13 @@ const LOCK_NAME: &str = ".Regressify.lock";
 /// where that only good copy is and blocks every later install until a human clears it.
 const RECOVERY_MARK_NAME: &str = ".Regressify.app.recovery-needed";
 const WORK_DIR: &str = "macos-install";
+/// Prefixes of the temporary files `install` creates in the work dir.
+const TEMP_PREFIXES: [&str; 2] = ["download-", "binary-"];
+/// A temp file untouched for this long belongs to no live install: the download itself is bounded
+/// by 15 minutes, and signing plus verification add 2 x 120 s, so an hour is a safe margin. The
+/// cache is shared by every bundle (each under its own install lock), so age, not a blanket
+/// delete, decides what a killed install left behind.
+const STALE_TEMP_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// Archive name for a CPU architecture, as published next to the installer.
 pub fn archive_name(arch: &str) -> Option<&'static str> {
@@ -116,6 +123,15 @@ pub fn bundle_from_exe(exe: &Path) -> Option<PathBuf> {
 /// current user, and its parent accepts new entries. Probed by creating a file, because mode bits miss ACLs and read-only
 /// volumes.
 pub fn bundle_replaceable(bundle: &Path) -> bool {
+    bundle_replaceable_with(bundle, &same_owner)
+}
+
+/// `bundle_replaceable` with the owner comparison injected (bundle metadata, probe metadata), so
+/// tests can present a foreign-owned bundle without needing a second account.
+pub fn bundle_replaceable_with(
+    bundle: &Path,
+    owned_alike: &dyn Fn(&fs::Metadata, &fs::Metadata) -> bool,
+) -> bool {
     let Some(parent) = bundle.parent() else {
         return false;
     };
@@ -136,7 +152,7 @@ pub fn bundle_replaceable(bundle: &Path) -> bool {
     probe
         .as_file()
         .metadata()
-        .is_ok_and(|probe| same_owner(&meta, &probe))
+        .is_ok_and(|probe| owned_alike(&meta, &probe))
 }
 
 #[cfg(unix)]
@@ -295,6 +311,30 @@ fn work_dir(cache: &Path) -> Result<PathBuf> {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     }
     Ok(dir)
+}
+
+/// Removes `download-*` / `binary-*` files older than `max_age` that a killed install (crash,
+/// Force Quit, logout) left in the work dir; their destructors never ran. Best effort: a file
+/// that cannot be removed only stays for the next sweep.
+fn sweep_stale_temp_files(dir: &Path, max_age: std::time::Duration) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let ours = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| TEMP_PREFIXES.iter().any(|prefix| name.starts_with(prefix)));
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= max_age);
+        if ours && old {
+            let _ = remove_own(&entry.path());
+        }
+    }
 }
 
 /// Streams `reader` into `file`, failing unless it yields exactly `meta.size` bytes whose
@@ -761,7 +801,8 @@ pub struct Deps<'a> {
 }
 
 /// Downloads, verifies, stages, and swaps. On any error nothing about the installed app
-/// changes (or it is rolled back) and the temporary download is deleted.
+/// changes (or it is rolled back) and the temporary download is deleted. A process killed
+/// mid-install cannot delete it, so the next install sweeps stale leftovers first.
 pub fn install(
     bundle: &Path,
     cache: &Path,
@@ -777,6 +818,7 @@ pub fn install(
     );
     ensure_no_recovery_pending(bundle)?;
     let dir = work_dir(cache)?;
+    sweep_stale_temp_files(&dir, STALE_TEMP_AGE);
     let archive = tempfile::Builder::new()
         .prefix("download-")
         .tempfile_in(&dir)
@@ -1005,6 +1047,57 @@ mod tests {
             fs::metadata(dir).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[test]
+    fn the_owner_comparison_gates_replaceability() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_app(dir.path());
+        // A real bundle in a writable folder, but the injected comparison says another account
+        // owns it: not replaceable. Root or not, no second account is needed.
+        assert!(!bundle_replaceable_with(&app, &|_, _| false));
+        assert!(bundle_replaceable_with(&app, &|_, _| true));
+        assert!(bundle_replaceable(&app));
+    }
+
+    #[test]
+    fn install_sweeps_stale_temp_files_but_not_a_live_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_app(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        let work = work_dir(cache.path()).unwrap();
+        let old =
+            std::time::SystemTime::now() - STALE_TEMP_AGE - std::time::Duration::from_secs(60);
+        let make = |name: &str, modified: std::time::SystemTime| {
+            let file = File::create(work.join(name)).unwrap();
+            file.set_modified(modified).unwrap();
+        };
+        // Left by a killed install: destructors never ran.
+        make("download-abc", old);
+        make("binary-def", old);
+        // Another bundle's install (separate lock, shared cache) is still writing these.
+        make("download-live", std::time::SystemTime::now());
+        make("unrelated.txt", old);
+        let bytes = zip_bytes(&[(BINARY_NAME, b"new-binary")]);
+        let meta = meta_for(&bytes);
+        let open =
+            |_: &str| -> Result<Box<dyn Read>> { Ok(Box::new(io::Cursor::new(bytes.clone()))) };
+        install(
+            &app,
+            cache.path(),
+            "https://example.test/a.zip",
+            &meta,
+            "2.2.2.0",
+            &deps_for(&open, &RealOps),
+            &mut |_| {},
+        )
+        .unwrap();
+        let mut left: Vec<String> = fs::read_dir(&work)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["download-live", "unrelated.txt"]);
     }
 
     #[cfg(unix)]

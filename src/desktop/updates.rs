@@ -219,6 +219,27 @@ pub fn install_is_stale(state: &InstallState, target: Option<Version>, announced
     !state.in_progress() && target.is_some_and(|target| announced > target)
 }
 
+/// Banner title for a macOS notice. While an install row exists it names the release that row
+/// installs (`version`, the plan's target), not whatever the cached notice announces.
+pub fn install_title(version: Version, state: Option<&InstallState>) -> String {
+    let version = version.display_short();
+    match state {
+        Some(InstallState::Restart) => format!("Regressify {version} is installed"),
+        _ => format!("Regressify {version} is available"),
+    }
+}
+
+/// Dialog/banner status for an install row, naming the release it really installs.
+pub fn install_status(version: Version, state: &InstallState) -> String {
+    let version = version.display_short();
+    match state {
+        InstallState::Restart => {
+            format!("Regressify {version} is installed. Restart to finish updating.")
+        }
+        other => format!("Regressify {version}: {}", other.message()),
+    }
+}
+
 /// The release an install row is scoped to: the higher of the planned target and the version
 /// clicked. The fresh plan can be older than the clicked notice (an older manifest), and a cached
 /// poll announcing the clicked release must not retire a successful install either way.
@@ -323,11 +344,38 @@ pub fn perform_install(
     )
 }
 
+/// The bundle already holds a release at or above the plan, installed by another window or the
+/// terminal installer since this process started. Nothing was changed and a retry can never
+/// succeed, so it publishes `Restart` (scoped to `version`) rather than a `Failed` row.
+#[derive(Debug)]
+pub struct AlreadyInstalled {
+    pub version: Version,
+}
+
+impl fmt::Display for AlreadyInstalled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Regressify {} or newer is already installed; restart Regressify",
+            self.version.display_short()
+        )
+    }
+}
+
+impl std::error::Error for AlreadyInstalled {}
+
 /// Publishes the final `Restart` or `Failed` state. Call only after `InstallLock` is dropped.
 fn publish_install_result(handle: &InstallHandle, result: &Result<()>) {
     handle.set(match result {
         Ok(()) => InstallState::Restart,
-        Err(error) => InstallState::Failed(failure_reason(error)),
+        Err(error) => match error.downcast_ref::<AlreadyInstalled>() {
+            Some(done) => {
+                // No plan was performed, so scope the row to the release the bundle holds.
+                *handle.1.lock().unwrap_or_else(|error| error.into_inner()) = Some(done.version);
+                InstallState::Restart
+            }
+            None => InstallState::Failed(failure_reason(error)),
+        },
     });
 }
 
@@ -357,21 +405,52 @@ fn install_locked(
     deps: &macos_install::Deps,
     handle: &InstallHandle,
 ) -> Result<()> {
+    install_locked_with(
+        lock,
+        bundle,
+        cache,
+        current,
+        plan,
+        deps,
+        handle,
+        &macos_install::bundle_replaceable,
+    )
+}
+
+/// `install_locked` with the replaceability probe injected, so a test can present a foreign-owned
+/// bundle and assert the refusal happens before anything is downloaded.
+#[allow(clippy::too_many_arguments)]
+fn install_locked_with(
+    lock: &macos_install::InstallLock,
+    bundle: &Path,
+    cache: &Path,
+    current: Version,
+    plan: &InstallPlan,
+    deps: &macos_install::Deps,
+    handle: &InstallHandle,
+    replaceable: &dyn Fn(&Path) -> bool,
+) -> Result<()> {
     // Ownership was only probed when the panel was built; a long-lived window must not install
     // over an app another account replaced since (e.g. via `install.sh`). Re-probe under the lock.
     ensure!(
-        macos_install::bundle_replaceable(bundle),
+        replaceable(bundle),
         "Cannot install here: this copy of Regressify is no longer one you can replace"
     );
     macos_install::recover_interrupted(lock, bundle)?;
     let installed = macos_install::installed_version(bundle)
         .and_then(|version| version.parse::<Version>().ok())
         .unwrap_or(current);
-    ensure!(
-        plan.version > current.max(installed),
-        "Regressify {} or newer is already installed; restart Regressify",
-        current.max(installed).display_short()
-    );
+    if plan.version <= current.max(installed) {
+        // Installed past the running version by a peer: restart is the only useful step. When the
+        // running app is itself the floor, restarting would change nothing, so it stays an error.
+        if installed > current {
+            return Err(AlreadyInstalled { version: installed }.into());
+        }
+        bail!(
+            "Regressify {} or newer is already installed; restart Regressify",
+            current.display_short()
+        );
+    }
     perform_install(bundle, cache, plan, deps, handle)
 }
 
@@ -1012,11 +1091,31 @@ impl fmt::Display for RetryScheduled {
 
 impl std::error::Error for RetryScheduled {}
 
-fn unix_timestamp() -> u64 {
+pub(crate) fn unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Whether a window may send a notice request now. `attempted_at` is the window's own last
+/// attempt as a unix timestamp, not an `Instant`: on macOS `Instant` stops while the Mac sleeps,
+/// so an eight-hour schedule would be measured in awake time. A clock rollback counts as due,
+/// like the saved `last_check_at` rule in `check_notice_with`.
+pub fn notice_network_allowed(startup: bool, attempted_at: Option<u64>, now: u64) -> bool {
+    startup
+        || attempted_at
+            .is_none_or(|at| now < at || now.saturating_sub(at) >= CHECK_INTERVAL.as_secs())
+}
+
+/// Running-version line of the Software updates dialog: macOS drops a trailing `.0` like the
+/// notices do (`2.2.2.0` reads `2.2.2`); Windows and unparsable values keep the raw text.
+pub fn running_version_label(mac: bool, current: &str) -> String {
+    if mac && let Ok(version) = current.parse::<Version>() {
+        version.display_short()
+    } else {
+        current.to_owned()
+    }
 }
 
 impl UpdateFeed {
@@ -3716,6 +3815,187 @@ mod tests {
         assert_eq!(
             std::fs::read(moved.join("Contents/MacOS/regressify-desktop")).unwrap(),
             b"old"
+        );
+    }
+
+    #[test]
+    fn a_foreign_owned_bundle_is_refused_before_anything_is_downloaded() {
+        use super::{InstallHandle, install_locked_with};
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        let (plan, bytes) = plan_serving("2.5.0", b"c");
+        let opened = std::cell::Cell::new(false);
+        let open = |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+            opened.set(true);
+            Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+        };
+        let ok = |_: &std::path::Path| Ok(());
+        let deps = macos_install::Deps {
+            open: &open,
+            sign: &ok,
+            verify: &ok,
+            ops: &macos_install::RealOps,
+        };
+        let lock = macos_install::InstallLock::acquire(&app).unwrap();
+        // A real directory in a writable folder, but another account owns it.
+        let foreign = |bundle: &std::path::Path| {
+            macos_install::bundle_replaceable_with(bundle, &|_, _| false)
+        };
+        let error = install_locked_with(
+            &lock,
+            &app,
+            cache.path(),
+            current(),
+            &plan,
+            &deps,
+            &InstallHandle::new(),
+            &foreign,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Cannot install here"),
+            "{error:#}"
+        );
+        assert!(!opened.get(), "nothing is downloaded");
+        assert_eq!(
+            std::fs::read(app.join("Contents/MacOS/regressify-desktop")).unwrap(),
+            b"old"
+        );
+        // The same bundle owned by the current user installs.
+        let mine =
+            |bundle: &std::path::Path| macos_install::bundle_replaceable_with(bundle, &|_, _| true);
+        install_locked_with(
+            &lock,
+            &app,
+            cache.path(),
+            current(),
+            &plan,
+            &deps,
+            &InstallHandle::new(),
+            &mine,
+        )
+        .unwrap();
+        assert!(opened.get());
+    }
+
+    #[test]
+    fn a_peer_install_publishes_restart_for_the_installed_release() {
+        use super::{
+            AlreadyInstalled, InstallHandle, InstallState, install_locked, install_scoped,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        let (plan, bytes) = plan_serving("2.5.0", b"c");
+        let open = move |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+            Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+        };
+        let ok = |_: &std::path::Path| Ok(());
+        let deps = macos_install::Deps {
+            open: &open,
+            sign: &ok,
+            verify: &ok,
+            ops: &macos_install::RealOps,
+        };
+        let run = |handle: &InstallHandle| {
+            // Both "windows" still run 2.0.0 against the same bundle.
+            install_scoped(&app, handle, |lock| {
+                install_locked(lock, &app, cache.path(), current(), &plan, &deps, handle)
+            })
+        };
+        let first = InstallHandle::new();
+        run(&first).unwrap();
+        assert_eq!(first.get(), InstallState::Restart);
+        // The second window finds 2.5.0 installed: Restart, not a Failed row it can never clear.
+        let second = InstallHandle::new();
+        let error = run(&second).unwrap_err();
+        assert!(error.is::<AlreadyInstalled>(), "{error:#}");
+        assert_eq!(second.get(), InstallState::Restart);
+        assert_eq!(second.target(), Some("2.5.0".parse().unwrap()));
+        // The bundle is untouched by the refused second install.
+        assert_eq!(
+            std::fs::read(
+                dir.path()
+                    .join("Regressify.app.previous/Contents/MacOS/regressify-desktop")
+            )
+            .unwrap(),
+            b"old"
+        );
+        // When the running app itself is the floor, restarting changes nothing: still Failed.
+        let fresh = tempfile::tempdir().unwrap();
+        let fresh_app = fake_installed_app(fresh.path());
+        let (same, _) = plan_serving("2.0.0", b"x");
+        let third = InstallHandle::new();
+        let error = install_scoped(&fresh_app, &third, |lock| {
+            install_locked(
+                lock,
+                &fresh_app,
+                cache.path(),
+                current(),
+                &same,
+                &deps,
+                &third,
+            )
+        })
+        .unwrap_err();
+        assert!(!error.is::<AlreadyInstalled>());
+        assert!(matches!(third.get(), InstallState::Failed(_)));
+    }
+
+    #[test]
+    fn the_notice_schedule_runs_on_wall_clock_time_and_survives_clock_rollback() {
+        use super::{CHECK_INTERVAL, notice_network_allowed};
+        let interval = CHECK_INTERVAL.as_secs();
+        assert!(notice_network_allowed(false, None, 1_000));
+        assert!(!notice_network_allowed(false, Some(1_000), 1_000));
+        assert!(!notice_network_allowed(
+            false,
+            Some(1_000),
+            1_000 + interval - 1
+        ));
+        // 24 wall-clock hours after the last attempt (a sleeping Mac) is due.
+        assert!(notice_network_allowed(false, Some(1_000), 1_000 + interval));
+        assert!(notice_network_allowed(
+            false,
+            Some(1_000),
+            1_000 + 24 * 3600
+        ));
+        // The clock moved back before the last attempt.
+        assert!(notice_network_allowed(false, Some(1_000), 999));
+        // Startup and a manual check bypass only the deadline.
+        assert!(notice_network_allowed(true, Some(1_000), 1_001));
+    }
+
+    #[test]
+    fn the_dialog_shows_the_short_running_version_on_macos_only() {
+        use super::running_version_label;
+        assert_eq!(running_version_label(true, "2.2.2.0"), "2.2.2");
+        assert_eq!(running_version_label(true, "2.2.2.1"), "2.2.2.1");
+        assert_eq!(running_version_label(false, "2.2.2.0"), "2.2.2.0");
+        assert_eq!(running_version_label(true, "dev build"), "dev build");
+    }
+
+    #[test]
+    fn install_text_names_the_release_the_install_row_is_scoped_to() {
+        use super::{InstallState, install_status, install_title};
+        let v: Version = "2.4.0.0".parse().unwrap();
+        assert_eq!(install_title(v, None), "Regressify 2.4.0 is available");
+        assert_eq!(
+            install_title(v, Some(&InstallState::Installing)),
+            "Regressify 2.4.0 is available"
+        );
+        assert_eq!(
+            install_title(v, Some(&InstallState::Restart)),
+            "Regressify 2.4.0 is installed"
+        );
+        assert_eq!(
+            install_status(v, &InstallState::Restart),
+            "Regressify 2.4.0 is installed. Restart to finish updating."
+        );
+        assert_eq!(
+            install_status(v, &InstallState::Installing),
+            "Regressify 2.4.0: Installing"
         );
     }
 
