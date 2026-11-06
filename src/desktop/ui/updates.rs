@@ -1523,6 +1523,7 @@ impl Workbench {
 mod tests {
     use std::time::Duration;
 
+    use gpui_kit::component::WindowExt;
     use gpui_kit::test::{TestAppContextExt, TestWindowExt};
     use gpui_kit::{AppContext, TestAppContext, px, size};
 
@@ -1985,8 +1986,10 @@ mod tests {
             Arc::new(
                 move |_: &std::path::Path, workspace: Option<&std::path::Path>| {
                     calls.fetch_add(1, Ordering::SeqCst);
+                    // Evaluated first so the guard is not held while it is locked again below.
+                    let first = held.lock().unwrap().is_none();
                     if let Some(workspace) = workspace
-                        && held.lock().unwrap().is_none()
+                        && first
                         && let Ok(OpenInstance::Owned(instance)) =
                             DesktopInstance::open(&locks, workspace)
                     {
