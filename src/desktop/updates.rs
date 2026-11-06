@@ -240,6 +240,13 @@ pub fn install_status(version: Version, state: &InstallState) -> String {
     }
 }
 
+/// Version to record when the user dismisses a banner: the release it displays (the install
+/// target while an install row exists) or the clicked notice if that is higher, so neither comes
+/// back at the next check.
+pub fn dismiss_version(shown: Version, notice: Version) -> Version {
+    shown.max(notice)
+}
+
 /// The release an install row is scoped to: the higher of the planned target and the version
 /// clicked. The fresh plan can be older than the clicked notice (an older manifest), and a cached
 /// poll announcing the clicked release must not retire a successful install either way.
@@ -3985,6 +3992,22 @@ mod tests {
         assert_eq!(running_version_label(true, "2.2.2.1"), "2.2.2.1");
         assert_eq!(running_version_label(false, "2.2.2.0"), "2.2.2.0");
         assert_eq!(running_version_label(true, "dev build"), "dev build");
+    }
+
+    #[test]
+    fn dismissing_covers_the_displayed_and_the_clicked_release() {
+        use super::dismiss_version;
+        let v = |text: &str| -> Version { text.parse().unwrap() };
+        // Clicked 2.3, installed 2.5: dismissing hides 2.5 (and 2.3).
+        assert_eq!(dismiss_version(v("2.5.0.0"), v("2.3.0.0")), v("2.5.0.0"));
+        // Clicked 2.5, plan installed 2.3: the cached 2.5 stays hidden too.
+        assert_eq!(dismiss_version(v("2.3.0.0"), v("2.5.0.0")), v("2.5.0.0"));
+        assert_eq!(dismiss_version(v("2.4.0.0"), v("2.4.0.0")), v("2.4.0.0"));
+        // A dismissal of the displayed release hides a same-target announcement.
+        assert!(super::dismissal_hides(
+            Some(dismiss_version(v("2.5.0.0"), v("2.3.0.0"))),
+            v("2.5.0.0")
+        ));
     }
 
     #[test]

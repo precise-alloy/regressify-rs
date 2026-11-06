@@ -3,9 +3,9 @@ use crate::desktop::updates::{
     CHECK_FAILED_PREFIX, CURRENT_VERSION, DownloadControl, InstallHandle, InstallState,
     NoticeAttempt, NoticeOutcome, PreparedUpdate, Release, RetryScheduled, SHARED_POLL_INTERVAL,
     SharedUpdateCheck, SkippedUpdate, UpdateCheck, UpdateFeed, UpdateLease, UpdateNotice,
-    UpdatePlatform, Version, dismissal_hides, install_is_stale, install_macos_update,
-    install_scope, install_status, install_title, macos_install, notice_message_after_success,
-    notice_network_allowed, running_version_label, unix_timestamp,
+    UpdatePlatform, Version, dismiss_version, dismissal_hides, install_is_stale,
+    install_macos_update, install_scope, install_status, install_title, macos_install,
+    notice_message_after_success, notice_network_allowed, running_version_label, unix_timestamp,
 };
 use futures::FutureExt;
 
@@ -524,7 +524,12 @@ impl Workbench {
         let command = feed.install_command();
         let copy_command = command.clone();
         let release_url = notice.release_url();
-        let version = notice.version;
+        // Dismiss what the install row displays, or the clicked release if that is higher, so
+        // the same release does not return as a Restart banner at the next check.
+        let version = dismiss_version(shown, notice.version);
+        // The release page belongs to the clicked notice; the fresh plan's tag is not retained,
+        // so the link is hidden while the row names a different release.
+        let release_matches = shown == notice.version;
         let colors = update_banner_colors(cx);
         Some(
             div()
@@ -631,18 +636,21 @@ impl Workbench {
                                     }),
                             )
                         })
-                        .child(
-                            Button::new("update-notice-release")
-                                .flex_shrink_0()
-                                .icon(gpui_kit::assets::IconName::ExternalLink)
-                                .label("View release")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Err(error) = open::that_detached(&release_url) {
-                                        this.status = format!("Cannot open release page: {error}");
-                                        cx.notify();
-                                    }
-                                })),
-                        )
+                        .when(release_matches, |row| {
+                            row.child(
+                                Button::new("update-notice-release")
+                                    .flex_shrink_0()
+                                    .icon(gpui_kit::assets::IconName::ExternalLink)
+                                    .label("View release")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Err(error) = open::that_detached(&release_url) {
+                                            this.status =
+                                                format!("Cannot open release page: {error}");
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                        })
                         .when(!installing, |row| {
                             row.child(
                                 Button::new("update-notice-dismiss")
@@ -2117,6 +2125,56 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn dismissing_the_displayed_release_keeps_the_same_target_hidden(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::desktop::updates::{NoticeAttempt, NoticeOutcome};
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = editor(cx, directory.path());
+        let relaunch: super::Relauncher =
+            std::sync::Arc::new(|_: &std::path::Path, _: Option<&std::path::Path>| false);
+        cx.update_window(handle.into(), |_, window, cx| {
+            // Clicked 2.3, but the fresh plan installed 2.5.
+            let feed = view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, _| {
+                    updates.seed_macos(Some(relaunch));
+                    let feed = updates.notice_feed.clone().unwrap();
+                    updates.notice = Some(
+                        feed.parse_notice_manifest("version=2.3.0.0\ntag=v2.3.0.0\n")
+                            .unwrap(),
+                    );
+                    updates.install =
+                        Some(InstallHandle::restarted_for("2.5.0.0".parse().unwrap()));
+                    updates.install_for = Some("2.3.0.0".parse().unwrap());
+                    feed
+                })
+            });
+            window.render_frame(cx);
+            window.click("update-notice-dismiss", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("update-notice").is_none());
+            // The next check announces the displayed release: it must stay hidden.
+            let notice = feed
+                .parse_notice_manifest("version=2.5.0.0\ntag=v2.5.0.0\n")
+                .unwrap();
+            view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, cx| {
+                    updates.apply_notice_attempt(
+                        NoticeAttempt {
+                            dispatched: true,
+                            outcome: Ok(NoticeOutcome::Available(notice)),
+                        },
+                        cx,
+                    )
+                })
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("update-notice").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
     async fn the_banner_and_dialog_name_the_release_that_was_installed(cx: &mut TestAppContext) {
         use crate::desktop::updates::Version;
         let directory = tempfile::tempdir().unwrap();
@@ -2146,6 +2204,8 @@ mod tests {
                     cx.notify();
                 });
                 window.render_frame(cx);
+                // The release page would be the clicked release's, not the installed one's.
+                assert!(window.try_find("update-notice-release").is_none());
                 // The banner names what was installed, not the cached announcement.
                 assert_eq!(
                     window.find("update-notice").label(),
