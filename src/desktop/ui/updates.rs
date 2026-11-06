@@ -1,10 +1,11 @@
 use super::*;
 use crate::desktop::updates::{
-    CHECK_FAILED_PREFIX, CHECK_INTERVAL, CURRENT_VERSION, DownloadControl, InstallHandle,
-    InstallState, NoticeAttempt, NoticeOutcome, PreparedUpdate, Release, RetryScheduled,
-    SHARED_POLL_INTERVAL, SharedUpdateCheck, SkippedUpdate, UpdateCheck, UpdateFeed, UpdateLease,
-    UpdateNotice, UpdatePlatform, Version, dismissal_hides, install_is_stale, install_macos_update,
-    install_scope, macos_install, notice_message_after_success,
+    CHECK_FAILED_PREFIX, CURRENT_VERSION, DownloadControl, InstallHandle, InstallState,
+    NoticeAttempt, NoticeOutcome, PreparedUpdate, Release, RetryScheduled, SHARED_POLL_INTERVAL,
+    SharedUpdateCheck, SkippedUpdate, UpdateCheck, UpdateFeed, UpdateLease, UpdateNotice,
+    UpdatePlatform, Version, dismissal_hides, install_is_stale, install_macos_update,
+    install_scope, install_status, install_title, macos_install, notice_message_after_success,
+    notice_network_allowed, running_version_label, unix_timestamp,
 };
 use futures::FutureExt;
 
@@ -53,8 +54,9 @@ pub(super) struct UpdatePanel {
     /// Newest version dismissed in this window, recorded synchronously so a check already in
     /// flight (which loaded its state before the dismissal) cannot restore the banner.
     notice_dismissed: Option<Version>,
-    /// In-memory throttle: holds the interval even when `notice.json` cannot be saved.
-    notice_attempted_at: Option<std::time::Instant>,
+    /// In-memory throttle (unix seconds, wall clock): holds the interval even when `notice.json`
+    /// cannot be saved, and keeps counting while the Mac sleeps.
+    notice_attempted_at: Option<u64>,
     /// Last check result for the dialog (up to date / failed); the banner stays silent.
     notice_message: String,
     /// The running app's `Regressify.app`, set only when its folder is writable. Without it
@@ -119,7 +121,11 @@ impl UpdatePanel {
     /// Dialog status on macOS, from the same state the banner reads.
     fn mac_status(&self) -> String {
         if let Some(install) = &self.install {
-            return install.get().message();
+            let state = install.get();
+            return match self.install_version() {
+                Some(version) => install_status(version, &state),
+                None => state.message(),
+            };
         }
         // Check progress and errors show even while a release notice is retained.
         if self.notice_checking {
@@ -134,6 +140,15 @@ impl UpdatePanel {
             };
         }
         self.notice_message.clone()
+    }
+
+    /// The release the install row is about: the plan's target once known, else the clicked
+    /// notice. The cached notice can announce a different release than the one installed.
+    fn install_version(&self) -> Option<Version> {
+        self.install
+            .as_ref()
+            .and_then(InstallHandle::target)
+            .or(self.install_for)
     }
 
     fn install_state(&self) -> Option<InstallState> {
@@ -177,7 +192,7 @@ impl UpdatePanel {
         // Only a sent request (failures included) restarts the throttle; cached polls
         // must not, or the deadline never arrives.
         if dispatched {
-            self.notice_attempted_at = Some(std::time::Instant::now());
+            self.notice_attempted_at = Some(unix_timestamp());
         }
         match result {
             Ok(NoticeOutcome::NotDue) => {}
@@ -261,7 +276,7 @@ impl UpdatePanel {
         );
         self.notice_feed = Some(feed);
         self.notice_startup_pending = false;
-        self.notice_attempted_at = Some(std::time::Instant::now());
+        self.notice_attempted_at = Some(unix_timestamp());
         if let Some(relaunch) = relaunch {
             self.install_bundle = Some(std::path::PathBuf::from("/nonexistent/Regressify.app"));
             self.install = Some(InstallHandle::restarted());
@@ -485,8 +500,9 @@ impl Workbench {
         let update = self.updates.read(cx);
         let notice = update.notice.as_ref()?;
         let feed = update.notice_feed.as_ref()?;
-        let title = format!("Regressify {} is available", notice.version.display_short());
         let install_state = update.install_state();
+        let shown = update.install_version().unwrap_or(notice.version);
+        let title = install_title(shown, install_state.as_ref());
         let can_install = update.install_bundle.is_some();
         let failed = matches!(install_state, Some(InstallState::Failed(_)));
         let restart = matches!(install_state, Some(InstallState::Restart));
@@ -801,10 +817,8 @@ impl Workbench {
             return;
         };
         let startup = state.notice_startup_pending || force;
-        let network_allowed = startup
-            || state
-                .notice_attempted_at
-                .is_none_or(|at| at.elapsed() >= CHECK_INTERVAL);
+        let network_allowed =
+            notice_network_allowed(startup, state.notice_attempted_at, unix_timestamp());
         let Some(cache) = self.update_cache_dir() else {
             // Say so instead of leaving "Ready to check" next to a button that does nothing.
             self.updates.update(cx, |state, cx| {
@@ -923,7 +937,10 @@ impl Workbench {
                 .map(|(feed, _)| feed.install_command());
             dialog
                 .title("Software updates")
-                .child(format!("Regressify Desktop {CURRENT_VERSION}"))
+                .child(format!(
+                    "Regressify Desktop {}",
+                    running_version_label(mac, CURRENT_VERSION)
+                ))
                 .child(
                     div()
                         .id("update-status")
@@ -1863,6 +1880,288 @@ mod tests {
             window.render_frame(cx);
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_running_install_blocks_quit_close_and_the_install_controls(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, _| {
+                    updates.seed_macos(None);
+                    updates.install_bundle =
+                        Some(std::path::PathBuf::from("/nonexistent/Regressify.app"));
+                    updates.install = Some(InstallHandle::in_progress());
+                    updates.install_for = updates.notice.as_ref().map(|notice| notice.version);
+                });
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.find("update-notice").visible());
+            for id in [
+                "update-notice-install",
+                "update-notice-restart",
+                "update-notice-dismiss",
+                "update-notice-copy",
+            ] {
+                assert!(
+                    window.try_find(id).is_none(),
+                    "{id} is hidden while installing"
+                );
+            }
+            let blocked = "An update is installing; close again when it finishes";
+            // The native close hook refuses and says why.
+            let closes = view.update(cx, |this, cx| this.window_should_close(window, cx));
+            assert!(!closes);
+            assert_eq!(view.read(cx).status, blocked);
+            // Quit paths (including a pending relaunch) do nothing while the install runs.
+            view.update(cx, |this, cx| {
+                this.status.clear();
+                this.updates
+                    .update(cx, |updates, _| updates.install_on_close = true);
+                this.quit_or_install(cx);
+            });
+            assert_eq!(view.read(cx).status, blocked);
+            assert!(view.read(cx).updates.read(cx).install_on_close);
+            assert!(
+                !view.read(cx).busy,
+                "the install guard is not the busy flag"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn a_busy_window_refuses_to_start_an_install(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.updates.update(cx, |updates, _| {
+                    updates.seed_macos(None);
+                    updates.install_bundle =
+                        Some(std::path::PathBuf::from("/nonexistent/Regressify.app"));
+                });
+                this.busy = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            // Clicking and calling the handler directly: neither may start an install.
+            window.click("update-notice-install", cx);
+            view.update(cx, |this, cx| this.start_macos_install(window, cx));
+            assert!(view.read(cx).updates.read(cx).install.is_none());
+            // Idle again: the same call starts one (it fails fast on the missing bundle folder).
+            view.update(cx, |this, cx| {
+                this.busy = false;
+                this.start_macos_install(window, cx);
+            });
+            assert!(view.read(cx).updates.read(cx).install.is_some());
+        })
+        .unwrap();
+    }
+
+    /// A relauncher that records its calls and, while it runs, tries to open the workspace the
+    /// way the replacement app would; `keep` holds the instance it got (another process took it).
+    fn probing_relauncher(
+        locks: std::path::PathBuf,
+        keep: bool,
+    ) -> (
+        super::Relauncher,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use crate::desktop::instance::{DesktopInstance, OpenInstance};
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let was_free = Arc::new(AtomicBool::new(false));
+        let held: Arc<Mutex<Option<DesktopInstance>>> = Arc::default();
+        let relaunch: super::Relauncher = {
+            let calls = calls.clone();
+            let was_free = was_free.clone();
+            Arc::new(
+                move |_: &std::path::Path, workspace: Option<&std::path::Path>| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if let Some(workspace) = workspace
+                        && held.lock().unwrap().is_none()
+                        && let Ok(OpenInstance::Owned(instance)) =
+                            DesktopInstance::open(&locks, workspace)
+                    {
+                        was_free.store(true, Ordering::SeqCst);
+                        if keep {
+                            *held.lock().unwrap() = Some(instance);
+                        }
+                    }
+                    false
+                },
+            )
+        };
+        (relaunch, calls, was_free)
+    }
+
+    #[gpui_kit::test]
+    async fn restart_frees_the_workspace_before_open_and_reclaims_it_when_the_launch_fails(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::desktop::instance::{DesktopInstance, OpenInstance};
+        let directory = tempfile::tempdir().unwrap();
+        let locks = directory.path().join("instances");
+        let (handle, view) = editor(cx, directory.path());
+        let (relaunch, calls, was_free) = probing_relauncher(locks.clone(), false);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.workspace_instance =
+                    match DesktopInstance::open(&locks, directory.path()).unwrap() {
+                        OpenInstance::Owned(instance) => Some(instance),
+                        OpenInstance::Activated => panic!("Expected first fixture ownership"),
+                    };
+                this.updates
+                    .update(cx, |updates, _| updates.seed_macos(Some(relaunch)));
+            });
+            window.render_frame(cx);
+            window.click("update-notice-restart", cx);
+            assert!(view.read(cx).busy);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            view.read(cx).status.starts_with("Cannot restart")
+        })
+        .await;
+        cx.update_window(handle.into(), |_, _, cx| {
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            // While `open` ran the workspace was unowned, so the replacement could take it.
+            assert!(was_free.load(std::sync::atomic::Ordering::SeqCst));
+            // The failed launch gave it back to this window, which is usable again.
+            let this = view.read(cx);
+            assert!(!this.busy && !this.workspace_lost);
+            assert!(
+                this.workspace_instance
+                    .as_ref()
+                    .is_some_and(|instance| instance.owns_workspace(directory.path()).unwrap())
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn restart_keeps_a_window_frozen_but_closable_when_another_process_took_the_workspace(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::desktop::instance::{DesktopInstance, OpenInstance};
+        use std::sync::atomic::Ordering;
+        let directory = tempfile::tempdir().unwrap();
+        let locks = directory.path().join("instances");
+        let (handle, view) = editor(cx, directory.path());
+        let (relaunch, calls, _) = probing_relauncher(locks.clone(), true);
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.workspace_instance =
+                    match DesktopInstance::open(&locks, directory.path()).unwrap() {
+                        OpenInstance::Owned(instance) => Some(instance),
+                        OpenInstance::Activated => panic!("Expected first fixture ownership"),
+                    };
+                this.updates
+                    .update(cx, |updates, _| updates.seed_macos(Some(relaunch)));
+            });
+            window.render_frame(cx);
+            window.click("update-notice-restart", cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            view.read(cx).workspace_lost
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            let this = view.read(cx);
+            assert!(this.busy && this.workspace_lost);
+            assert!(this.workspace_instance.is_none());
+            assert!(this.status.starts_with("Cannot reopen this workspace"));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            // Closing the window reaches `quit_or_install`, which relaunches again (the
+            // relauncher counts the call) even though the window is `busy`.
+            view.update(cx, |this, cx| {
+                this.updates
+                    .update(cx, |updates, _| updates.install_on_close = true);
+                assert!(!this.window_should_close(window, cx));
+            });
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, _| {
+            calls.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            !view.read(cx).updates.read(cx).restarting
+        })
+        .await;
+        // The close that waited for a preferences save takes the same path.
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.close_after_preferences = true;
+                this.updates
+                    .update(cx, |updates, _| updates.install_on_close = true);
+                this.save_preferences(window, cx);
+            });
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, _| {
+            calls.load(Ordering::SeqCst) == 3
+        })
+        .await;
+    }
+
+    #[gpui_kit::test]
+    async fn the_banner_and_dialog_name_the_release_that_was_installed(cx: &mut TestAppContext) {
+        use crate::desktop::updates::Version;
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = editor(cx, directory.path());
+        let relaunch: super::Relauncher =
+            std::sync::Arc::new(|_: &std::path::Path, _: Option<&std::path::Path>| false);
+        // (cached announcement, clicked release, release the plan installed)
+        for (announced, clicked, planned) in [
+            ("2.3.0.0", "2.3.0.0", "2.4.0.0"),
+            ("2.5.0.0", "2.5.0.0", "2.4.0.0"),
+        ] {
+            let planned: Version = planned.parse().unwrap();
+            cx.update_window(handle.into(), |_, window, cx| {
+                view.update(cx, |this, cx| {
+                    this.updates.update(cx, |updates, _| {
+                        updates.seed_macos(Some(relaunch.clone()));
+                        let feed = updates.notice_feed.clone().unwrap();
+                        updates.notice = Some(
+                            feed.parse_notice_manifest(&format!(
+                                "version={announced}\ntag=v{announced}\n"
+                            ))
+                            .unwrap(),
+                        );
+                        updates.install = Some(InstallHandle::restarted_for(planned));
+                        updates.install_for = Some(clicked.parse().unwrap());
+                    });
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                // The banner names what was installed, not the cached announcement.
+                assert_eq!(
+                    window.find("update-notice").label(),
+                    Some("Regressify 2.4.0 is installed. Restart Regressify to finish updating.")
+                );
+                view.update(cx, |this, cx| this.open_updates(window, cx));
+            })
+            .unwrap();
+            settle_dialog(cx, handle).await;
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                assert_eq!(
+                    window.find("update-status").label(),
+                    Some("Regressify 2.4.0 is installed. Restart to finish updating.")
+                );
+                window.close_dialog(cx);
+            })
+            .unwrap();
+        }
     }
 
     #[gpui_kit::test]

@@ -3127,6 +3127,46 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Decision behind the native window-close hook. Always `false` (the app quits itself
+    /// through `quit_or_install`/`finish_close`) unless the view is gone; a method so tests can
+    /// reach it.
+    pub(super) fn window_should_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.install_blocks_quit(cx) {
+            false
+        } else if self.workspace_lost {
+            // Quit the process: returning `true` would only close the
+            // window and leave the app running headless on macOS.
+            self.finish_close(cx);
+            false
+        } else if self.busy {
+            if self.git.read(cx).active() {
+                self.git.update(cx, |panel, cx| panel.cancel_operation(cx));
+                self.status = "Cancelling Git; close again after it finishes".into();
+            } else {
+                self.status = "Finish the current operation before closing".into();
+            }
+            cx.notify();
+            false
+        } else if self.runs.read(cx).running() {
+            self.runs.update(cx, |panel, cx| panel.cancel(cx));
+            self.status = "Cancelling the active run; close again after it finishes".into();
+            cx.notify();
+            false
+        } else if self.guard_landing_close(window, cx) {
+            false
+        } else if self.unsaved(cx) {
+            self.guard(files::Pending::Close, window, cx);
+            false
+        } else {
+            self.finish_close(cx);
+            false
+        }
+    }
+
     fn finish_close(&mut self, cx: &mut Context<Self>) {
         if self.preferences_saving {
             self.close_after_preferences = true;
@@ -3354,46 +3394,8 @@ pub fn launch(instance: Option<DesktopInstance>) {
                             }
                             let weak = view.downgrade();
                             window.on_window_should_close(cx, move |window, cx| {
-                                weak.update(cx, |this, cx| {
-                                    if this.install_blocks_quit(cx) {
-                                        false
-                                    } else if this.workspace_lost {
-                                        // Quit the process: returning `true` would only close the
-                                        // window and leave the app running headless on macOS.
-                                        this.finish_close(cx);
-                                        false
-                                    } else if this.busy {
-                                        if this.git.read(cx).active() {
-                                            this.git
-                                                .update(cx, |panel, cx| panel.cancel_operation(cx));
-                                            this.status =
-                                                "Cancelling Git; close again after it finishes"
-                                                    .into();
-                                        } else {
-                                            this.status =
-                                                "Finish the current operation before closing"
-                                                    .into();
-                                        }
-                                        cx.notify();
-                                        false
-                                    } else if this.runs.read(cx).running() {
-                                        this.runs.update(cx, |panel, cx| panel.cancel(cx));
-                                        this.status =
-                                        "Cancelling the active run; close again after it finishes"
-                                            .into();
-                                        cx.notify();
-                                        false
-                                    } else if this.guard_landing_close(window, cx) {
-                                        false
-                                    } else if this.unsaved(cx) {
-                                        this.guard(files::Pending::Close, window, cx);
-                                        false
-                                    } else {
-                                        this.finish_close(cx);
-                                        false
-                                    }
-                                })
-                                .unwrap_or(true)
+                                weak.update(cx, |this, cx| this.window_should_close(window, cx))
+                                    .unwrap_or(true)
                             });
                             if let Some(instance) = instance {
                                 view.update(cx, |this, cx| {

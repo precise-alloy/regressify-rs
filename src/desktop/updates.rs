@@ -198,7 +198,7 @@ impl InstallState {
             }
             Self::Verifying => "Verifying".into(),
             Self::Installing => "Installing".into(),
-            Self::Restart => "Installed. Restart Regressify to finish updating.".into(),
+            Self::Restart => "Restart Regressify to finish updating.".into(),
             Self::Failed(reason) => format!("Failed: {reason}"),
         }
     }
@@ -275,6 +275,17 @@ impl InstallHandle {
         self.0
             .lock()
             .map_or_else(|error| error.into_inner().clone(), |state| state.clone())
+    }
+
+    /// An install still downloading (nothing published past the first phase), for GUI tests.
+    #[cfg(all(test, feature = "gui-tests"))]
+    pub fn in_progress() -> Self {
+        let handle = Self::new();
+        handle.set(InstallState::Downloading {
+            received: 1,
+            total: 2,
+        });
+        handle
     }
 
     /// A finished install waiting for its restart, for GUI tests.
