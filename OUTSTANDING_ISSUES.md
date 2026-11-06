@@ -11,6 +11,11 @@ are historical evidence, not open implementation tasks.
   `install.sh`) is then never removed and has no stale-owner detection, so later installs
   fail until the user deletes it as the error says. A PID file cannot be written atomically
   with the `mkdir`, and the script writes none, so only documented, not automated.
+- Open: macOS Restart hands off through `/usr/bin/open -n`, which gives no startup
+  acknowledgement. If the replacement fails to start after `open` succeeds, this window has
+  already quit and the app must be reopened manually. The `open` wait is bounded at 30 s;
+  a launch accepted by LaunchServices can still start afterward and only activates this
+  window. Fixing both needs a startup handshake and a workspace ownership protocol.
 - Resolved in source: killed downloads left `download-*`/`binary-*` files in the update
   cache; each bundle now has its own work subfolder, and its next install (under the bundle's
   lock) removes the leftovers, never another bundle's files

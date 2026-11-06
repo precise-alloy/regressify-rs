@@ -350,7 +350,7 @@ bundle's `Info.plist` under that lock, so a stale window cannot reinstall or dow
 a window that finds a newer release already installed (by another window or `install.sh`)
 shows **Restart** for that release instead of a failure. While an install row exists, the
 banner and dialog name the release the install actually used (the fresh manifest can differ
-from the cached announcement), and the dialog shows the running version without a trailing
+from the cached announcement; **View release** is hidden then, and Dismiss hides the displayed release), and the dialog shows the running version without a trailing
 `.0`. The in-window eight-hour schedule uses wall-clock time, so it keeps counting while the
 Mac sleeps.
 
