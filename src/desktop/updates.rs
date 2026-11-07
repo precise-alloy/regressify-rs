@@ -94,7 +94,8 @@ pub fn installer_name(version: Version) -> String {
 pub enum UpdatePlatform {
     /// Full download, verification, and installer launch.
     WindowsX64,
-    /// Notification only: nothing is downloaded or installed.
+    /// Release notices; an opt-in in-app install runs only after the user clicks "Update now",
+    /// from a fresh manifest, for a user-replaceable `Regressify.app`.
     MacOs,
     Other,
 }
