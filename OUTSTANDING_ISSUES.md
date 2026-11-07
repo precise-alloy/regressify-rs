@@ -3,6 +3,27 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## macOS In-App Update Quit Gap (2026-11-06)
+
+- Open: the in-app install refuses window close while it runs, but GPUI registers no
+  app-level terminate hook, so Dock Quit, logout, shutdown, and a kill end the process
+  mid-install. `InstallLock` (`.Regressify.lock`, a `mkdir` directory shared with
+  `install.sh`) is then never removed and has no stale-owner detection, so later installs
+  fail until the user deletes it as the error says. A PID file cannot be written atomically
+  with the `mkdir`, and the script writes none, so only documented, not automated.
+- Open: macOS Restart hands off through `/usr/bin/open -n`, which gives no startup
+  acknowledgement. If the replacement fails to start after `open` succeeds, this window has
+  already quit and the app must be reopened manually. The `open` wait is bounded at 30 s;
+  a launch accepted by LaunchServices can still start afterward and only activates this
+  window. Fixing both needs a startup handshake and a workspace ownership protocol.
+- Resolved in source: killed downloads left `download-*`/`binary-*` files in the update
+  cache; each bundle now has its own work subfolder, and its next install (under the bundle's
+  lock) removes the leftovers, never another bundle's files
+  (`install_sweeps_its_own_bundles_temp_files_but_not_another_bundles`).
+- Resolved in source: a window that finds a newer release already installed now shows
+  Restart (typed `AlreadyInstalled`) instead of an unrecoverable Failed row; the banner and
+  dialog name the planned release; the eight-hour schedule uses wall-clock time.
+
 ## Release Cache Runtime Isolation (2026-11-05)
 
 - Resolved in source: manual Windows builds could seed the tagged static-runtime

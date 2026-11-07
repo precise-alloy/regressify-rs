@@ -1,6 +1,6 @@
 # Shared Desktop Updates
 
-Verified: 2026-10-22
+Verified: 2026-11-05
 
 - The feed is `https://regressify.eshn.dev/downloads/latest.txt`; binaries are
   versioned GitHub assets. Manifest redirects are refused; bounded GitHub HTTPS
@@ -40,3 +40,26 @@ Verified: 2026-10-22
 
 See the [updater skill](../../.github/skills/desktop-updates/SKILL.md) and
 [desktop docs](../../docs/desktop.md) for contracts and user-visible behavior.
+
+- macOS also has an opt-in in-app install (click only; user-writable `Regressify.app`):
+  [macos_install](../../src/desktop/updates/macos_install.rs) verifies size/SHA-256,
+  validates the ZIP, stages and ad-hoc signs a bundle copy, swaps with one atomic
+  directory exchange (refuses the install where unavailable) and one `.previous` backup,
+  then relaunches through the unsaved-work guards. It shares install.sh's
+  `.Regressify.lock` and reads the installed version from the bundle's `Info.plist`. The
+  recovery mark is written before the first exchange. An unreadable or empty mark counts
+  as pending. A mark that cannot be written is removed and the install is refused with
+  nothing changed; there is no in-process latch, so it does not block retries. A failed
+  rollback keeps the old app and blocks later installs. `codesign` runs under a 120 s
+  deadline (killed on expiry). A failed `Info.plist` stamp aborts before the swap. Window
+  close is refused during an install, but GPUI has no app-level quit hook here, so Dock
+  Quit/logout/shutdown/kill still end it mid-install and leave `.Regressify.lock` (a bare
+  `mkdir` directory shared with `install.sh`, no stale detection) and orphan
+  `download-*`/`binary-*` temp files; the next install of the same bundle sweeps its own
+  per-bundle subfolder of the cache work dir (name = hash of the bundle path, so the
+  `InstallLock` excludes any live peer). A peer-installed newer release publishes Restart
+  (typed `AlreadyInstalled`), the UI names the plan's target release, and the in-window
+  schedule is a unix timestamp (`Instant` stops during sleep on macOS). Logic is unit
+  tested on Linux; the UI and real `codesign`/`open` behavior remain unverified on real
+  hardware.
+  Check: `cargo test --features desktop --lib desktop::updates::macos_install::tests`.

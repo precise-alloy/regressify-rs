@@ -541,6 +541,11 @@ gh() {
         self.assertEqual(build["env"]["PACKAGE_NAME"], "${{ matrix.application == 'desktop' && 'regressify-desktop' || 'regressify-cli' }}")
         self.assertEqual(build["env"]["CARGO_FEATURES"], "${{ matrix.features }}")
         self.assertEqual(build["env"]["NO_DEFAULT_FEATURES"], "1")
+        # The macOS desktop build embeds the notify-only update origin; CLI and Linux never do.
+        self.assertEqual(
+            build["env"]["REGRESSIFY_UPDATE_ORIGIN"],
+            "${{ matrix.application == 'desktop' && startsWith(matrix.os, 'macos') && env.RELEASE_ORIGIN || '' }}",
+        )
         names = [step.get("name") for step in job["steps"]]
         cache = next(step for step in job["steps"] if step.get("uses", "").startswith("Swatinem/rust-cache@"))
         self.assertEqual(cache["with"]["shared-key"], "release-${{ matrix.application }}-${{ matrix.target }}-${{ matrix.installer && 'static' || 'native' }}")
@@ -588,6 +593,10 @@ gh() {
                 if "env" in expected_step:
                     # The release version only reaches the regressify crate, which is never cached.
                     expected_step["env"] = {key: value for key, value in expected_step["env"].items() if key != "REGRESSIFY_DESKTOP_VERSION"}
+                if name == "Build artifacts":
+                    # The macOS-only update origin (empty elsewhere) is set on the release's Build artifacts
+                    # step; the warm-up omits it. Every other step, including the Windows desktop build, must match.
+                    expected_step["env"] = {key: value for key, value in expected_step["env"].items() if key != "REGRESSIFY_UPDATE_ORIGIN"}
                 if name.startswith("Build "):
                     condition = expected_step["if"].removeprefix("${{ ").removesuffix(" }}")
                     expected_step["if"] = "${{ steps.cache.outputs.cache-hit != 'true' && " + condition + " }}"

@@ -13,6 +13,8 @@ use reqwest::{StatusCode, Url, blocking::Client, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod macos_install;
+
 pub const CURRENT_VERSION: &str = match option_env!("REGRESSIFY_DESKTOP_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
@@ -20,6 +22,8 @@ pub const CURRENT_VERSION: &str = match option_env!("REGRESSIFY_DESKTOP_VERSION"
 const DOWNLOADS_PATH: &str = "downloads";
 const RELEASE_DOWNLOAD_PREFIX: &str =
     "https://github.com/precise-alloy/regressify-rs/releases/download/";
+const RELEASE_TAG_PREFIX: &str = "https://github.com/precise-alloy/regressify-rs/releases/tag/";
+const NOTICE_STATE_NAME: &str = "notice.json";
 const DESKTOP_ARCHIVE_NAME: &str = "regressify-desktop-x86_64-pc-windows-msvc.zip";
 const CLI_ARCHIVE_NAME: &str = "regressify-cli-x86_64-pc-windows-msvc.zip";
 const PREPARED_MANIFEST_NAME: &str = "prepared.txt";
@@ -69,13 +73,737 @@ impl fmt::Display for Version {
     }
 }
 
+impl Version {
+    /// Display form for macOS notices: `2.2.2.0` reads as `2.2.2`. Display only; parsing and
+    /// ordering still use all four components.
+    pub fn display_short(&self) -> String {
+        if self.0[3] == 0 {
+            format!("{}.{}.{}", self.0[0], self.0[1], self.0[2])
+        } else {
+            self.to_string()
+        }
+    }
+}
+
 pub fn installer_name(version: Version) -> String {
     format!("Regressify-Setup-{version}-x64.exe")
+}
+
+/// Platform decision for the update feed, injected so each path is testable on any host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpdatePlatform {
+    /// Full download, verification, and installer launch.
+    WindowsX64,
+    /// Release notices; an opt-in in-app install runs only after the user clicks "Update now",
+    /// from a fresh manifest, for a user-replaceable `Regressify.app`.
+    MacOs,
+    Other,
+}
+
+impl UpdatePlatform {
+    pub const fn current() -> Self {
+        if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            Self::WindowsX64
+        } else if cfg!(all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )) {
+            Self::MacOs
+        } else {
+            Self::Other
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct UpdateFeed {
     manifest_url: Url,
+    platform: UpdatePlatform,
+}
+
+/// A newer release announced on a notify-only platform. Carries no installer, hash, or
+/// payload data, so no download path can be built from it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateNotice {
+    pub version: Version,
+    tag: String,
+}
+
+impl UpdateNotice {
+    /// Release page built only from the validated tag.
+    pub fn release_url(&self) -> String {
+        format!("{RELEASE_TAG_PREFIX}{}", self.tag)
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum NoticeCheck {
+    /// The feed publishes no release (HTTP 404).
+    Current,
+    /// The feed's release is not newer than the checking window. It is still saved: an older
+    /// peer window must learn about it without waiting out another eight-hour interval.
+    Older(UpdateNotice),
+    Available(UpdateNotice),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum NoticeOutcome {
+    /// The shared eight-hour interval has not elapsed.
+    NotDue,
+    Current,
+    /// Newer, but the user dismissed this or a later version. The release is kept so the
+    /// dialog can still offer its install controls.
+    Dismissed(UpdateNotice),
+    Available(UpdateNotice),
+}
+
+/// Result of one scheduled notice check, plus whether a feed request was actually sent.
+#[derive(Debug)]
+pub struct NoticeAttempt {
+    /// True once the feed request was dispatched, even if it then failed. Callers advance their
+    /// in-memory throttle only on this, never on cached or not-due polls.
+    pub dispatched: bool,
+    pub outcome: Result<NoticeOutcome>,
+}
+
+/// What "Update now" will download: built from a fresh manifest, never stored.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstallPlan {
+    pub version: Version,
+    url: String,
+    meta: macos_install::ArchiveMeta,
+}
+
+/// Progress of an in-app macOS install, shared between the worker thread and the UI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstallState {
+    Downloading {
+        received: u64,
+        total: u64,
+    },
+    Verifying,
+    Installing,
+    /// The new app is in place; relaunching is the only step left.
+    Restart,
+    Failed(String),
+}
+
+impl InstallState {
+    pub fn message(&self) -> String {
+        match self {
+            Self::Downloading { received, total } => {
+                format!(
+                    "Downloading {}%",
+                    (received * 100).checked_div(*total).unwrap_or(0).min(100)
+                )
+            }
+            Self::Verifying => "Verifying".into(),
+            Self::Installing => "Installing".into(),
+            Self::Restart => "Restart Regressify to finish updating.".into(),
+            Self::Failed(reason) => format!("Failed: {reason}"),
+        }
+    }
+
+    pub fn in_progress(&self) -> bool {
+        matches!(
+            self,
+            Self::Downloading { .. } | Self::Verifying | Self::Installing
+        )
+    }
+}
+
+/// Whether a finished or failed install is superseded by the announced release: only a release
+/// NEWER than its target retires it. A cached poll can still announce an older release than the
+/// one just installed (the plan comes from a fresh manifest; `notice.json` is not updated), and
+/// that must not drop Restart/Failed. A running install is never stale.
+pub fn install_is_stale(state: &InstallState, target: Option<Version>, announced: Version) -> bool {
+    !state.in_progress() && target.is_some_and(|target| announced > target)
+}
+
+/// Banner title for a macOS notice. While an install row exists it names the release that row
+/// installs (`version`, the plan's target), not whatever the cached notice announces.
+pub fn install_title(version: Version, state: Option<&InstallState>) -> String {
+    let version = version.display_short();
+    match state {
+        Some(InstallState::Restart) => format!("Regressify {version} is installed"),
+        _ => format!("Regressify {version} is available"),
+    }
+}
+
+/// Dialog/banner status for an install row, naming the release it really installs.
+pub fn install_status(version: Version, state: &InstallState) -> String {
+    let version = version.display_short();
+    match state {
+        InstallState::Restart => {
+            format!("Regressify {version} is installed. Restart to finish updating.")
+        }
+        other => format!("Regressify {version}: {}", other.message()),
+    }
+}
+
+/// Version to record when the user dismisses a banner: the release it displays (the install
+/// target while an install row exists) or the clicked notice if that is higher, so neither comes
+/// back at the next check.
+pub fn dismiss_version(shown: Version, notice: Version) -> Version {
+    shown.max(notice)
+}
+
+/// The release an install row is scoped to: the higher of the planned target and the version
+/// clicked. The fresh plan can be older than the clicked notice (an older manifest), and a cached
+/// poll announcing the clicked release must not retire a successful install either way.
+pub fn install_scope(target: Option<Version>, clicked: Option<Version>) -> Option<Version> {
+    target.max(clicked)
+}
+
+#[derive(Clone, Debug)]
+pub struct InstallHandle(
+    std::sync::Arc<std::sync::Mutex<InstallState>>,
+    /// The release actually being installed, known once the fresh manifest plan is built.
+    std::sync::Arc<std::sync::Mutex<Option<Version>>>,
+);
+
+impl InstallHandle {
+    pub fn new() -> Self {
+        Self(
+            std::sync::Arc::new(std::sync::Mutex::new(InstallState::Downloading {
+                received: 0,
+                total: 1,
+            })),
+            std::sync::Arc::default(),
+        )
+    }
+
+    /// The release this install is for, once the plan is known. It can be newer than the
+    /// notice the user clicked, because the plan comes from a fresh manifest.
+    pub fn target(&self) -> Option<Version> {
+        *self.1.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub fn get(&self) -> InstallState {
+        self.0
+            .lock()
+            .map_or_else(|error| error.into_inner().clone(), |state| state.clone())
+    }
+
+    /// An install still downloading (nothing published past the first phase), for GUI tests.
+    #[cfg(all(test, feature = "gui-tests"))]
+    pub fn in_progress() -> Self {
+        let handle = Self::new();
+        handle.set(InstallState::Downloading {
+            received: 1,
+            total: 2,
+        });
+        handle
+    }
+
+    /// A finished install waiting for its restart, for GUI tests.
+    #[cfg(all(test, feature = "gui-tests"))]
+    pub fn restarted() -> Self {
+        let handle = Self::new();
+        handle.set(InstallState::Restart);
+        handle
+    }
+
+    /// A finished install of `version` (the planned release), for GUI tests.
+    #[cfg(all(test, feature = "gui-tests"))]
+    pub fn restarted_for(version: Version) -> Self {
+        let handle = Self::restarted();
+        *handle.1.lock().unwrap() = Some(version);
+        handle
+    }
+
+    /// A failed install, for GUI tests.
+    #[cfg(all(test, feature = "gui-tests"))]
+    pub fn failed(reason: &str) -> Self {
+        let handle = Self::new();
+        handle.set(InstallState::Failed(reason.into()));
+        handle
+    }
+
+    fn set(&self, state: InstallState) {
+        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = state;
+    }
+}
+
+impl Default for InstallHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Runs the install and publishes progress. It never publishes the terminal state: the caller
+/// does that once `InstallLock` is dropped, so `Restart`/`Failed` cannot unblock quit or retry
+/// while `.Regressify.lock` still exists.
+pub fn perform_install(
+    bundle: &Path,
+    cache: &Path,
+    plan: &InstallPlan,
+    deps: &macos_install::Deps,
+    handle: &InstallHandle,
+) -> Result<()> {
+    use macos_install::Phase;
+    // Scope the install row to what is really installed, not to the notice that was clicked.
+    *handle.1.lock().unwrap_or_else(|error| error.into_inner()) = Some(plan.version);
+    macos_install::install(
+        bundle,
+        cache,
+        &plan.url,
+        &plan.meta,
+        &plan.version.to_string(),
+        deps,
+        &mut |phase| {
+            handle.set(match phase {
+                Phase::Downloading { received, total } => {
+                    InstallState::Downloading { received, total }
+                }
+                Phase::Verifying => InstallState::Verifying,
+                Phase::Installing => InstallState::Installing,
+            })
+        },
+    )
+}
+
+/// The bundle already holds a release at or above the plan, installed by another window or the
+/// terminal installer since this process started. Nothing was changed and a retry can never
+/// succeed, so it publishes `Restart` (scoped to `version`) rather than a `Failed` row.
+#[derive(Debug)]
+pub struct AlreadyInstalled {
+    pub version: Version,
+}
+
+impl fmt::Display for AlreadyInstalled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Regressify {} or newer is already installed; restart Regressify",
+            self.version.display_short()
+        )
+    }
+}
+
+impl std::error::Error for AlreadyInstalled {}
+
+/// Publishes the final `Restart` or `Failed` state. Call only after `InstallLock` is dropped.
+fn publish_install_result(handle: &InstallHandle, result: &Result<()>) {
+    handle.set(match result {
+        Ok(()) => InstallState::Restart,
+        Err(error) => match error.downcast_ref::<AlreadyInstalled>() {
+            Some(done) => {
+                // No plan was performed, so scope the row to the release the bundle holds.
+                *handle.1.lock().unwrap_or_else(|error| error.into_inner()) = Some(done.version);
+                InstallState::Restart
+            }
+            None => InstallState::Failed(failure_reason(error)),
+        },
+    });
+}
+
+/// UI text for a failed install. Only claims the app is unchanged when that is true: a failed
+/// swap rollback already says where the previous app is kept.
+fn failure_reason(error: &anyhow::Error) -> String {
+    if error
+        .downcast_ref::<macos_install::RecoveryNeeded>()
+        .is_some()
+    {
+        format!("{error:#}")
+    } else {
+        format!("{error:#}. The current app was not changed.")
+    }
+}
+
+/// Everything after the lock is held: clean up a killed install, refuse to go backwards or
+/// repeat, install. The newer-than check uses the version stamped in the installed bundle as
+/// well as the running version, because another window (or the terminal installer) may have
+/// installed since this process started; the stamp swaps in with the app, so it cannot be lost.
+fn install_locked(
+    lock: &macos_install::InstallLock,
+    bundle: &Path,
+    cache: &Path,
+    current: Version,
+    plan: &InstallPlan,
+    deps: &macos_install::Deps,
+    handle: &InstallHandle,
+) -> Result<()> {
+    install_locked_with(
+        lock,
+        bundle,
+        cache,
+        current,
+        plan,
+        deps,
+        handle,
+        &macos_install::bundle_replaceable,
+    )
+}
+
+/// `install_locked` with the replaceability probe injected, so a test can present a foreign-owned
+/// bundle and assert the refusal happens before anything is downloaded.
+#[allow(clippy::too_many_arguments)]
+fn install_locked_with(
+    lock: &macos_install::InstallLock,
+    bundle: &Path,
+    cache: &Path,
+    current: Version,
+    plan: &InstallPlan,
+    deps: &macos_install::Deps,
+    handle: &InstallHandle,
+    replaceable: &dyn Fn(&Path) -> bool,
+) -> Result<()> {
+    // Ownership was only probed when the panel was built; a long-lived window must not install
+    // over an app another account replaced since (e.g. via `install.sh`). Re-probe under the lock.
+    ensure!(
+        replaceable(bundle),
+        "Cannot install here: this copy of Regressify is no longer one you can replace"
+    );
+    macos_install::recover_interrupted(lock, bundle)?;
+    let installed = macos_install::installed_version(bundle)
+        .and_then(|version| version.parse::<Version>().ok())
+        .unwrap_or(current);
+    if plan.version <= current.max(installed) {
+        // Installed past the running version by a peer: restart is the only useful step. When the
+        // running app is itself the floor, restarting would change nothing, so it stays an error.
+        if installed > current {
+            return Err(AlreadyInstalled { version: installed }.into());
+        }
+        bail!(
+            "Regressify {} or newer is already installed; restart Regressify",
+            current.display_short()
+        );
+    }
+    perform_install(bundle, cache, plan, deps, handle)
+}
+
+/// The whole click-to-installed flow with the real downloader and `codesign`. Blocking:
+/// call it off the UI thread. Holds the install lock so two windows cannot race.
+pub fn install_macos_update(
+    feed: &UpdateFeed,
+    bundle: &Path,
+    cache: &Path,
+    current: &str,
+    handle: &InstallHandle,
+) -> Result<()> {
+    install_scoped(bundle, handle, |lock| {
+        let current: Version = current.parse()?;
+        let plan = feed.macos_install_plan(current)?;
+        let deps = macos_install::Deps {
+            open: &open_archive,
+            sign: &|path| run_codesign(&["--force", "--deep", "--sign", "-"], path),
+            verify: &|path| run_codesign(&["--verify", "--deep", "--strict"], path),
+            ops: &macos_install::RealOps,
+        };
+        install_locked(lock, bundle, cache, current, &plan, &deps, handle)
+    })
+}
+
+/// Holds the install lock for `body` only, then publishes the terminal state: the lock is gone
+/// before the UI can see `Restart`/`Failed`.
+fn install_scoped(
+    bundle: &Path,
+    handle: &InstallHandle,
+    body: impl FnOnce(&macos_install::InstallLock) -> Result<()>,
+) -> Result<()> {
+    let result = macos_install::InstallLock::acquire(bundle).and_then(|lock| body(&lock));
+    publish_install_result(handle, &result);
+    result
+}
+
+/// HTTPS-only archive download. Redirects follow the same GitHub-only allowlist as the
+/// Windows installer; size and hash are enforced by the caller on the received bytes.
+fn open_archive(url: &str) -> Result<Box<dyn Read>> {
+    let response = Client::builder()
+        .https_only(true)
+        .redirect(installer_redirect_policy())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(DOWNLOAD_TIMEOUT)
+        .user_agent(concat!("Regressify-Desktop/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("Cannot create the update client")?
+        .get(url)
+        .send()
+        .context("Cannot reach the update download")?;
+    ensure!(
+        response.status().is_success(),
+        "Update download returned HTTP {}",
+        response.status()
+    );
+    Ok(Box::new(response))
+}
+
+/// A hung `codesign` would hold the install (and `.Regressify.lock`) and block quit forever.
+const CODESIGN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Absolute `codesign` path and an argument vector: no shell, no PATH lookup.
+fn run_codesign(args: &[&str], path: &Path) -> Result<()> {
+    let mut command = std::process::Command::new("/usr/bin/codesign");
+    command.args(args).arg(path);
+    run_bounded(command, CODESIGN_TIMEOUT, "codesign")
+}
+
+/// LaunchServices can stall `open`; past this the window gives up and reclaims its workspace.
+pub const RELAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Runs `<open_program> -n <app> [--args <workspace>]` (absolute path, argument vector, no
+/// shell) and reports whether it succeeded within `timeout`. A stalled `open` is killed and
+/// reaped and counts as a failure, so the caller's reclaim path runs. Residual risk: a launch
+/// that LaunchServices had already accepted may still start the replacement after the timeout.
+pub fn open_new_instance_bounded(
+    open_program: &Path,
+    app: &Path,
+    workspace: Option<&Path>,
+    timeout: Duration,
+) -> bool {
+    let mut command = std::process::Command::new(open_program);
+    command.arg("-n").arg(app);
+    if let Some(workspace) = workspace {
+        command.arg("--args").arg(workspace);
+    }
+    match run_bounded(command, timeout, "open") {
+        Ok(()) => true,
+        Err(error) => {
+            crate::diagnostics::startup::warning(
+                crate::diagnostics::record::SafeValue::Desktop,
+                &error,
+            );
+            false
+        }
+    }
+}
+
+/// How long to wait for the stderr pipe to close after the child exited or was killed. A
+/// descendant that inherited the pipe can keep it open indefinitely.
+const STDERR_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// Runs `command` and fails unless it succeeds within `timeout`; on expiry the child (and, on
+/// unix, its process group) is killed and reaped. Only the first 300 characters of stderr are
+/// surfaced, and waiting for them is bounded: a descendant holding the pipe cannot hang this.
+pub(crate) fn run_bounded(
+    mut command: std::process::Command,
+    timeout: Duration,
+    name: &str,
+) -> Result<()> {
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex, mpsc};
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Own process group, so a timeout can take descendants (e.g. `codesign_allocate`) too.
+        command.process_group(0);
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Cannot run {name}"))?;
+    // Drain stderr on its own thread so a chatty child cannot block on a full pipe. It appends
+    // to shared storage as it reads, so a timed-out drain still reports what arrived.
+    let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let (done, finished) = mpsc::channel::<()>();
+    if let Some(mut stderr) = child.stderr.take() {
+        let captured = Arc::clone(&captured);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(read) = stderr.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                let mut bytes = captured.lock().unwrap_or_else(|error| error.into_inner());
+                if bytes.len() < 64 * 1024 {
+                    bytes.extend_from_slice(&chunk[..read]);
+                }
+            }
+            let _ = done.send(());
+        });
+    } else {
+        drop(done);
+    }
+    // After the child is gone, give the drain a moment, then detach it (it ends when the
+    // pipe finally closes) and use what was captured so far.
+    let collect = || {
+        let _ = finished.recv_timeout(STDERR_DRAIN_GRACE);
+        let bytes = captured.lock().unwrap_or_else(|error| error.into_inner());
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child
+            .try_wait()
+            .with_context(|| format!("Cannot wait for {name}"))?
+        {
+            Some(status) => break status,
+            None if std::time::Instant::now() >= deadline => {
+                kill_group(&child);
+                let _ = child.kill();
+                let _ = child.wait();
+                let partial = collect();
+                bail!(
+                    "{name} did not finish within {} seconds{}",
+                    timeout.as_secs(),
+                    if partial.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", partial.chars().take(300).collect::<String>())
+                    }
+                );
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    };
+    let stderr = collect();
+    ensure!(
+        status.success(),
+        "{name} failed: {}",
+        stderr.chars().take(300).collect::<String>()
+    );
+    Ok(())
+}
+
+/// Best effort: SIGKILL the child's process group via `/bin/kill` (no new dependency). The
+/// child was started as its own group leader, so the group id is its pid.
+#[cfg(unix)]
+fn kill_group(child: &std::process::Child) {
+    let _ = std::process::Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_group(_: &std::process::Child) {}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct NoticeState {
+    #[serde(default)]
+    last_check_at: Option<u64>,
+    #[serde(default)]
+    dismissed_version: Option<String>,
+    /// Last release announced by any instance, so a window whose check is not due still
+    /// learns about it. Revalidated through `parse_notice_manifest` on every read.
+    #[serde(default)]
+    available_version: Option<String>,
+    #[serde(default)]
+    available_tag: Option<String>,
+    /// Request ordering: each network check takes the next `started_seq` before it sends, and
+    /// only a response newer than `applied_seq` may overwrite the saved release, so a slower,
+    /// earlier request cannot replace a newer one. Dismissals are always merged.
+    #[serde(default)]
+    started_seq: u64,
+    #[serde(default)]
+    applied_seq: u64,
+}
+
+/// Whether a dismissal of `dismissed` hides `version`: that version and every older one.
+pub fn dismissal_hides(dismissed: Option<Version>, version: Version) -> bool {
+    dismissed.is_some_and(|dismissed| version <= dismissed)
+}
+
+/// Prefix of the dialog message left by a failed update check.
+pub const CHECK_FAILED_PREFIX: &str = "Update check failed: ";
+
+/// Dialog message after a successful notice result. `fresh` is the status to show
+/// (empty for none). Only a cached poll (`dispatched == false`) keeps an
+/// earlier check failure, since it was not a check; any other old message (up to date,
+/// dismissed) would be stale next to the new result and is replaced.
+pub fn notice_message_after_success(dispatched: bool, previous: &str, fresh: &str) -> String {
+    if !dispatched && previous.starts_with(CHECK_FAILED_PREFIX) {
+        previous.to_owned()
+    } else {
+        fresh.to_owned()
+    }
+}
+
+/// Serializes read-modify-write cycles on `notice.json` across instances. Atomic file
+/// replacement alone still loses an update when two writers start from the same snapshot.
+/// Held only for the short load/merge/save, never across the network request. `None` when
+/// the lock file cannot be opened; the state cannot be saved then either.
+fn lock_notice_state(cache: &Path) -> Option<fs::File> {
+    fs::create_dir_all(cache).ok()?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(cache.join("notice.lock"))
+        .ok()?;
+    lock.lock().ok()?;
+    Some(lock)
+}
+
+impl NoticeState {
+    fn load(cache: &Path) -> Result<Self> {
+        match fs::File::open(cache.join(NOTICE_STATE_NAME)) {
+            Ok(file) => serde_json::from_reader(file.take(MAX_MANIFEST_SIZE))
+                .context("Cannot read saved update notice state"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error).context("Cannot open saved update notice state"),
+        }
+    }
+
+    fn save(&self, cache: &Path) -> Result<()> {
+        fs::create_dir_all(cache)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(cache)?;
+        serde_json::to_writer(&mut temporary, self)?;
+        temporary
+            .persist(cache.join(NOTICE_STATE_NAME))
+            .map_err(|error| error.error)
+            .context("Cannot save update notice state")?;
+        Ok(())
+    }
+
+    fn dismisses(&self, version: Version) -> bool {
+        dismissal_hides(
+            self.dismissed_version
+                .as_deref()
+                .and_then(|saved| saved.parse::<Version>().ok()),
+            version,
+        )
+    }
+
+    fn store_available(&mut self, notice: Option<&UpdateNotice>) {
+        self.available_version = notice.map(|notice| notice.version.to_string());
+        self.available_tag = notice.map(|notice| notice.tag.clone());
+    }
+
+    /// Outcome implied by what a peer already saved, without any request.
+    fn reconcile(&self, feed: &UpdateFeed, current: Version) -> NoticeOutcome {
+        let stored = self
+            .available_version
+            .as_deref()
+            .zip(self.available_tag.as_deref())
+            .and_then(|(version, tag)| {
+                feed.parse_notice_manifest(&format!("version={version}\ntag={tag}\n"))
+                    .ok()
+            });
+        match stored {
+            // A peer's successful check already found no release: that is `Current`, so this
+            // window clears an obsolete banner. Without any applied success it is just unknown.
+            None if self.applied_seq > 0 => NoticeOutcome::Current,
+            None => NoticeOutcome::NotDue,
+            Some(notice) if notice.version <= current => NoticeOutcome::Current,
+            Some(notice) if self.dismisses(notice.version) => NoticeOutcome::Dismissed(notice),
+            Some(notice) => NoticeOutcome::Available(notice),
+        }
+    }
+}
+
+/// Version encoded in a release tag such as `v2.2.2`; rejects paths and odd component shapes.
+fn tag_version(tag: &str) -> Option<Version> {
+    tag.strip_prefix('v')
+        .filter(|raw| {
+            !raw.contains('/')
+                && matches!(raw.split('.').count(), 3 | 4)
+                && raw.split('.').all(|part| (1..=4).contains(&part.len()))
+        })
+        .and_then(|raw| raw.parse::<Version>().ok())
+}
+
+/// Only the fields a notify-only platform needs; installer metadata is deliberately ignored.
+#[derive(Deserialize)]
+struct NoticeFields {
+    version: String,
+    tag: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -382,11 +1110,31 @@ impl fmt::Display for RetryScheduled {
 
 impl std::error::Error for RetryScheduled {}
 
-fn unix_timestamp() -> u64 {
+pub(crate) fn unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Whether a window may send a notice request now. `attempted_at` is the window's own last
+/// attempt as a unix timestamp, not an `Instant`: on macOS `Instant` stops while the Mac sleeps,
+/// so an eight-hour schedule would be measured in awake time. A clock rollback counts as due,
+/// like the saved `last_check_at` rule in `check_notice_with`.
+pub fn notice_network_allowed(startup: bool, attempted_at: Option<u64>, now: u64) -> bool {
+    startup
+        || attempted_at
+            .is_none_or(|at| now < at || now.saturating_sub(at) >= CHECK_INTERVAL.as_secs())
+}
+
+/// Running-version line of the Software updates dialog: macOS drops a trailing `.0` like the
+/// notices do (`2.2.2.0` reads `2.2.2`); Windows and unparsable values keep the raw text.
+pub fn running_version_label(mac: bool, current: &str) -> String {
+    if mac && let Ok(version) = current.parse::<Version>() {
+        version.display_short()
+    } else {
+        current.to_owned()
+    }
 }
 
 impl UpdateFeed {
@@ -399,6 +1147,10 @@ impl UpdateFeed {
 
     /// Feed served by the website at `<origin>/downloads/latest.txt`, for an `https://host` origin.
     pub fn new(origin: &str) -> Result<Self> {
+        Self::for_platform(origin, UpdatePlatform::WindowsX64)
+    }
+
+    fn for_platform(origin: &str, platform: UpdatePlatform) -> Result<Self> {
         let host = origin.strip_prefix("https://").unwrap_or_default();
         ensure!(
             !host.is_empty()
@@ -417,14 +1169,290 @@ impl UpdateFeed {
             manifest_url.host_str() == Some(host),
             "Update origin must be an https://host origin without a path"
         );
-        Ok(Self { manifest_url })
+        Ok(Self {
+            manifest_url,
+            platform,
+        })
+    }
+
+    /// Feed for `platform` and a build-time origin; `None` on unsupported platforms.
+    pub fn for_origin(origin: Option<&str>, platform: UpdatePlatform) -> Option<Self> {
+        match platform {
+            UpdatePlatform::WindowsX64 | UpdatePlatform::MacOs => {
+                Self::for_platform(origin?, platform).ok()
+            }
+            UpdatePlatform::Other => None,
+        }
     }
 
     pub fn configured() -> Option<Self> {
-        if !cfg!(all(target_os = "windows", target_arch = "x86_64")) {
-            return None;
+        Self::for_origin(
+            option_env!("REGRESSIFY_UPDATE_ORIGIN"),
+            UpdatePlatform::current(),
+        )
+    }
+
+    pub fn platform(&self) -> UpdatePlatform {
+        self.platform
+    }
+
+    /// Command shown to macOS users; the host comes from the feed origin.
+    pub fn install_command(&self) -> String {
+        format!(
+            "curl -fsSL https://{}/install.sh | sh",
+            self.manifest_url.host_str().unwrap_or_default()
+        )
+    }
+
+    /// Notify-only manifest parsing: validates `version` and `tag` and ignores every
+    /// installer field, so a Windows-shaped manifest never fails a macOS check.
+    pub fn parse_notice_manifest(&self, text: &str) -> Result<UpdateNotice> {
+        ensure!(
+            text.len() as u64 <= MAX_MANIFEST_SIZE,
+            "Update manifest is too large"
+        );
+        let text = text.trim_start_matches('\u{feff}').trim();
+        let fields: NoticeFields = if text.starts_with('{') {
+            serde_json::from_str(text).context("Invalid JSON update manifest")?
+        } else {
+            let mut fields = BTreeMap::new();
+            for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+                let (key, value) = line
+                    .split_once('=')
+                    .context("Invalid update manifest line")?;
+                ensure!(
+                    fields.insert(key.trim(), value.trim()).is_none(),
+                    "Duplicate update manifest field: {key}"
+                );
+            }
+            serde_json::from_value(serde_json::to_value(fields)?)
+                .context("Missing required update manifest fields")?
+        };
+        let version: Version = fields.version.parse()?;
+        ensure!(
+            tag_version(&fields.tag) == Some(version),
+            "Mismatched release tag"
+        );
+        Ok(UpdateNotice {
+            version,
+            tag: fields.tag,
+        })
+    }
+
+    pub fn check_notice(&self, current: Version) -> Result<NoticeCheck> {
+        ensure!(
+            self.platform == UpdatePlatform::MacOs,
+            "Update notices are only used on notify-only platforms"
+        );
+        let response = client(Duration::from_secs(30))?
+            .get(self.manifest_url.clone())
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
+            .send()
+            .context("Cannot reach the update service")?;
+        self.notice_response(response.status(), response, current)
+    }
+
+    fn notice_response(
+        &self,
+        status: StatusCode,
+        response: impl Read,
+        current: Version,
+    ) -> Result<NoticeCheck> {
+        if status == StatusCode::NOT_FOUND {
+            return Ok(NoticeCheck::Current);
         }
-        option_env!("REGRESSIFY_UPDATE_ORIGIN").and_then(|origin| Self::new(origin).ok())
+        ensure!(status.is_success(), "Update service returned HTTP {status}");
+        let mut text = String::new();
+        response
+            .take(MAX_MANIFEST_SIZE + 1)
+            .read_to_string(&mut text)?;
+        let notice = self.parse_notice_manifest(&text)?;
+        Ok(if notice.version > current {
+            NoticeCheck::Available(notice)
+        } else {
+            NoticeCheck::Older(notice)
+        })
+    }
+
+    /// Scheduled notice check. Startup bypasses only the eight-hour deadline. The timestamp is
+    /// refreshed after every attempt, failures included, so a broken feed is retried at the
+    /// normal interval rather than on every poll. When the check is not due (or
+    /// `network_allowed` is false, the caller's in-memory throttle for an unwritable cache)
+    /// the saved notice from a peer is reconciled instead. No coordinator lock: nothing is
+    /// downloaded, so a duplicate request from a peer instance is harmless.
+    pub fn check_notice_shared(
+        &self,
+        current: Version,
+        cache: &Path,
+        startup: bool,
+        network_allowed: bool,
+    ) -> NoticeAttempt {
+        self.check_notice_attempt(
+            cache,
+            current,
+            startup,
+            network_allowed,
+            unix_timestamp(),
+            || self.check_notice(current),
+        )
+    }
+
+    fn check_notice_attempt(
+        &self,
+        cache: &Path,
+        current: Version,
+        startup: bool,
+        network_allowed: bool,
+        now: u64,
+        check: impl FnOnce() -> Result<NoticeCheck>,
+    ) -> NoticeAttempt {
+        let dispatched = std::cell::Cell::new(false);
+        let outcome = self.check_notice_with(cache, current, startup, network_allowed, now, || {
+            dispatched.set(true);
+            check()
+        });
+        NoticeAttempt {
+            dispatched: dispatched.get(),
+            outcome,
+        }
+    }
+
+    fn check_notice_with(
+        &self,
+        cache: &Path,
+        current: Version,
+        startup: bool,
+        network_allowed: bool,
+        now: u64,
+        check: impl FnOnce() -> Result<NoticeCheck>,
+    ) -> Result<NoticeOutcome> {
+        let snapshot = {
+            let _lock = lock_notice_state(cache);
+            NoticeState::load(cache).unwrap_or_default()
+        };
+        let due = network_allowed
+            && (startup
+                || snapshot.last_check_at.is_none_or(|checked| {
+                    now < checked || now.saturating_sub(checked) >= CHECK_INTERVAL.as_secs()
+                }));
+        if !due {
+            return Ok(snapshot.reconcile(self, current));
+        }
+        // Take a ticket before sending; a later request gets a higher one.
+        let ticket = {
+            let _lock = lock_notice_state(cache);
+            let mut state = NoticeState::load(cache).unwrap_or_default();
+            // Never at or below an applied ticket, even if an earlier ticket save was lost.
+            state.started_seq = state.started_seq.max(state.applied_seq) + 1;
+            // An unsaved ticket can be handed out again to a peer, so its response must never
+            // advance `applied_seq`: it could otherwise discard the peer's newer response.
+            let saved = state.save(cache).is_ok();
+            (state.started_seq, saved)
+        };
+        let (ticket, ticket_saved) = ticket;
+        let result = check();
+        // Reload under the lock: a dismissal or a peer's check may have landed while the
+        // request was pending, and saving the earlier snapshot would overwrite it.
+        let _lock = lock_notice_state(cache);
+        let mut state = NoticeState::load(cache).unwrap_or_default();
+        if ticket <= state.applied_seq {
+            // Superseded by a newer request whose release already landed: keep its release and
+            // timestamp (the dismissal in `state` is already current) and report that.
+            return match result {
+                Ok(_) => Ok(match state.reconcile(self, current) {
+                    NoticeOutcome::NotDue => NoticeOutcome::Current,
+                    outcome => outcome,
+                }),
+                Err(error) => Err(error),
+            };
+        }
+        // Keep `applied_seq` from ever passing `started_seq`, even if a peer reset the file.
+        state.started_seq = state.started_seq.max(ticket);
+        state.last_check_at = Some(now);
+        match &result {
+            Ok(NoticeCheck::Current) => {
+                if ticket_saved {
+                    state.applied_seq = ticket;
+                }
+                state.store_available(None);
+            }
+            Ok(NoticeCheck::Available(notice) | NoticeCheck::Older(notice)) => {
+                if ticket_saved {
+                    state.applied_seq = ticket;
+                }
+                state.store_available(Some(notice));
+            }
+            // A failure only throttles (`last_check_at`). It carries no release, so it must not
+            // supersede an older request that is still in flight and may yet succeed.
+            Err(_) => {}
+        }
+        // The timestamp is only a throttle: a failed save must not hide the check outcome.
+        if let Err(error) = state.save(cache) {
+            crate::diagnostics::startup::warning(
+                crate::diagnostics::record::SafeValue::Desktop,
+                &error,
+            );
+        }
+        Ok(match result? {
+            NoticeCheck::Current | NoticeCheck::Older(_) => NoticeOutcome::Current,
+            NoticeCheck::Available(notice) if state.dismisses(notice.version) => {
+                NoticeOutcome::Dismissed(notice)
+            }
+            NoticeCheck::Available(notice) => NoticeOutcome::Available(notice),
+        })
+    }
+
+    /// Archive download plan for this Mac from a fresh manifest, fetched only after the user
+    /// clicks "Update now". Same host rules as the notice check; no other host is contacted.
+    pub fn macos_install_plan(&self, current: Version) -> Result<InstallPlan> {
+        ensure!(
+            self.platform == UpdatePlatform::MacOs,
+            "Update install is only available on macOS"
+        );
+        let response = client(Duration::from_secs(30))?
+            .get(self.manifest_url.clone())
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
+            .send()
+            .context("Cannot reach the update service")?;
+        ensure!(
+            response.status().is_success(),
+            "Update service returned HTTP {}",
+            response.status()
+        );
+        let mut text = String::new();
+        response
+            .take(MAX_MANIFEST_SIZE + 1)
+            .read_to_string(&mut text)?;
+        self.parse_install_plan(&text, current, macos_install::current_archive_name())
+    }
+
+    /// Pure half of `macos_install_plan`: the manifest must announce a newer release and list
+    /// the archive for this architecture. The URL is built only from the validated tag.
+    fn parse_install_plan(
+        &self,
+        text: &str,
+        current: Version,
+        archive: Option<&str>,
+    ) -> Result<InstallPlan> {
+        let notice = self.parse_notice_manifest(text)?;
+        ensure!(notice.version > current, "No newer release is available");
+        let archive = archive.context("This Mac's architecture has no desktop build")?;
+        let meta = macos_install::parse_archive_meta(text, archive)?;
+        Ok(InstallPlan {
+            version: notice.version,
+            url: format!("{RELEASE_DOWNLOAD_PREFIX}{}/{archive}", notice.tag),
+            meta,
+        })
+    }
+
+    /// Hides this and every older notice; a newer release shows again.
+    pub fn dismiss_notice(version: Version, cache: &Path) -> Result<()> {
+        let _lock = lock_notice_state(cache);
+        let mut state = NoticeState::load(cache).unwrap_or_default();
+        if !state.dismisses(version) {
+            state.dismissed_version = Some(version.to_string());
+        }
+        state.save(cache)
     }
     pub fn parse_manifest(&self, text: &str) -> Result<Release> {
         ensure!(
@@ -455,13 +1483,7 @@ impl UpdateFeed {
             .installer
             .strip_prefix(RELEASE_DOWNLOAD_PREFIX)
             .and_then(|rest| rest.strip_suffix(&suffix))
-            .and_then(|tag| tag.strip_prefix('v'))
-            .filter(|raw| {
-                !raw.contains('/')
-                    && matches!(raw.split('.').count(), 3 | 4)
-                    && raw.split('.').all(|part| (1..=4).contains(&part.len()))
-            })
-            .and_then(|raw| raw.parse::<Version>().ok())
+            .and_then(tag_version)
             .is_some_and(|tag_version| tag_version == version);
         ensure!(
             valid_tag && installer.as_str() == fields.installer,
@@ -1639,10 +2661,13 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckMode, DownloadControl, DownloadPhase, ManifestFields, PreparedUpdate, SkippedUpdate,
-        UpdateCheck, UpdateFeed, UpdateState, Version, cached_installer, installer_name,
-        installer_redirect_policy, is_allowed_installer_redirect, lock_cache, verify_payload,
+        CHECK_FAILED_PREFIX, CheckMode, DownloadControl, DownloadPhase, ManifestFields,
+        NoticeCheck, NoticeOutcome, NoticeState, PreparedUpdate, SkippedUpdate, UpdateCheck,
+        UpdateFeed, UpdateNotice, UpdatePlatform, UpdateState, Version, cached_installer,
+        dismissal_hides, installer_name, installer_redirect_policy, is_allowed_installer_redirect,
+        lock_cache, notice_message_after_success, verify_payload,
     };
+    use super::{InstallPlan, macos_install};
     use reqwest::StatusCode;
     use sha2::{Digest, Sha256};
     use std::{fs, time::Duration};
@@ -2221,6 +3246,1380 @@ mod tests {
         ] {
             assert!(invalid.parse::<Version>().is_err(), "{invalid}");
         }
+    }
+
+    const LIVE_MANIFEST: &str = "version=2.2.2.0\ntag=v2.2.2\ninstaller=https://github.com/precise-alloy/regressify-rs/releases/download/v2.2.2/Regressify-Setup-2.2.2.0-x64.exe\nsha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsize=1234\narchive.regressify-desktop-aarch64-apple-darwin.zip=10:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\narchive.regressify-desktop-x86_64-apple-darwin.zip=11:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n";
+
+    fn macos_feed() -> UpdateFeed {
+        UpdateFeed::for_origin(Some("https://regressify.eshn.dev"), UpdatePlatform::MacOs).unwrap()
+    }
+
+    fn current() -> Version {
+        "2.0.0".parse().unwrap()
+    }
+
+    fn notice(version: &str) -> UpdateNotice {
+        let tag = version.rsplit_once('.').map_or(version, |(short, _)| short);
+        macos_feed()
+            .parse_notice_manifest(&format!("version={version}\ntag=v{tag}\n"))
+            .unwrap()
+    }
+
+    #[test]
+    fn display_version_drops_a_zero_fourth_component_only() {
+        let show = |text: &str| text.parse::<Version>().unwrap().display_short();
+        assert_eq!(show("2.2.2.0"), "2.2.2");
+        assert_eq!(show("2.2.2"), "2.2.2");
+        assert_eq!(show("2.2.2.1"), "2.2.2.1");
+        assert_eq!(show("2.0.0.0"), "2.0.0");
+        // Comparison is unchanged.
+        assert!("2.2.2.0".parse::<Version>().unwrap() < "2.2.2.1".parse().unwrap());
+    }
+
+    #[test]
+    fn install_plan_comes_from_the_validated_tag_and_this_archive() {
+        let feed = macos_feed();
+        let arm = Some("regressify-desktop-aarch64-apple-darwin.zip");
+        let plan = feed
+            .parse_install_plan(LIVE_MANIFEST, current(), arm)
+            .unwrap();
+        assert_eq!(plan.version, "2.2.2".parse::<Version>().unwrap());
+        assert_eq!(
+            plan.url,
+            "https://github.com/precise-alloy/regressify-rs/releases/download/v2.2.2/regressify-desktop-aarch64-apple-darwin.zip"
+        );
+        assert_eq!(plan.meta.size, 10);
+        let intel = Some("regressify-desktop-x86_64-apple-darwin.zip");
+        assert_eq!(
+            feed.parse_install_plan(LIVE_MANIFEST, current(), intel)
+                .unwrap()
+                .meta
+                .size,
+            11
+        );
+        // Not newer, unknown architecture, missing archive, and a bad tag all refuse.
+        let same = "2.2.2.0".parse().unwrap();
+        assert!(feed.parse_install_plan(LIVE_MANIFEST, same, arm).is_err());
+        assert!(
+            feed.parse_install_plan(LIVE_MANIFEST, current(), None)
+                .is_err()
+        );
+        let without = LIVE_MANIFEST.replace("archive.regressify-desktop-aarch64", "archive.x");
+        assert!(feed.parse_install_plan(&without, current(), arm).is_err());
+        let traversal = LIVE_MANIFEST.replace("tag=v2.2.2", "tag=v2.2.2/../x");
+        assert!(feed.parse_install_plan(&traversal, current(), arm).is_err());
+        assert!(
+            UpdateFeed::new("https://regressify.eshn.dev")
+                .unwrap()
+                .macos_install_plan(current())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn install_state_messages_and_final_states() {
+        use super::{InstallHandle, InstallState, perform_install, publish_install_result};
+        let say = |state: InstallState| state.message();
+        assert_eq!(
+            say(InstallState::Downloading {
+                received: 5,
+                total: 10
+            }),
+            "Downloading 50%"
+        );
+        assert_eq!(
+            say(InstallState::Downloading {
+                received: 0,
+                total: 0
+            }),
+            "Downloading 0%"
+        );
+        assert_eq!(say(InstallState::Verifying), "Verifying");
+        assert_eq!(say(InstallState::Installing), "Installing");
+        assert!(say(InstallState::Restart).contains("Restart"));
+        assert!(say(InstallState::Failed("bad".into())).starts_with("Failed: bad"));
+        assert!(InstallState::Verifying.in_progress() && !InstallState::Restart.in_progress());
+
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Regressify.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/regressify-desktop"), b"old").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let plan = macos_feed()
+            .parse_install_plan(
+                LIVE_MANIFEST,
+                current(),
+                Some("regressify-desktop-aarch64-apple-darwin.zip"),
+            )
+            .unwrap();
+        let offline =
+            |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> { anyhow::bail!("offline") };
+        let ok = |_: &std::path::Path| Ok(());
+        let deps = super::macos_install::Deps {
+            open: &offline,
+            sign: &ok,
+            verify: &ok,
+            ops: &super::macos_install::RealOps,
+        };
+        let handle = InstallHandle::new();
+        let result = perform_install(&app, cache.path(), &plan, &deps, &handle);
+        assert!(result.is_err());
+        publish_install_result(&handle, &result);
+        assert!(matches!(handle.get(), InstallState::Failed(reason) if reason.contains("offline")));
+        assert_eq!(
+            std::fs::read(app.join("Contents/MacOS/regressify-desktop")).unwrap(),
+            b"old"
+        );
+    }
+
+    fn fake_installed_app(parent: &std::path::Path) -> std::path::PathBuf {
+        let app = parent.join("Regressify.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/regressify-desktop"), b"old").unwrap();
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            "<plist><dict><key>CFBundleVersion</key><string>1.0.0.0</string>\
+             <key>CFBundleShortVersionString</key><string>1.0.0.0</string></dict></plist>",
+        )
+        .unwrap();
+        app
+    }
+
+    fn plan_serving(version: &str, binary: &[u8]) -> (InstallPlan, Vec<u8>) {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "regressify-desktop",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer.write_all(binary).unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let digest = sha2::Sha256::digest(&bytes);
+        let plan = InstallPlan {
+            version: version.parse().unwrap(),
+            url: "https://example.test/a.zip".into(),
+            meta: macos_install::ArchiveMeta {
+                size: bytes.len() as u64,
+                sha256: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+            },
+        };
+        (plan, bytes)
+    }
+
+    #[test]
+    fn a_stale_process_never_downgrades_or_reinstalls_what_a_peer_installed() {
+        use super::{InstallHandle, install_locked};
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        let (plan_c, bytes_c) = plan_serving("2.5.0", b"c");
+        let (plan_b, bytes_b) = plan_serving("2.3.0", b"b");
+        let serve = |bytes: Vec<u8>| {
+            move |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+                Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+            }
+        };
+        let ok = |_: &std::path::Path| Ok(());
+        let run = |plan: &InstallPlan, bytes: Vec<u8>| {
+            let open = serve(bytes);
+            let deps = macos_install::Deps {
+                open: &open,
+                sign: &ok,
+                verify: &ok,
+                ops: &macos_install::RealOps,
+            };
+            let lock = macos_install::InstallLock::acquire(&app).unwrap();
+            // Both "processes" still run 2.0.0.
+            install_locked(
+                &lock,
+                &app,
+                cache.path(),
+                current(),
+                plan,
+                &deps,
+                &InstallHandle::new(),
+            )
+        };
+        let binary = || std::fs::read(app.join("Contents/MacOS/regressify-desktop")).unwrap();
+
+        run(&plan_c, bytes_c.clone()).unwrap();
+        assert_eq!(binary(), b"c");
+        assert_eq!(
+            macos_install::installed_version(&app).as_deref(),
+            Some("2.5.0.0")
+        );
+        // The stale process sees 2.0.0 < 2.3.0 < 2.5.0 in a fresh feed: refused.
+        let error = run(&plan_b, bytes_b).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("already installed"),
+            "{error:#}"
+        );
+        assert_eq!(binary(), b"c");
+        // Same version again: no reinstall, so the backup is not overwritten with a copy of C.
+        let error = run(&plan_c, bytes_c).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("already installed"),
+            "{error:#}"
+        );
+        assert_eq!(
+            std::fs::read(
+                dir.path()
+                    .join("Regressify.app.previous/Contents/MacOS/regressify-desktop")
+            )
+            .unwrap(),
+            b"old"
+        );
+        // A bundle older than the running version leaves the running version as the floor.
+        let fresh = tempfile::tempdir().unwrap();
+        let fresh_app = fake_installed_app(fresh.path());
+        let lock = macos_install::InstallLock::acquire(&fresh_app).unwrap();
+        let (same, bytes) = plan_serving("2.0.0", b"x");
+        let open = serve(bytes);
+        let deps = macos_install::Deps {
+            open: &open,
+            sign: &ok,
+            verify: &ok,
+            ops: &macos_install::RealOps,
+        };
+        assert!(
+            install_locked(
+                &lock,
+                &fresh_app,
+                cache.path(),
+                current(),
+                &same,
+                &deps,
+                &InstallHandle::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_child_is_killed_at_the_deadline_and_failures_report_stderr() {
+        use super::run_bounded;
+        use std::time::{Duration, Instant};
+        let mut hang = std::process::Command::new("sleep");
+        hang.arg("30");
+        let started = Instant::now();
+        let error = run_bounded(hang, Duration::from_millis(200), "tool").unwrap_err();
+        assert!(format!("{error:#}").contains("did not finish"), "{error:#}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let mut fail = std::process::Command::new("sh");
+        fail.args(["-c", "echo boom >&2; exit 3"]);
+        let error = run_bounded(fail, Duration::from_secs(10), "tool").unwrap_err();
+        assert!(format!("{error:#}").contains("boom"), "{error:#}");
+        let ok = std::process::Command::new("true");
+        run_bounded(ok, Duration::from_secs(10), "tool").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_open_times_out_and_reports_failure_and_a_good_one_succeeds() {
+        use super::open_new_instance_bounded;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let app = dir.path().join("Regressify.app");
+        let workspace = dir.path().join("ws");
+        let record = dir.path().join("args");
+        let good = script(
+            "good",
+            &format!("printf '%s ' \"$@\" > {}", record.display()),
+        );
+        assert!(open_new_instance_bounded(
+            &good,
+            &app,
+            Some(&workspace),
+            Duration::from_secs(10)
+        ));
+        let args = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(
+            args.trim(),
+            format!("-n {} --args {}", app.display(), workspace.display())
+        );
+        let stalled = script("stalled", "sleep 30");
+        let started = Instant::now();
+        assert!(!open_new_instance_bounded(
+            &stalled,
+            &app,
+            None,
+            Duration::from_millis(300)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(8));
+        let failing = script("failing", "exit 1");
+        assert!(!open_new_instance_bounded(
+            &failing,
+            &app,
+            None,
+            Duration::from_secs(10)
+        ));
+        assert!(!open_new_instance_bounded(
+            &dir.path().join("missing"),
+            &app,
+            None,
+            Duration::from_secs(10)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_descendant_holding_stderr_cannot_hang_the_bounded_run() {
+        use super::run_bounded;
+        use std::time::{Duration, Instant};
+        // Normal exit while a long-lived descendant still holds the inherited stderr pipe.
+        let mut lingering = std::process::Command::new("sh");
+        lingering.args(["-c", "sleep 30 & echo partial >&2; exit 1"]);
+        let started = Instant::now();
+        let error = run_bounded(lingering, Duration::from_secs(10), "tool").unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(format!("{error:#}").contains("partial"), "{error:#}");
+        // Same descendant on a success exit: no hang either.
+        let mut ok = std::process::Command::new("sh");
+        ok.args(["-c", "sleep 30 & echo partial >&2; exit 0"]);
+        let started = Instant::now();
+        run_bounded(ok, Duration::from_secs(10), "tool").unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        // Hung child with a descendant: killed at the deadline, returns, reports partial text.
+        let mut hung = std::process::Command::new("sh");
+        hung.args(["-c", "sleep 30 & echo partial >&2; sleep 30"]);
+        let started = Instant::now();
+        let error = run_bounded(hung, Duration::from_millis(300), "tool").unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("did not finish") && text.contains("partial"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_install_row_is_retired_only_by_a_newer_announcement() {
+        use super::{InstallState, install_is_stale};
+        let v = |text: &str| -> Version { text.parse().unwrap() };
+        let (older, same, newer) = (v("2.2.0.0"), v("2.3.0.0"), v("2.4.0.0"));
+        let failed = InstallState::Failed("x".into());
+        for state in [&InstallState::Restart, &failed] {
+            // announced < target and announced == target keep the row; announced > target retires it.
+            assert!(!install_is_stale(state, Some(same), older));
+            assert!(!install_is_stale(state, Some(same), same));
+            assert!(install_is_stale(state, Some(same), newer));
+            // Unscoped rows are never retired here.
+            assert!(!install_is_stale(state, None, newer));
+        }
+        // A running install is never stale, whatever is announced.
+        assert!(!install_is_stale(
+            &InstallState::Installing,
+            Some(same),
+            newer
+        ));
+    }
+
+    #[test]
+    fn the_install_scope_is_the_higher_of_the_planned_and_clicked_releases() {
+        use super::{InstallState, install_is_stale, install_scope};
+        let v = |text: &str| -> Option<Version> { Some(text.parse().unwrap()) };
+        // Plan newer than the click, plan older than the click, only one known, none known.
+        assert_eq!(install_scope(v("2.5.0.0"), v("2.3.0.0")), v("2.5.0.0"));
+        assert_eq!(install_scope(v("2.3.0.0"), v("2.5.0.0")), v("2.5.0.0"));
+        assert_eq!(install_scope(None, v("2.5.0.0")), v("2.5.0.0"));
+        assert_eq!(install_scope(v("2.3.0.0"), None), v("2.3.0.0"));
+        assert_eq!(install_scope(None, None), None);
+        // Clicked 2.5, plan 2.3: the cached 2.5 keeps the Restart, only 2.6 retires it.
+        let scope = install_scope(v("2.3.0.0"), v("2.5.0.0"));
+        let restart = InstallState::Restart;
+        assert!(!install_is_stale(&restart, scope, v("2.5.0.0").unwrap()));
+        assert!(install_is_stale(&restart, scope, v("2.6.0.0").unwrap()));
+    }
+
+    #[test]
+    fn the_install_row_follows_the_planned_release_not_the_clicked_notice() {
+        use super::{
+            InstallHandle, InstallState, install_is_stale, install_scoped, perform_install,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        // The banner announced 2.3.0, but the fresh manifest at click time is 2.5.0.
+        let clicked: Version = "2.3.0.0".parse().unwrap();
+        let (plan, bytes) = plan_serving("2.5.0", b"n");
+        let open = move |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+            Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+        };
+        let ok = |_: &std::path::Path| Ok(());
+        let deps = macos_install::Deps {
+            open: &open,
+            sign: &ok,
+            verify: &ok,
+            ops: &macos_install::RealOps,
+        };
+        let handle = InstallHandle::new();
+        assert_eq!(handle.target(), None);
+        install_scoped(&app, &handle, |_| {
+            perform_install(&app, cache.path(), &plan, &deps, &handle)
+        })
+        .unwrap();
+        assert!(matches!(handle.get(), InstallState::Restart));
+        let planned = handle.target().unwrap();
+        assert_eq!(planned, plan.version);
+        assert_ne!(planned, clicked);
+        // A cached poll still announces the clicked 2.3.0: older than the install, it keeps the
+        // Restart. The installed 2.5.0 itself keeps it too; only a newer release retires it.
+        assert!(!install_is_stale(&handle.get(), handle.target(), clicked));
+        assert!(!install_is_stale(&handle.get(), handle.target(), planned));
+        let newer: Version = "2.6.0.0".parse().unwrap();
+        assert!(install_is_stale(&handle.get(), handle.target(), newer));
+    }
+
+    #[test]
+    fn perform_install_leaves_the_state_non_terminal_until_the_lock_is_released() {
+        use super::{InstallHandle, InstallState, install_scoped, perform_install};
+        for succeed in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let app = fake_installed_app(dir.path());
+            let lock_dir = dir.path().join(".Regressify.lock");
+            let cache = tempfile::tempdir().unwrap();
+            let (plan, bytes) = plan_serving("2.5.0", b"n");
+            let open = move |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+                if succeed {
+                    Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+                } else {
+                    anyhow::bail!("offline")
+                }
+            };
+            let ok = |_: &std::path::Path| Ok(());
+            let deps = macos_install::Deps {
+                open: &open,
+                sign: &ok,
+                verify: &ok,
+                ops: &macos_install::RealOps,
+            };
+            let handle = InstallHandle::new();
+            let result = install_scoped(&app, &handle, |_lock| {
+                let result = perform_install(&app, cache.path(), &plan, &deps, &handle);
+                // The real installer has finished but still owns the lock directory.
+                assert_eq!(result.is_ok(), succeed);
+                assert!(lock_dir.exists());
+                assert!(handle.get().in_progress(), "{:?}", handle.get());
+                result
+            });
+            assert_eq!(result.is_ok(), succeed);
+            assert!(!lock_dir.exists());
+            assert_eq!(matches!(handle.get(), InstallState::Restart), succeed);
+            assert_eq!(matches!(handle.get(), InstallState::Failed(_)), !succeed);
+        }
+    }
+
+    #[test]
+    fn terminal_install_state_is_published_after_the_lock_is_released() {
+        use super::{InstallHandle, InstallState, install_scoped};
+        for succeed in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let app = fake_installed_app(dir.path());
+            let lock_dir = dir.path().join(".Regressify.lock");
+            let handle = InstallHandle::new();
+            let result = install_scoped(&app, &handle, |_lock| {
+                // While the lock is held the UI must still see an in-progress state.
+                assert!(lock_dir.exists());
+                assert!(handle.get().in_progress(), "{:?}", handle.get());
+                if succeed {
+                    Ok(())
+                } else {
+                    anyhow::bail!("boom")
+                }
+            });
+            assert_eq!(result.is_ok(), succeed);
+            assert!(!lock_dir.exists());
+            assert_eq!(
+                matches!(handle.get(), InstallState::Restart),
+                succeed,
+                "{:?}",
+                handle.get()
+            );
+            assert_eq!(matches!(handle.get(), InstallState::Failed(_)), !succeed);
+        }
+        // A concurrent observer (the UI thread) must never see a terminal state while the lock
+        // directory still exists.
+        for _ in 0..200 {
+            let dir = tempfile::tempdir().unwrap();
+            let app = fake_installed_app(dir.path());
+            let lock_dir = dir.path().join(".Regressify.lock");
+            let handle = InstallHandle::new();
+            let watcher = {
+                let (handle, lock_dir) = (handle.clone(), lock_dir.clone());
+                std::thread::spawn(move || {
+                    while handle.get().in_progress() {
+                        std::hint::spin_loop();
+                    }
+                    lock_dir.exists()
+                })
+            };
+            let _ = install_scoped(&app, &handle, |_| Ok(()));
+            assert!(
+                !watcher.join().unwrap(),
+                "terminal state visible under the lock"
+            );
+        }
+        // Failing to take the lock still ends in `Failed`.
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let _held = macos_install::InstallLock::acquire(&app).unwrap();
+        let handle = InstallHandle::new();
+        assert!(install_scoped(&app, &handle, |_| Ok(())).is_err());
+        assert!(matches!(handle.get(), InstallState::Failed(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_revalidates_bundle_ownership_under_the_lock() {
+        use super::{InstallHandle, install_locked};
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        let (plan, bytes) = plan_serving("2.5.0", b"c");
+        let opened = std::cell::Cell::new(false);
+        let open = |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+            opened.set(true);
+            Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+        };
+        let ok = |_: &std::path::Path| Ok(());
+        let deps = macos_install::Deps {
+            open: &open,
+            sign: &ok,
+            verify: &ok,
+            ops: &macos_install::RealOps,
+        };
+        let lock = macos_install::InstallLock::acquire(&app).unwrap();
+        // Someone swapped the bundle for a link after the panel was built: same rule as
+        // `bundle_replaceable`, so the install refuses before recovery or staging.
+        let moved = dir.path().join("elsewhere.app");
+        std::fs::rename(&app, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &app).unwrap();
+        let error = install_locked(
+            &lock,
+            &app,
+            cache.path(),
+            current(),
+            &plan,
+            &deps,
+            &InstallHandle::new(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Cannot install here"),
+            "{error:#}"
+        );
+        assert!(!opened.get());
+        assert_eq!(
+            std::fs::read(moved.join("Contents/MacOS/regressify-desktop")).unwrap(),
+            b"old"
+        );
+    }
+
+    #[test]
+    fn a_foreign_owned_bundle_is_refused_before_anything_is_downloaded() {
+        use super::{InstallHandle, install_locked_with};
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        let (plan, bytes) = plan_serving("2.5.0", b"c");
+        let opened = std::cell::Cell::new(false);
+        let open = |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+            opened.set(true);
+            Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+        };
+        let ok = |_: &std::path::Path| Ok(());
+        let deps = macos_install::Deps {
+            open: &open,
+            sign: &ok,
+            verify: &ok,
+            ops: &macos_install::RealOps,
+        };
+        let lock = macos_install::InstallLock::acquire(&app).unwrap();
+        // A real directory in a writable folder, but another account owns it.
+        let foreign = |bundle: &std::path::Path| {
+            macos_install::bundle_replaceable_with(bundle, &|_, _| false)
+        };
+        let error = install_locked_with(
+            &lock,
+            &app,
+            cache.path(),
+            current(),
+            &plan,
+            &deps,
+            &InstallHandle::new(),
+            &foreign,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Cannot install here"),
+            "{error:#}"
+        );
+        assert!(!opened.get(), "nothing is downloaded");
+        assert_eq!(
+            std::fs::read(app.join("Contents/MacOS/regressify-desktop")).unwrap(),
+            b"old"
+        );
+        // The same bundle owned by the current user installs.
+        let mine =
+            |bundle: &std::path::Path| macos_install::bundle_replaceable_with(bundle, &|_, _| true);
+        install_locked_with(
+            &lock,
+            &app,
+            cache.path(),
+            current(),
+            &plan,
+            &deps,
+            &InstallHandle::new(),
+            &mine,
+        )
+        .unwrap();
+        assert!(opened.get());
+    }
+
+    #[test]
+    fn a_peer_install_publishes_restart_for_the_installed_release() {
+        use super::{
+            AlreadyInstalled, InstallHandle, InstallState, install_locked, install_scoped,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let cache = tempfile::tempdir().unwrap();
+        let (plan, bytes) = plan_serving("2.5.0", b"c");
+        let open = move |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+            Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+        };
+        let ok = |_: &std::path::Path| Ok(());
+        let deps = macos_install::Deps {
+            open: &open,
+            sign: &ok,
+            verify: &ok,
+            ops: &macos_install::RealOps,
+        };
+        let run = |handle: &InstallHandle| {
+            // Both "windows" still run 2.0.0 against the same bundle.
+            install_scoped(&app, handle, |lock| {
+                install_locked(lock, &app, cache.path(), current(), &plan, &deps, handle)
+            })
+        };
+        let first = InstallHandle::new();
+        run(&first).unwrap();
+        assert_eq!(first.get(), InstallState::Restart);
+        // The second window finds 2.5.0 installed: Restart, not a Failed row it can never clear.
+        let second = InstallHandle::new();
+        let error = run(&second).unwrap_err();
+        assert!(error.is::<AlreadyInstalled>(), "{error:#}");
+        assert_eq!(second.get(), InstallState::Restart);
+        assert_eq!(second.target(), Some("2.5.0".parse().unwrap()));
+        // The bundle is untouched by the refused second install.
+        assert_eq!(
+            std::fs::read(
+                dir.path()
+                    .join("Regressify.app.previous/Contents/MacOS/regressify-desktop")
+            )
+            .unwrap(),
+            b"old"
+        );
+        // When the running app itself is the floor, restarting changes nothing: still Failed.
+        let fresh = tempfile::tempdir().unwrap();
+        let fresh_app = fake_installed_app(fresh.path());
+        let (same, _) = plan_serving("2.0.0", b"x");
+        let third = InstallHandle::new();
+        let error = install_scoped(&fresh_app, &third, |lock| {
+            install_locked(
+                lock,
+                &fresh_app,
+                cache.path(),
+                current(),
+                &same,
+                &deps,
+                &third,
+            )
+        })
+        .unwrap_err();
+        assert!(!error.is::<AlreadyInstalled>());
+        assert!(matches!(third.get(), InstallState::Failed(_)));
+    }
+
+    #[test]
+    fn the_notice_schedule_runs_on_wall_clock_time_and_survives_clock_rollback() {
+        use super::{CHECK_INTERVAL, notice_network_allowed};
+        let interval = CHECK_INTERVAL.as_secs();
+        assert!(notice_network_allowed(false, None, 1_000));
+        assert!(!notice_network_allowed(false, Some(1_000), 1_000));
+        assert!(!notice_network_allowed(
+            false,
+            Some(1_000),
+            1_000 + interval - 1
+        ));
+        // 24 wall-clock hours after the last attempt (a sleeping Mac) is due.
+        assert!(notice_network_allowed(false, Some(1_000), 1_000 + interval));
+        assert!(notice_network_allowed(
+            false,
+            Some(1_000),
+            1_000 + 24 * 3600
+        ));
+        // The clock moved back before the last attempt.
+        assert!(notice_network_allowed(false, Some(1_000), 999));
+        // Startup and a manual check bypass only the deadline.
+        assert!(notice_network_allowed(true, Some(1_000), 1_001));
+    }
+
+    #[test]
+    fn the_dialog_shows_the_short_running_version_on_macos_only() {
+        use super::running_version_label;
+        assert_eq!(running_version_label(true, "2.2.2.0"), "2.2.2");
+        assert_eq!(running_version_label(true, "2.2.2.1"), "2.2.2.1");
+        assert_eq!(running_version_label(false, "2.2.2.0"), "2.2.2.0");
+        assert_eq!(running_version_label(true, "dev build"), "dev build");
+    }
+
+    #[test]
+    fn dismissing_covers_the_displayed_and_the_clicked_release() {
+        use super::dismiss_version;
+        let v = |text: &str| -> Version { text.parse().unwrap() };
+        // Clicked 2.3, installed 2.5: dismissing hides 2.5 (and 2.3).
+        assert_eq!(dismiss_version(v("2.5.0.0"), v("2.3.0.0")), v("2.5.0.0"));
+        // Clicked 2.5, plan installed 2.3: the cached 2.5 stays hidden too.
+        assert_eq!(dismiss_version(v("2.3.0.0"), v("2.5.0.0")), v("2.5.0.0"));
+        assert_eq!(dismiss_version(v("2.4.0.0"), v("2.4.0.0")), v("2.4.0.0"));
+        // A dismissal of the displayed release hides a same-target announcement.
+        assert!(super::dismissal_hides(
+            Some(dismiss_version(v("2.5.0.0"), v("2.3.0.0"))),
+            v("2.5.0.0")
+        ));
+    }
+
+    #[test]
+    fn install_text_names_the_release_the_install_row_is_scoped_to() {
+        use super::{InstallState, install_status, install_title};
+        let v: Version = "2.4.0.0".parse().unwrap();
+        assert_eq!(install_title(v, None), "Regressify 2.4.0 is available");
+        assert_eq!(
+            install_title(v, Some(&InstallState::Installing)),
+            "Regressify 2.4.0 is available"
+        );
+        assert_eq!(
+            install_title(v, Some(&InstallState::Restart)),
+            "Regressify 2.4.0 is installed"
+        );
+        assert_eq!(
+            install_status(v, &InstallState::Restart),
+            "Regressify 2.4.0 is installed. Restart to finish updating."
+        );
+        assert_eq!(
+            install_status(v, &InstallState::Installing),
+            "Regressify 2.4.0: Installing"
+        );
+    }
+
+    #[test]
+    fn failure_text_only_claims_unchanged_when_it_is() {
+        use super::{InstallHandle, InstallState, perform_install, publish_install_result};
+        let dir = tempfile::tempdir().unwrap();
+        let app = fake_installed_app(dir.path());
+        let ok = |_: &std::path::Path| Ok(());
+        let (plan, bytes) = plan_serving("2.2.2", b"n");
+        let open = move |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> {
+            Ok(Box::new(std::io::Cursor::new(bytes.clone())))
+        };
+        let cache = tempfile::tempdir().unwrap();
+
+        // Plain failure: the UI states the app is unchanged.
+        let offline =
+            |_: &str| -> anyhow::Result<Box<dyn std::io::Read>> { anyhow::bail!("offline") };
+        let deps = macos_install::Deps {
+            open: &offline,
+            sign: &ok,
+            verify: &ok,
+            ops: &macos_install::RealOps,
+        };
+        let handle = InstallHandle::new();
+        let result = perform_install(&app, cache.path(), &plan, &deps, &handle);
+        assert!(result.is_err());
+        publish_install_result(&handle, &result);
+        assert!(
+            handle
+                .get()
+                .message()
+                .ends_with("The current app was not changed.")
+        );
+
+        // Rollback failure: the message names the kept copy and must not claim "unchanged".
+        struct NoRestore(std::cell::Cell<usize>);
+        impl macos_install::SwapOps for NoRestore {
+            fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+                std::fs::rename(from, to)
+            }
+            fn exchange(&self, a: &std::path::Path, b: &std::path::Path) -> std::io::Result<()> {
+                self.0.set(self.0.get() + 1);
+                if self.0.get() >= 2 {
+                    return Err(std::io::Error::other("disk gone"));
+                }
+                macos_install::SwapOps::exchange(&macos_install::RealOps, a, b)
+            }
+        }
+        let ops = NoRestore(std::cell::Cell::new(0));
+        // Only the swapped-in app fails verification (stage checks pass), forcing a rollback.
+        let reject_live = |path: &std::path::Path| -> anyhow::Result<()> {
+            if path
+                .file_name()
+                .is_some_and(|name| name == "Regressify.app")
+            {
+                anyhow::bail!("bad signature");
+            }
+            Ok(())
+        };
+        let deps = macos_install::Deps {
+            open: &open,
+            sign: &ok,
+            verify: &reject_live,
+            ops: &ops,
+        };
+        let handle = InstallHandle::new();
+        let result = perform_install(&app, cache.path(), &plan, &deps, &handle);
+        assert!(result.is_err());
+        publish_install_result(&handle, &result);
+        let InstallState::Failed(text) = handle.get() else {
+            panic!("expected a failure")
+        };
+        assert!(
+            text.contains("could not be restored")
+                && text.contains(".Regressify.app.update-stage-"),
+            "{text}"
+        );
+        assert!(!text.contains("was not changed"), "{text}");
+        assert!(handle.get().message().starts_with("Failed: "));
+    }
+
+    #[test]
+    fn platform_gate_selects_feeds_per_platform() {
+        let origin = Some("https://regressify.eshn.dev");
+        // Windows x64 and macOS (either arch maps to MacOs) get a feed; others never do.
+        assert_eq!(
+            UpdateFeed::for_origin(origin, UpdatePlatform::WindowsX64)
+                .unwrap()
+                .platform(),
+            UpdatePlatform::WindowsX64
+        );
+        assert_eq!(
+            UpdateFeed::for_origin(origin, UpdatePlatform::MacOs)
+                .unwrap()
+                .platform(),
+            UpdatePlatform::MacOs
+        );
+        assert!(UpdateFeed::for_origin(origin, UpdatePlatform::Other).is_none());
+        // The compile-time origin is still required, and must be a valid https origin.
+        assert!(UpdateFeed::for_origin(None, UpdatePlatform::MacOs).is_none());
+        assert!(UpdateFeed::for_origin(Some("http://x.dev"), UpdatePlatform::MacOs).is_none());
+        // Unit tests run on Linux, which must stay unconfigured.
+        if cfg!(target_os = "linux") {
+            assert_eq!(UpdatePlatform::current(), UpdatePlatform::Other);
+            assert!(UpdateFeed::configured().is_none());
+        }
+    }
+
+    #[test]
+    fn notice_manifest_accepts_the_live_shape_and_ignores_installer_fields() {
+        let notice = macos_feed().parse_notice_manifest(LIVE_MANIFEST).unwrap();
+        assert_eq!(notice.version, "2.2.2".parse::<Version>().unwrap());
+        assert_eq!(
+            notice.release_url(),
+            "https://github.com/precise-alloy/regressify-rs/releases/tag/v2.2.2"
+        );
+        // Windows validation is unchanged: the same text still parses on the Windows path
+        // only when its installer fields are valid, and a bad installer never fails a notice.
+        let broken = LIVE_MANIFEST.replace("Regressify-Setup-2.2.2.0-x64.exe", "evil.exe");
+        assert!(macos_feed().parse_notice_manifest(&broken).is_ok());
+        assert!(
+            UpdateFeed::new("https://regressify.eshn.dev")
+                .unwrap()
+                .parse_manifest(&broken)
+                .is_err()
+        );
+        let json = r#"{"version":"2.2.2.0","tag":"v2.2.2","extra":1}"#;
+        assert!(macos_feed().parse_notice_manifest(json).is_ok());
+    }
+
+    #[test]
+    fn notice_manifest_rejects_bad_tags_versions_and_shapes() {
+        let feed = macos_feed();
+        for text in [
+            "version=2.2.2.0\ntag=v2.2.3\n",
+            "version=2.2.2.0\ntag=2.2.2\n",
+            "version=2.2.2.0\ntag=v2.2.2/../x\n",
+            "version=2.2.2.0\ntag=v2.2.2\ntag=v2.2.2\n",
+            "version=2.2.2.0\n",
+            "version=latest\ntag=vlatest\n",
+            "version=2.2.2.0\ntag=v2.2\n",
+            "not a manifest",
+            "",
+        ] {
+            assert!(feed.parse_notice_manifest(text).is_err(), "{text:?}");
+        }
+        assert!(feed.parse_notice_manifest(&" ".repeat(20 * 1024)).is_err());
+    }
+
+    #[test]
+    fn notice_responses_compare_versions_and_survive_failures() {
+        let feed = macos_feed();
+        let current: Version = "2.2.2".parse().unwrap();
+        let check =
+            |status, text: &str, current| feed.notice_response(status, text.as_bytes(), current);
+        assert!(matches!(
+            check(StatusCode::OK, LIVE_MANIFEST, "2.2.1".parse().unwrap()),
+            Ok(NoticeCheck::Available(_))
+        ));
+        assert!(matches!(
+            check(StatusCode::OK, LIVE_MANIFEST, current).unwrap(),
+            NoticeCheck::Older(_)
+        ));
+        assert!(matches!(
+            check(StatusCode::OK, LIVE_MANIFEST, "3.0.0".parse().unwrap()).unwrap(),
+            NoticeCheck::Older(_)
+        ));
+        assert_eq!(
+            check(StatusCode::NOT_FOUND, "", current).unwrap(),
+            NoticeCheck::Current
+        );
+        assert!(check(StatusCode::BAD_GATEWAY, "", current).is_err());
+        assert!(check(StatusCode::OK, "garbage", current).is_err());
+    }
+
+    #[test]
+    fn notice_check_refuses_other_platforms_and_has_no_installer_data() {
+        let windows = UpdateFeed::new("https://regressify.eshn.dev").unwrap();
+        assert!(windows.check_notice("1.0.0".parse().unwrap()).is_err());
+        // UpdateNotice exposes only version and a release-page URL; it has no installer,
+        // hash, or payload field to download, and PreparedUpdate cannot be built from it.
+        let UpdateNotice { version, tag } = notice("2.2.2.0");
+        assert_eq!(
+            (version.to_string(), tag.as_str()),
+            ("2.2.2.0".into(), "v2.2.2")
+        );
+        assert_eq!(
+            macos_feed().install_command(),
+            "curl -fsSL https://regressify.eshn.dev/install.sh | sh"
+        );
+    }
+
+    #[test]
+    fn notice_schedule_dismissal_and_failures_use_a_separate_state_file() {
+        let cache = tempfile::tempdir().unwrap();
+        let feed = macos_feed();
+        let run = |startup, now, result: Result<NoticeCheck, ()>| {
+            feed.check_notice_with(cache.path(), current(), startup, true, now, || {
+                result.map_err(|()| anyhow::anyhow!("offline"))
+            })
+        };
+        let available = || Ok(NoticeCheck::Available(notice("2.2.2.0")));
+        // Newer release shows; the check stamps the shared timestamp.
+        assert_eq!(
+            run(false, 1_000, available()).unwrap(),
+            NoticeOutcome::Available(notice("2.2.2.0"))
+        );
+        // Not due inside eight hours: the feed is not consulted, the saved notice is shown.
+        assert_eq!(
+            run(false, 1_000 + 3_600, Err(())).unwrap(),
+            NoticeOutcome::Available(notice("2.2.2.0"))
+        );
+        // Startup bypasses the deadline; failures are errors but still reschedule.
+        assert!(run(true, 2_000, Err(())).is_err());
+        assert_eq!(
+            run(false, 2_001, Err(())).unwrap(),
+            NoticeOutcome::Available(notice("2.2.2.0"))
+        );
+        // Due again after eight hours, and after a clock rollback.
+        let after = 2_000 + super::CHECK_INTERVAL.as_secs();
+        assert_eq!(
+            run(false, after, Ok(NoticeCheck::Current)).unwrap(),
+            NoticeOutcome::Current
+        );
+        assert!(run(false, 10, Err(())).is_err());
+        // Dismissal hides that version and older, not newer ones.
+        UpdateFeed::dismiss_notice("2.2.2".parse().unwrap(), cache.path()).unwrap();
+        assert_eq!(
+            run(true, 5_000, available()).unwrap(),
+            NoticeOutcome::Dismissed(notice("2.2.2.0"))
+        );
+        assert_eq!(
+            run(true, 5_001, Ok(NoticeCheck::Available(notice("2.3.0.0")))).unwrap(),
+            NoticeOutcome::Available(notice("2.3.0.0"))
+        );
+        // Dismissing an older version later never lowers the stored one.
+        UpdateFeed::dismiss_notice("2.0.0".parse().unwrap(), cache.path()).unwrap();
+        assert_eq!(
+            run(true, 5_002, available()).unwrap(),
+            NoticeOutcome::Dismissed(notice("2.2.2.0"))
+        );
+        // Installer state files are untouched; a corrupt notice file is not fatal.
+        assert!(!cache.path().join("state.json").exists());
+        fs::write(cache.path().join("notice.json"), b"{not json").unwrap();
+        assert!(NoticeState::load(cache.path()).is_err());
+        assert_eq!(
+            run(true, 6_000, available()).unwrap(),
+            NoticeOutcome::Available(notice("2.2.2.0"))
+        );
+    }
+
+    #[test]
+    fn notice_found_by_one_window_reaches_a_window_that_is_not_due() {
+        let cache = tempfile::tempdir().unwrap();
+        let feed = macos_feed();
+        let never = || -> Result<NoticeCheck, anyhow::Error> { panic!("peer must not request") };
+        // Window A's due check finds a release and saves it.
+        let found = feed
+            .check_notice_with(cache.path(), current(), true, true, 1_000, || {
+                Ok(NoticeCheck::Available(notice("2.2.2.0")))
+            })
+            .unwrap();
+        assert_eq!(found, NoticeOutcome::Available(notice("2.2.2.0")));
+        // Window B polls inside the shared interval: no request, but it learns the release.
+        let polled = feed
+            .check_notice_with(cache.path(), current(), false, true, 1_005, never)
+            .unwrap();
+        assert_eq!(polled, NoticeOutcome::Available(notice("2.2.2.0")));
+        // Window A dismisses; window B's next poll hides it.
+        UpdateFeed::dismiss_notice("2.2.2".parse().unwrap(), cache.path()).unwrap();
+        let polled = feed
+            .check_notice_with(cache.path(), current(), false, true, 1_010, never)
+            .unwrap();
+        assert_eq!(polled, NoticeOutcome::Dismissed(notice("2.2.2.0")));
+        // A saved notice that is no longer newer (the app was upgraded) is Current.
+        let upgraded: Version = "2.2.2".parse().unwrap();
+        let polled = feed
+            .check_notice_with(cache.path(), upgraded, false, true, 1_015, never)
+            .unwrap();
+        assert_eq!(polled, NoticeOutcome::Current);
+        // A tampered saved notice is revalidated and ignored.
+        fs::write(
+            cache.path().join("notice.json"),
+            br#"{"last_check_at":1000,"available_version":"2.2.2.0","available_tag":"v9.9.9"}"#,
+        )
+        .unwrap();
+        let polled = feed
+            .check_notice_with(cache.path(), current(), false, true, 1_020, never)
+            .unwrap();
+        assert_eq!(polled, NoticeOutcome::NotDue);
+    }
+
+    #[test]
+    fn dismissal_during_a_pending_check_is_not_overwritten() {
+        let cache = tempfile::tempdir().unwrap();
+        let feed = macos_feed();
+        let outcome = feed
+            .check_notice_with(cache.path(), current(), true, true, 1_000, || {
+                // The user dismisses in another window while the request is in flight.
+                UpdateFeed::dismiss_notice("2.2.2".parse().unwrap(), cache.path()).unwrap();
+                Ok(NoticeCheck::Available(notice("2.2.2.0")))
+            })
+            .unwrap();
+        assert_eq!(outcome, NoticeOutcome::Dismissed(notice("2.2.2.0")));
+        let state = NoticeState::load(cache.path()).unwrap();
+        assert_eq!(state.dismissed_version.as_deref(), Some("2.2.2.0"));
+        assert_eq!(state.last_check_at, Some(1_000));
+        // The dismissal survives the next check as well.
+        let again = feed
+            .check_notice_with(cache.path(), current(), true, true, 2_000, || {
+                Ok(NoticeCheck::Available(notice("2.2.2.0")))
+            })
+            .unwrap();
+        assert_eq!(again, NoticeOutcome::Dismissed(notice("2.2.2.0")));
+    }
+
+    #[test]
+    fn a_slower_earlier_check_cannot_overwrite_a_newer_one() {
+        let cache = tempfile::tempdir().unwrap();
+        let feed = macos_feed();
+        let outcome = feed
+            .check_notice_with(cache.path(), current(), true, true, 1_000, || {
+                // A newer check starts and finishes while this older request is in flight.
+                let newer = feed
+                    .check_notice_with(cache.path(), current(), true, true, 2_000, || {
+                        Ok(NoticeCheck::Available(notice("2.3.0.0")))
+                    })
+                    .unwrap();
+                assert_eq!(newer, NoticeOutcome::Available(notice("2.3.0.0")));
+                // The user dismisses the newer release; the late response must keep that too.
+                UpdateFeed::dismiss_notice("2.1.0".parse().unwrap(), cache.path()).unwrap();
+                Ok(NoticeCheck::Available(notice("2.2.2.0")))
+            })
+            .unwrap();
+        assert_eq!(outcome, NoticeOutcome::Available(notice("2.3.0.0")));
+        let state = NoticeState::load(cache.path()).unwrap();
+        assert_eq!(state.available_version.as_deref(), Some("2.3.0.0"));
+        assert_eq!(
+            state.last_check_at,
+            Some(2_000),
+            "the clock does not move back"
+        );
+        assert_eq!(state.dismissed_version.as_deref(), Some("2.1.0.0"));
+    }
+
+    #[test]
+    fn a_failed_newer_request_does_not_supersede_a_successful_older_one() {
+        let cache = tempfile::tempdir().unwrap();
+        let feed = macos_feed();
+        let outcome = feed
+            .check_notice_with(cache.path(), current(), true, true, 1_000, || {
+                // Two startup checks overlap: the newer ticket fails first.
+                let newer =
+                    feed.check_notice_with(cache.path(), current(), true, true, 1_001, || {
+                        Err(anyhow::anyhow!("offline"))
+                    });
+                assert!(newer.is_err());
+                Ok(NoticeCheck::Available(notice("2.2.2.0")))
+            })
+            .unwrap();
+        assert_eq!(
+            outcome,
+            NoticeOutcome::Available(notice("2.2.2.0")),
+            "the confirmed release is not hidden until the next interval"
+        );
+        let state = NoticeState::load(cache.path()).unwrap();
+        assert_eq!(state.available_version.as_deref(), Some("2.2.2.0"));
+        assert_eq!(
+            state.applied_seq, 1,
+            "only the successful ticket is applied"
+        );
+        assert!(state.started_seq >= state.applied_seq);
+    }
+
+    #[test]
+    fn a_failed_ticket_save_cannot_discard_a_newer_peers_response() {
+        let cache = tempfile::tempdir().unwrap();
+        let feed = macos_feed();
+        let state_path = cache.path().join("notice.json");
+        // A directory in the state file's place: loading yields defaults and every save fails,
+        // so window A's ticket cannot be recorded.
+        fs::create_dir(&state_path).unwrap();
+        let (got_tx, got_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let go_rx = std::sync::Mutex::new(go_rx);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let a = feed.check_notice_with(cache.path(), current(), true, true, 1_000, || {
+                // Writes recover; window B starts (and records the ticket A could not) and is
+                // still waiting for its response when A's older response arrives.
+                fs::remove_dir(&state_path).unwrap();
+                scope.spawn(|| {
+                    let outcome =
+                        feed.check_notice_with(cache.path(), current(), true, true, 1_001, || {
+                            got_tx.send(()).unwrap();
+                            go_rx.lock().unwrap().recv().unwrap();
+                            Ok(NoticeCheck::Available(notice("2.3.0.0")))
+                        });
+                    result_tx.send(outcome.unwrap()).unwrap();
+                });
+                got_rx.recv().unwrap();
+                Ok(NoticeCheck::Available(notice("2.2.2.0")))
+            });
+            assert!(a.is_ok());
+            go_tx.send(()).unwrap();
+            assert_eq!(
+                result_rx.recv().unwrap(),
+                NoticeOutcome::Available(notice("2.3.0.0"))
+            );
+        });
+        let state = NoticeState::load(cache.path()).unwrap();
+        assert_eq!(
+            state.available_version.as_deref(),
+            Some("2.3.0.0"),
+            "the newer response wins: {state:?}"
+        );
+        assert!(state.started_seq >= state.applied_seq, "{state:?}");
+    }
+
+    #[test]
+    fn a_no_release_result_clears_the_banner_of_a_peer_window() {
+        let cache = tempfile::tempdir().unwrap();
+        let feed = macos_feed();
+        let never = || -> Result<NoticeCheck, anyhow::Error> { panic!("peer must not request") };
+        // Nothing has ever succeeded: an empty state stays unknown, not "current".
+        let unknown = feed
+            .check_notice_with(cache.path(), current(), false, false, 1_000, never)
+            .unwrap();
+        assert_eq!(unknown, NoticeOutcome::NotDue);
+        feed.check_notice_with(cache.path(), current(), true, true, 1_000, || {
+            Ok(NoticeCheck::Available(notice("2.2.2.0")))
+        })
+        .unwrap();
+        // Both windows show the release; one then receives "no release" (HTTP 404).
+        feed.check_notice_with(cache.path(), current(), true, true, 2_000, || {
+            Ok(NoticeCheck::Current)
+        })
+        .unwrap();
+        let peer = feed
+            .check_notice_with(cache.path(), current(), false, true, 2_010, never)
+            .unwrap();
+        assert_eq!(
+            peer,
+            NoticeOutcome::Current,
+            "the peer drops its stale banner"
+        );
+    }
+
+    #[test]
+    fn an_updated_window_keeps_the_release_for_older_peers() {
+        let cache = tempfile::tempdir().unwrap();
+        let feed = macos_feed();
+        let updated: Version = "2.2.2".parse().unwrap();
+        let older: Version = "2.1.0".parse().unwrap();
+        // The updated window checks first; its feed release is not newer than itself.
+        let outcome = feed
+            .check_notice_with(cache.path(), updated, true, true, 1_000, || {
+                Ok(NoticeCheck::Older(notice("2.2.2.0")))
+            })
+            .unwrap();
+        assert_eq!(outcome, NoticeOutcome::Current);
+        // The older peer is not due, but still learns about the release, per its own version.
+        let never = || -> Result<NoticeCheck, anyhow::Error> { panic!("peer must not request") };
+        let peer = feed
+            .check_notice_with(cache.path(), older, false, true, 1_010, never)
+            .unwrap();
+        assert_eq!(peer, NoticeOutcome::Available(notice("2.2.2.0")));
+        let same = feed
+            .check_notice_with(cache.path(), updated, false, true, 1_010, never)
+            .unwrap();
+        assert_eq!(same, NoticeOutcome::Current);
+    }
+
+    #[test]
+    fn failed_state_save_still_reports_the_check_and_the_throttle_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        // A regular file where the cache directory should be: nothing can be saved.
+        let cache = dir.path().join("updates");
+        fs::write(&cache, b"not a directory").unwrap();
+        let feed = macos_feed();
+        let outcome = feed
+            .check_notice_with(&cache, current(), true, true, 1_000, || {
+                Ok(NoticeCheck::Available(notice("2.2.2.0")))
+            })
+            .unwrap();
+        assert_eq!(outcome, NoticeOutcome::Available(notice("2.2.2.0")));
+        // A failing check still surfaces its own error rather than the save error.
+        let error = feed
+            .check_notice_with(&cache, current(), true, true, 1_001, || {
+                Err(anyhow::anyhow!("offline"))
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "offline");
+        // Nothing was persisted, so the caller's in-memory throttle must stop the request.
+        let held = feed
+            .check_notice_with(&cache, current(), false, false, 1_002, || {
+                panic!("throttled caller must not request")
+            })
+            .unwrap();
+        assert_eq!(held, NoticeOutcome::NotDue);
+    }
+
+    #[test]
+    fn only_a_dispatched_request_counts_as_an_attempt() {
+        let cache = tempfile::tempdir().unwrap();
+        let feed = macos_feed();
+        let never = || panic!("must not request");
+        let attempt = feed.check_notice_attempt(cache.path(), current(), true, true, 1_000, || {
+            Ok(NoticeCheck::Available(notice("2.2.2.0")))
+        });
+        assert!(attempt.dispatched);
+        // Cached polls (throttle closed) report the saved notice but never an attempt, so the
+        // caller's throttle is not refreshed and can reopen at its deadline.
+        for now in [1_005, 1_010] {
+            let attempt =
+                feed.check_notice_attempt(cache.path(), current(), false, false, now, never);
+            assert!(!attempt.dispatched);
+            assert_eq!(
+                attempt.outcome.unwrap(),
+                NoticeOutcome::Available(notice("2.2.2.0"))
+            );
+        }
+        UpdateFeed::dismiss_notice("2.2.2".parse().unwrap(), cache.path()).unwrap();
+        let attempt =
+            feed.check_notice_attempt(cache.path(), current(), false, false, 1_015, never);
+        assert!(!attempt.dispatched);
+        assert_eq!(
+            attempt.outcome.unwrap(),
+            NoticeOutcome::Dismissed(notice("2.2.2.0"))
+        );
+        // Allowed by the caller but not yet due on disk: still no request.
+        let attempt = feed.check_notice_attempt(cache.path(), current(), false, true, 1_020, never);
+        assert!(!attempt.dispatched);
+        // Past the deadline the request goes out again and finds a newer release.
+        let later = 1_000 + super::CHECK_INTERVAL.as_secs();
+        let attempt =
+            feed.check_notice_attempt(cache.path(), current(), false, true, later, || {
+                Ok(NoticeCheck::Available(notice("2.3.0.0")))
+            });
+        assert!(attempt.dispatched);
+        assert_eq!(
+            attempt.outcome.unwrap(),
+            NoticeOutcome::Available(notice("2.3.0.0"))
+        );
+        // A failed request still counts as an attempt (the 5 s retry loop stays throttled).
+        let attempt =
+            feed.check_notice_attempt(cache.path(), current(), true, true, later + 1, || {
+                Err(anyhow::anyhow!("offline"))
+            });
+        assert!(attempt.dispatched);
+        assert!(attempt.outcome.is_err());
+    }
+
+    #[test]
+    fn cached_results_replace_stale_status_but_keep_failures() {
+        let failed = format!("{CHECK_FAILED_PREFIX}offline");
+        let up_to_date = "Regressify is up to date";
+        // Cached `Current` after another window recorded a rolled-back release: the old
+        // dismissed message must not survive, nor a blank one.
+        assert_eq!(
+            notice_message_after_success(false, "", up_to_date),
+            up_to_date
+        );
+        assert_eq!(
+            notice_message_after_success(false, "A newer version is available", up_to_date),
+            up_to_date
+        );
+        // Cached `Available` must not leave a stale "up to date".
+        assert_eq!(notice_message_after_success(false, up_to_date, ""), "");
+        // A cached poll keeps a failure; a dispatched success clears it.
+        assert_eq!(
+            notice_message_after_success(false, &failed, up_to_date),
+            failed
+        );
+        assert_eq!(
+            notice_message_after_success(true, &failed, up_to_date),
+            up_to_date
+        );
+        assert_eq!(notice_message_after_success(true, &failed, ""), "");
+    }
+
+    #[test]
+    fn dismissal_rule_hides_that_version_and_older() {
+        let version = |text: &str| text.parse::<Version>().unwrap();
+        assert!(!dismissal_hides(None, version("2.2.2")));
+        assert!(dismissal_hides(Some(version("2.2.2")), version("2.2.2")));
+        assert!(dismissal_hides(Some(version("2.2.2")), version("2.0.0")));
+        assert!(!dismissal_hides(Some(version("2.2.2")), version("2.3.0")));
     }
 
     #[test]

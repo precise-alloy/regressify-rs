@@ -147,6 +147,10 @@ pub struct Workbench {
     tab: usize,
     advanced: bool,
     busy: bool,
+    /// A failed update handoff lost this window's workspace to another process. `busy` stays set
+    /// (no edits or new operations) but, unlike a real operation, this must not block closing:
+    /// nothing can be unsaved because the unsaved-work guards passed before the handoff.
+    workspace_lost: bool,
     status: String,
     diagnostic: Option<String>,
     source_issues: Vec<lsp_types::Diagnostic>,
@@ -507,6 +511,7 @@ impl Workbench {
             tab: 0,
             advanced: false,
             busy: false,
+            workspace_lost: false,
             status,
             diagnostic: None,
             source_issues: Vec::new(),
@@ -3103,7 +3108,11 @@ impl Workbench {
                     }
                     if this.close_after_preferences {
                         this.close_after_preferences = false;
-                        if saved && !this.busy && !this.unsaved(cx) && !this.runs.read(cx).running()
+                        // A frozen-but-closable window (`workspace_lost`) stays `busy` for good.
+                        if saved
+                            && (!this.busy || this.workspace_lost)
+                            && !this.unsaved(cx)
+                            && !this.runs.read(cx).running()
                         {
                             this.quit_or_install(cx);
                         } else {
@@ -3117,6 +3126,46 @@ impl Workbench {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Decision behind the native window-close hook. Always `false` (the app quits itself
+    /// through `quit_or_install`/`finish_close`) unless the view is gone; a method so tests can
+    /// reach it.
+    pub(super) fn window_should_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.install_blocks_quit(cx) {
+            false
+        } else if self.workspace_lost {
+            // Quit the process: returning `true` would only close the
+            // window and leave the app running headless on macOS.
+            self.finish_close(cx);
+            false
+        } else if self.busy {
+            if self.git.read(cx).active() {
+                self.git.update(cx, |panel, cx| panel.cancel_operation(cx));
+                self.status = "Cancelling Git; close again after it finishes".into();
+            } else {
+                self.status = "Finish the current operation before closing".into();
+            }
+            cx.notify();
+            false
+        } else if self.runs.read(cx).running() {
+            self.runs.update(cx, |panel, cx| panel.cancel(cx));
+            self.status = "Cancelling the active run; close again after it finishes".into();
+            cx.notify();
+            false
+        } else if self.guard_landing_close(window, cx) {
+            false
+        } else if self.unsaved(cx) {
+            self.guard(files::Pending::Close, window, cx);
+            false
+        } else {
+            self.finish_close(cx);
+            false
+        }
     }
 
     fn finish_close(&mut self, cx: &mut Context<Self>) {
@@ -3298,6 +3347,7 @@ impl Render for Workbench {
             .font_family(cx.theme().font_family.clone())
             .child(self.render_header(window, cx))
             .children(self.render_update_banner(cx))
+            .children(self.render_update_notice(cx))
             .child(div().flex_1().min_h_0().child(layout))
     }
 }
@@ -3345,39 +3395,8 @@ pub fn launch(instance: Option<DesktopInstance>) {
                             }
                             let weak = view.downgrade();
                             window.on_window_should_close(cx, move |window, cx| {
-                                weak.update(cx, |this, cx| {
-                                    if this.busy {
-                                        if this.git.read(cx).active() {
-                                            this.git
-                                                .update(cx, |panel, cx| panel.cancel_operation(cx));
-                                            this.status =
-                                                "Cancelling Git; close again after it finishes"
-                                                    .into();
-                                        } else {
-                                            this.status =
-                                                "Finish the current operation before closing"
-                                                    .into();
-                                        }
-                                        cx.notify();
-                                        false
-                                    } else if this.runs.read(cx).running() {
-                                        this.runs.update(cx, |panel, cx| panel.cancel(cx));
-                                        this.status =
-                                        "Cancelling the active run; close again after it finishes"
-                                            .into();
-                                        cx.notify();
-                                        false
-                                    } else if this.guard_landing_close(window, cx) {
-                                        false
-                                    } else if this.unsaved(cx) {
-                                        this.guard(files::Pending::Close, window, cx);
-                                        false
-                                    } else {
-                                        this.finish_close(cx);
-                                        false
-                                    }
-                                })
-                                .unwrap_or(true)
+                                weak.update(cx, |this, cx| this.window_should_close(window, cx))
+                                    .unwrap_or(true)
                             });
                             if let Some(instance) = instance {
                                 view.update(cx, |this, cx| {
