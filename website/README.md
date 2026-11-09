@@ -244,7 +244,12 @@ Access JWTs. Do not enable unprotected Worker aliases or expose another origin.
 The page is excluded from the sitemap and marked noindex. Admin responses use
 `Cache-Control: private, no-store`; upstream error bodies and query metadata are
 never returned. The upstream URL must use HTTPS, redirects are refused, requests
-time out after 15 seconds, and results are limited to 2 MiB and 10,000 rows.
+time out after 15 seconds, and upstream results are limited to 2 MiB and 10,000 rows.
+The expanded admin JSON response is also limited to 2 MiB, counted as UTF-8 bytes
+including its envelope and escaping. Rows are serialized and counted individually
+before joining the response, so repeated field names cannot bypass the input limit.
+Oversized output returns the same sanitized feed error and retains the last
+successful table in the browser.
 
 The query must return columns `url`, `datetime`, `file_count`,
 `total_bytes`, `duration_ms` in any order. Column names are trimmed, lowercased,
@@ -267,9 +272,14 @@ blend green/neutral/red over each complete returned column; values at or above
 
 Each row has an info button that opens deployment details with the full URL,
 local timestamp including its timezone, and exact byte/millisecond measurements.
+Fractional and unsafe-integer measurement suffixes use the number's round-trippable
+string representation rather than locale rounding; safe integers retain grouping.
+Signed detail durations display a separate sign without changing the nonnegative
+validation of core measurements.
 Missing values are labeled "Not available". Details remain a snapshot while the
 feed refreshes. Close with the close button or Escape; focus returns to the row,
-or the search field if that deployment is no longer listed.
+or the search field if that deployment is no longer listed or multiple refreshed
+rows share its URL and timestamp.
 Long URL links are limited to two lines in the feed; the full URL is available
 in details. On screens below 768px, the table shows Site, Deployed, and the details button
 without horizontal scrolling. Files, Size, and Duration remain available in the

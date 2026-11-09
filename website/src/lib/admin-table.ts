@@ -50,8 +50,11 @@ export function formatSiteDetailValue(key: string, value: SiteDetailValue): stri
       ? new Intl.DateTimeFormat(undefined, { dateStyle: 'full', timeStyle: 'long' }).format(timestamp)
       : value;
   }
-  if (/(?:^|_)bytes$/.test(key) && typeof value === 'number') return `${formatSiteValue('total_bytes', value)} MiB (${counts.format(value)} bytes)`;
-  if (/(?:^|_)ms$/.test(key) && typeof value === 'number') return `${formatSiteValue('duration_ms', value)} (${counts.format(value)} ms)`;
+  if (typeof value === 'number') {
+    const exact = Number.isSafeInteger(value) ? counts.format(value) : String(value);
+    if (/(?:^|_)bytes$/.test(key)) return `${formatSiteValue('total_bytes', value)} MiB (${exact} bytes)`;
+    if (/(?:^|_)ms$/.test(key)) return `${value < 0 ? '-' : ''}${formatSiteValue('duration_ms', Math.abs(value))} (${exact} ms)`;
+  }
   if (typeof value === 'object') return JSON.stringify(value, null, 2);
   if (siteColumns.some(([column]) => column === key) && typeof value !== 'boolean') return formatSiteValue(key as SiteColumn, value);
   return String(value);
@@ -82,6 +85,16 @@ export function selectSites(sites: SiteRecord[], search: string, key: SiteColumn
       typeof first === 'number' && typeof second === 'number' ? first - second : String(first).localeCompare(String(second));
     return descending ? -order : order;
   });
+}
+
+export function findSiteFocusIndex(sites: SiteRecord[], site: SiteRecord): number {
+  let match = -1;
+  for (const [index, candidate] of sites.entries()) {
+    if (candidate.url !== site.url || candidate.datetime !== site.datetime) continue;
+    if (match !== -1) return -1;
+    match = index;
+  }
+  return match;
 }
 
 export function metricStyle(value: number, min: number, max: number): { color: string; bold: boolean } {
@@ -121,7 +134,7 @@ export function mountAdmin(): void {
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   function restoreDetailsFocus(site: SiteRecord): void {
-    const index = selectedSites.findIndex(candidate => candidate.url === site.url && candidate.datetime === site.datetime);
+    const index = findSiteFocusIndex(selectedSites, site);
     const button = body.querySelector<HTMLButtonElement>(`[data-site-details="${index}"]`);
     (button ?? search).focus({ preventScroll: true });
   }
