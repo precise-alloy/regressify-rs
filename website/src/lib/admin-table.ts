@@ -1,4 +1,4 @@
-import type { SiteRecord } from './admin-api';
+import type { SiteDetailValue, SiteRecord } from './admin-api';
 
 export const siteColumns = [
   ['url', 'Site'], ['datetime', 'Deployed'], ['file_count', 'Files'],
@@ -42,6 +42,35 @@ export function formatSiteValue(key: SiteColumn, value: string | number | null, 
   return String(value);
 }
 
+export function formatSiteDetailValue(key: string, value: SiteDetailValue): string {
+  if (value === null) return 'Not available';
+  if (key === 'datetime' && typeof value === 'string') {
+    const timestamp = new Date(value);
+    return Number.isFinite(timestamp.getTime())
+      ? new Intl.DateTimeFormat(undefined, { dateStyle: 'full', timeStyle: 'long' }).format(timestamp)
+      : value;
+  }
+  if (/(?:^|_)bytes$/.test(key) && typeof value === 'number') return `${formatSiteValue('total_bytes', value)} MiB (${counts.format(value)} bytes)`;
+  if (/(?:^|_)ms$/.test(key) && typeof value === 'number') return `${formatSiteValue('duration_ms', value)} (${counts.format(value)} ms)`;
+  if (typeof value === 'object') return JSON.stringify(value, null, 2);
+  if (siteColumns.some(([column]) => column === key) && typeof value !== 'boolean') return formatSiteValue(key as SiteColumn, value);
+  return String(value);
+}
+
+export function siteDetailEntries(site: SiteRecord): Array<readonly [string, string, SiteDetailValue]> {
+  const labels = new Map([
+    ['original_bytes', 'Original Size'], ['os', 'OS'], ['os_version', 'OS Version'], ['provider', 'Provider'],
+  ]);
+  return [
+    ...siteColumns.map(([key, label]) => [key, key === 'total_bytes' ? 'Size' : label, site[key]] as const),
+    ...Object.entries(site.details ?? {}).map(([key, value]) => [
+      key,
+      labels.get(key) ?? key.replace(/[_\s.-]+/g, ' ').replace(/\b\w/g, character => character.toUpperCase()),
+      value,
+    ] as const),
+  ];
+}
+
 export function selectSites(sites: SiteRecord[], search: string, key: SiteColumn, descending: boolean): SiteRecord[] {
   const query = search.trim().toLowerCase();
   return sites.filter(site => site.url.toLowerCase().includes(query)).sort((left, right) => {
@@ -77,7 +106,13 @@ export function mountAdmin(): void {
   const body = table.tBodies[0]!;
   const empty = root.querySelector<HTMLElement>('#empty-sites')!;
   const partial = root.querySelector<HTMLElement>('#partial-sites')!;
+  const detailsTemplate = root.querySelector<HTMLTemplateElement>('#site-details-button')!;
+  const dialog = root.querySelector<HTMLDialogElement>('#site-details')!;
+  const detailFields = root.querySelector<HTMLElement>('#site-detail-fields')!;
   let sites: SiteRecord[] = [];
+  let selectedSites: SiteRecord[] = [];
+  let detailsSite: SiteRecord | null = null;
+  let detailsTrigger: HTMLButtonElement | null = null;
   let sortKey: SiteColumn = 'datetime';
   let descending = true;
   let loading = false;
@@ -85,8 +120,17 @@ export function mountAdmin(): void {
   let lastUpdated: string | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
+  function restoreDetailsFocus(site: SiteRecord): void {
+    const index = selectedSites.findIndex(candidate => candidate.url === site.url && candidate.datetime === site.datetime);
+    const button = body.querySelector<HTMLButtonElement>(`[data-site-details="${index}"]`);
+    (button ?? search).focus({ preventScroll: true });
+  }
+
   function render(): void {
+    const focusedButton = document.activeElement?.closest<HTMLButtonElement>('[data-site-details]');
+    const focusedSite = focusedButton ? selectedSites[Number(focusedButton.dataset.siteDetails)] : undefined;
     const selected = selectSites(sites, search.value, sortKey, descending);
+    selectedSites = selected;
     count.textContent = search.value.trim() ? `${selected.length} of ${sites.length} sites` : `${sites.length} sites`;
     const ranges = new Map<SiteColumn, { min: number; max: number }>();
     for (const key of ['file_count', 'total_bytes', 'duration_ms'] as const) {
@@ -106,6 +150,7 @@ export function mountAdmin(): void {
       number.textContent = String(index + 1);
       for (const [key] of siteColumns) {
         const cell = row.insertCell();
+        cell.dataset.column = key;
         const value = site[key];
         cell.textContent = formatSiteValue(key, value);
         if (key === 'url') {
@@ -135,9 +180,16 @@ export function mountAdmin(): void {
           }
         }
       }
+      const actions = row.insertCell();
+      actions.className = 'details-column';
+      const button = detailsTemplate.content.firstElementChild!.cloneNode(true) as HTMLButtonElement;
+      button.dataset.siteDetails = String(index);
+      button.setAttribute('aria-label', `Deployment details for ${site.url}`);
+      actions.append(button);
       fragment.append(row);
     }
     body.replaceChildren(fragment);
+    if (focusedSite && !dialog.open) restoreDetailsFocus(focusedSite);
     empty.hidden = !loaded || selected.length !== 0;
     empty.textContent = sites.length ? 'No sites match your search.' : 'No sites available.';
     for (const button of root!.querySelectorAll<HTMLButtonElement>('[data-sort]')) {
@@ -145,6 +197,51 @@ export function mountAdmin(): void {
       button.closest('th')!.setAttribute('aria-sort', active ? (descending ? 'descending' : 'ascending') : 'none');
     }
   }
+
+  body.addEventListener('click', event => {
+    const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-site-details]') : null;
+    if (!button) return;
+    const site = selectedSites[Number(button.dataset.siteDetails)];
+    if (!site) return;
+    detailsTrigger = button;
+    detailsSite = site;
+    const fragment = document.createDocumentFragment();
+    for (const [key, label, value] of siteDetailEntries(site)) {
+      const term = document.createElement('dt');
+      term.textContent = label;
+      const description = document.createElement('dd');
+      description.textContent = formatSiteDetailValue(key, value);
+      if (value !== null && typeof value === 'object') description.className = 'detail-json';
+      if (key === 'url') {
+        description.dir = 'ltr';
+        const url = safeSiteUrl(site.url);
+        if (url) {
+          const link = document.createElement('a');
+          link.href = url.href;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.textContent = site.url;
+          description.replaceChildren(link);
+        }
+      }
+      fragment.append(term, description);
+    }
+    detailFields.replaceChildren(fragment);
+    dialog.showModal();
+  });
+  root.querySelector<HTMLButtonElement>('#close-site-details')!.addEventListener('click', () => dialog.close());
+  dialog.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      dialog.close();
+    }
+  });
+  dialog.addEventListener('close', () => {
+    if (detailsTrigger?.isConnected) detailsTrigger.focus({ preventScroll: true });
+    else if (detailsSite) restoreDetailsFocus(detailsSite);
+    detailsTrigger = null;
+    detailsSite = null;
+  });
 
   function schedule(): void {
     clearTimeout(timer);
