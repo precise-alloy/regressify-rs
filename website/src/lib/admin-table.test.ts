@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { findSiteFocusIndex, formatSiteDetailValue, formatSiteValue, metricStyle, safeSiteUrl, selectSites, siteDetailEntries } from './admin-table';
+import { displaySiteHost, findSiteFocusIndex, formatSiteDetailValue, formatSiteValue, metricStyle, safeSiteUrl, selectSites, siteDetailEntries } from './admin-table';
 import type { SiteRecord } from './admin-api';
 
 test('formats count grouping, binary MiB, elapsed times and duration carries', () => {
@@ -21,6 +21,15 @@ test('allows only HTTP(S) destinations without embedded credentials', () => {
   for (const value of ['javascript:alert(1)', 'data:text/html,<script>', '/relative', 'https://user:pass@example.com']) {
     expect(safeSiteUrl(value)).toBeNull();
   }
+});
+
+test('hides the account workers.dev suffix from displayed hosts only', () => {
+  const host = (value: string) => displaySiteHost(new URL(value));
+  expect(host('https://arjo-live.testerviet-tph.workers.dev/')).toBe('arjo-live');
+  expect(host('https://a.b.acct.WORKERS.dev:8443/x')).toBe('a.b:8443');
+  expect(host('https://acct.workers.dev/')).toBe('acct.workers.dev');
+  expect(host('https://demo.example/')).toBe('demo.example');
+  expect(host('https://workers.dev.example/')).toBe('workers.dev.example');
 });
 
 test('formats deployment details with exact measurements, explicit missing values and a zoned timestamp', () => {

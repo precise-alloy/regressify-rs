@@ -17,6 +17,12 @@ export function safeSiteUrl(value: string): URL | null {
   }
 }
 
+// Worker URLs are `<worker>.<account>.workers.dev`; the account part is noise in the table.
+export function displaySiteHost(url: URL): string {
+  const match = /^(.+)\.[^.]+\.workers\.dev$/i.exec(url.hostname);
+  return match ? `${match[1]}${url.port ? `:${url.port}` : ''}` : url.host;
+}
+
 export function formatSiteValue(key: SiteColumn, value: string | number | null, now = Date.now()): string {
   if (value === null) return '-';
   if (key === 'datetime' && typeof value === 'string') {
@@ -173,7 +179,7 @@ export function mountAdmin(): void {
             link.href = url.href;
             link.target = '_blank';
             link.rel = 'noopener noreferrer';
-            link.textContent = `${url.host}${url.pathname === '/' ? '' : url.pathname}${url.search}${url.hash}`;
+            link.textContent = `${displaySiteHost(url)}${url.pathname === '/' ? '' : url.pathname}${url.search}${url.hash}`;
             link.title = url.href;
             cell.replaceChildren(link);
           }
