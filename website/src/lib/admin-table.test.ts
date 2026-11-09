@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { formatSiteDetailValue, formatSiteValue, metricStyle, safeSiteUrl, selectSites, siteDetailEntries } from './admin-table';
+import { findSiteFocusIndex, formatSiteDetailValue, formatSiteValue, metricStyle, safeSiteUrl, selectSites, siteDetailEntries } from './admin-table';
 import type { SiteRecord } from './admin-api';
 
 test('formats count grouping, binary MiB, elapsed times and duration carries', () => {
@@ -38,6 +38,25 @@ test('formats deployment details with exact measurements, explicit missing value
     dateStyle: 'full', timeStyle: 'long',
   }).format(new Date(timestamp)));
   expect(formatSiteDetailValue('datetime', 'invalid')).toBe('invalid');
+});
+
+test('formats signed detail durations without weakening nonnegative core measurements', () => {
+  expect(formatSiteDetailValue('lag_ms', -5000)).toBe('-0:05 (-5.000 ms)');
+  expect(formatSiteDetailValue('lag_ms', -3_599_500)).toBe('-1:00:00 (-3.599.500 ms)');
+  expect(formatSiteDetailValue('lag_ms', -0.0004)).toBe('-0:00 (-0.0004 ms)');
+  expect(formatSiteDetailValue('lag_ms', 0)).toBe('0:00 (0 ms)');
+  expect(formatSiteDetailValue('lag_ms', 59_500)).toBe('1:00 (59.500 ms)');
+});
+
+test('preserves fractional and unsafe-integer measurements in exact suffixes', () => {
+  expect(formatSiteDetailValue('duration_ms', 1234.56789)).toBe('0:01 (1234.56789 ms)');
+  expect(formatSiteDetailValue('upload_ms', 0.0004)).toBe('0:00 (0.0004 ms)');
+  expect(formatSiteDetailValue('original_bytes', 0.0004)).toBe('0.0 MiB (0.0004 bytes)');
+  expect(formatSiteDetailValue('original_bytes', -0.0004)).toBe('-0.0 MiB (-0.0004 bytes)');
+  for (const value of [1e-9, 0.12345678901234568, Number.MAX_SAFE_INTEGER + 1, 1e21]) {
+    expect(formatSiteDetailValue('upload_ms', value)).toEndWith(`(${String(value)} ms)`);
+    expect(formatSiteDetailValue('original_bytes', value)).toEndWith(`(${String(value)} bytes)`);
+  }
 });
 
 test('lists all additional fields without changing the table columns or requiring new field definitions', () => {
@@ -80,6 +99,24 @@ test('filters full URLs, sorts raw values, keeps missing values last and does no
   expect(selectSites(sites, '/report', 'url', false)).toHaveLength(2);
   expect(selectSites(sites, '', 'datetime', true)[0]).toBe(sites[1]!);
   expect(sites[0]).toBe(base);
+});
+
+test('restores focus only for a unique deployment identity after replacement or reordering', () => {
+  const site: SiteRecord = {
+    url: 'https://example.com/', datetime: '2026-11-09T10:30:45Z', file_count: 1, total_bytes: 0, duration_ms: 0,
+    details: { provider: 'cloudflare' },
+  };
+  const differentUrl = { ...site, url: 'https://other.example/' };
+  const differentTime = { ...site, datetime: '2026-11-08T10:30:45Z' };
+  const replacement = { ...site, file_count: 99 };
+  expect(findSiteFocusIndex([differentUrl, replacement, differentTime], site)).toBe(1);
+  expect(findSiteFocusIndex([replacement, differentUrl], site)).toBe(0);
+  expect(findSiteFocusIndex([], site)).toBe(-1);
+  expect(findSiteFocusIndex([differentUrl, differentTime], site)).toBe(-1);
+  expect(findSiteFocusIndex([replacement, { ...site, details: { provider: 'netlify' } }], site)).toBe(-1);
+  expect(findSiteFocusIndex([site, { ...site }], site)).toBe(-1);
+  expect(findSiteFocusIndex([{ ...site, datetime: null }], { ...site, datetime: null })).toBe(0);
+  expect(findSiteFocusIndex([{ ...site, datetime: null }, { ...site, datetime: null }], { ...site, datetime: null })).toBe(-1);
 });
 
 test('blends metric endpoints, keeps constant columns neutral and includes exact bold boundary', () => {

@@ -3,6 +3,20 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Admin Deployment Details Review (2026-11-09)
+
+- Resolved in source: additional field names could amplify a bounded upstream
+  response into an oversized JSON response. The [admin feed](website/src/lib/admin-api.ts)
+  now serializes rows individually and enforces a 2 MiB UTF-8 output budget before
+  joining them. Regression tests cover amplification, Unicode/escaping, the exact
+  byte limit, and rejection one byte over with sanitized errors.
+- Resolved: [detail formatting](website/src/lib/admin-table.ts) preserves fractional
+  measurement suffixes and formats signed durations without changing core numeric
+  validation. Regression cases cover negative, tiny fractional, and large values.
+- Resolved: focus restoration falls back to search when a refreshed URL/timestamp
+  identity is ambiguous, rather than choosing an unrelated first row. Tests cover
+  duplicates, missing rows, reordered replacements, and null timestamps.
+
 ## Release Cache Runtime Isolation (2026-11-05)
 
 - Resolved in source: manual Windows builds could seed the tagged static-runtime

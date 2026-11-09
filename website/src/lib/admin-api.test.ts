@@ -117,6 +117,45 @@ describe('admin site feed', () => {
     expect(await (await serveSites(request(), env, failed)).text()).not.toContain(env.POSTHOG_API_ENDPOINT);
   });
 
+  test('rejects expanded output from a small upstream body without leaking its contents', async () => {
+    const data = {
+      columns: [...columns, 'x'.repeat(2048)],
+      results: Array.from({ length: 1024 }, () => [...row, null]),
+    };
+    expect(new TextEncoder().encode(JSON.stringify(data)).byteLength).toBeLessThan(2 * 1024 * 1024);
+    const response = await serveSites(request(), env, result(data));
+    expect(response.status).toBe(502);
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(await response.json()).toEqual({ error: 'Unable to load statistics. Please try again later.' });
+  });
+
+  test('bounds expanded UTF-8 output including JSON escaping and the response envelope', async () => {
+    const limit = 2 * 1024 * 1024;
+    const key = `measurement_${'\u00e9'.repeat(1024)}`;
+    const seed = '\u0000"\\\u{1f600}';
+    const fixture = (padding: number) => ({
+      columns: [...columns, key],
+      results: [[...row, seed + 'x'.repeat(padding)], [...row, seed]],
+      hasMore: true,
+    });
+    const baseline = await serveSites(request(), env, result(fixture(0)));
+    expect(baseline.status).toBe(200);
+    const padding = limit - (await baseline.arrayBuffer()).byteLength;
+    const exact = fixture(padding);
+    expect(new TextEncoder().encode(JSON.stringify(exact)).byteLength).toBeLessThan(limit);
+    const accepted = await serveSites(request(), env, result(exact));
+    expect(accepted.status).toBe(200);
+    const bytes = await accepted.arrayBuffer();
+    expect(bytes.byteLength).toBe(limit);
+    const body = JSON.parse(new TextDecoder().decode(bytes));
+    expect(body.sites[0].details[key]).toBe(seed + 'x'.repeat(padding));
+    expect(body.sites[1].details[key]).toBe(seed);
+    expect(body.hasMore).toBe(true);
+    const oversized = fixture(padding + 1);
+    expect(new TextEncoder().encode(JSON.stringify(oversized)).byteLength).toBeLessThan(limit);
+    expect((await serveSites(request(), env, result(oversized))).status).toBe(502);
+  });
+
   test('routes the protected feed, uncached admin assets, public assets and MCP independently', async () => {
     expect(HEADER_LINKS.find(link => link.label === 'Login')?.href).toBe('/admin/');
     let assetCalls = 0;

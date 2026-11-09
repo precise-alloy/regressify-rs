@@ -29,15 +29,37 @@ function isDetailValue(value: unknown, depth = 0): value is SiteDetailValue {
 }
 
 function reply(body: unknown, status = 200, extra: Record<string, string> = {}): Response {
-  return Response.json(body, {
+  return jsonReply(JSON.stringify(body), status, extra);
+}
+
+function jsonReply(body: string, status = 200, extra: Record<string, string> = {}): Response {
+  return new Response(body, {
     status,
     headers: {
+      'Content-Type': 'application/json',
       'Cache-Control': 'private, no-store',
       'X-Content-Type-Options': 'nosniff',
       'X-Robots-Tag': 'noindex, nofollow',
       ...extra,
     },
   });
+}
+
+function replySites(data: ReturnType<typeof parseSites>): Response {
+  const encoder = new TextEncoder();
+  const parts = ['{"sites":['];
+  const suffix = `],"hasMore":${JSON.stringify(data.hasMore)},"fetchedAt":${JSON.stringify(new Date().toISOString())}}`;
+  let length = encoder.encode(parts[0]! + suffix).byteLength;
+  // Column names occur once upstream but repeat per row in the output.
+  for (const [index, site] of data.sites.entries()) {
+    const serialized = JSON.stringify(site);
+    length += encoder.encode(serialized).byteLength + (index ? 1 : 0);
+    if (length > maxBytes) throw new Error('Response too large');
+    if (index) parts.push(',');
+    parts.push(serialized);
+  }
+  parts.push(suffix);
+  return jsonReply(parts.join(''));
 }
 
 export function parseSites(data: unknown): { sites: SiteRecord[]; hasMore: boolean } {
@@ -133,7 +155,7 @@ export async function serveSites(request: Request, env: AdminEnv, fetcher: Admin
       throw new Error('Upstream failure');
     }
     stage = 'validation';
-    return reply({ ...parseSites(await readResult(response)), fetchedAt: new Date().toISOString() });
+    return replySites(parseSites(await readResult(response)));
   } catch (error) {
     console.warn('Admin feed unavailable', { stage, kind: error instanceof Error ? error.name : 'unknown' });
     return reply({ error: 'Unable to load statistics. Please try again later.' }, 502);
