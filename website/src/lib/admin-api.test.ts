@@ -1,29 +1,58 @@
 import { describe, expect, spyOn, test } from 'bun:test';
 import { HEADER_LINKS } from '../config/site';
-import { parseSites, serveSites, type AdminFetch } from './admin-api';
+import { parseSites, serveSites, type AdminFetch, type SiteDetailValue } from './admin-api';
 import { routeWebsite } from './website-handler';
 
 const columns = ['url', 'datetime', 'file_count', 'total_bytes', 'duration_ms'];
-const row = ['https://demo.example.com/report/', '2026-10-23T10:00:00Z', 1200, 1048576, 12500];
+const row = ['https://demo.example.com/report/', '2026-10-23T10:00:00Z', 1200, 1048576, 12500] as const;
 const env = { POSTHOG_API_ENDPOINT: 'https://analytics.example.com/secret-endpoint', POSTHOG_API_TOKEN: 'private-token' };
 const request = () => new Request('https://regressify.eshn.dev/admin/api/sites');
 const result = (data: unknown): AdminFetch => async () => Response.json(data);
 
 describe('admin site feed', () => {
-  test('maps reordered columns and strips extra query data', async () => {
+  test('maps reordered columns, preserves deployment details and strips query metadata', async () => {
     const response = await serveSites(request(), env, result({
-      columns: ['private', ...columns.toReversed()], results: [['hidden', ...row.toReversed()]],
+      columns: ['original_bytes', 'os', 'os_version', 'provider', ...columns.toReversed()],
+      results: [[2097152, 'windows', '11', 'cloudflare', ...row.toReversed()]],
       query: env.POSTHOG_API_TOKEN, metadata: env.POSTHOG_API_ENDPOINT, hasMore: true,
     }));
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.sites).toEqual([{ url: row[0], datetime: row[1], file_count: 1200, total_bytes: 1048576, duration_ms: 12500 }]);
+    expect(body.sites).toEqual([{
+      url: row[0], datetime: row[1], file_count: 1200, total_bytes: 1048576, duration_ms: 12500,
+      details: { original_bytes: 2097152, os: 'windows', os_version: '11', provider: 'cloudflare' },
+    }]);
     expect(body.hasMore).toBe(true);
     expect(Number.isFinite(Date.parse(body.fetchedAt))).toBe(true);
     expect(JSON.stringify(body)).not.toContain('private');
     expect(JSON.stringify(body)).not.toContain('secret-endpoint');
     expect(response.headers.get('Cache-Control')).toBe('private, no-store');
     expect(response.headers.get('Access-Control-Allow-Origin')).toBeNull();
+  });
+
+  test('preserves future JSON fields, nulls and prototype-like names without changing core fields', () => {
+    const extras = [' Future_Field ', 'enabled', 'attempt', 'metadata', '__proto__', 'constructor', 'details'];
+    const values: SiteDetailValue[] = [null, false, 0, { tags: ['preview', 1], compression: { saved: true } }, { safe: true }, 'value', 'upstream'];
+    const parsed = parseSites({ columns: [...columns, ...extras], results: [[...row, ...values]] });
+    expect(parsed.sites[0]).toEqual({
+      url: row[0], datetime: row[1], file_count: 1200, total_bytes: 1048576, duration_ms: 12500,
+      details: Object.fromEntries(extras.map((key, index) => [key.trim().toLowerCase(), values[index]!])),
+    });
+    expect(Object.getPrototypeOf(parsed.sites[0])).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).safe).toBeUndefined();
+  });
+
+  test.each([undefined, Infinity, NaN, () => {}, new Date(), { nested: Infinity }])('rejects non-JSON detail values %#', value => {
+    expect(() => parseSites({ columns: [...columns, 'future'], results: [[...row, value]] })).toThrow();
+  });
+
+  test('bounds nested detail values and rejects blank or duplicate additional columns', () => {
+    let nested: unknown = 'value';
+    for (let depth = 0; depth < 17; depth++) nested = [nested];
+    expect(() => parseSites({ columns: [...columns, 'future'], results: [[...row, nested]] })).toThrow();
+    for (const extra of [[' '], ['os', ' OS ']]) {
+      expect(() => parseSites({ columns: [...columns, ...extra], results: [] })).toThrow();
+    }
   });
 
   test('uses a fixed server endpoint and POST body without forwarding client inputs', async () => {

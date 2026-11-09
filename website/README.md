@@ -246,8 +246,15 @@ The page is excluded from the sitemap and marked noindex. Admin responses use
 never returned. The upstream URL must use HTTPS, redirects are refused, requests
 time out after 15 seconds, and results are limited to 2 MiB and 10,000 rows.
 
-The query must return unique columns `url`, `datetime`, `file_count`,
-`total_bytes`, `duration_ms` in any order. Additional columns are omitted.
+The query must return columns `url`, `datetime`, `file_count`,
+`total_bytes`, `duration_ms` in any order. Column names are trimmed, lowercased,
+and must be nonempty and unique. Additional result columns are preserved in each
+site's `details` object and appear automatically in the details dialog, not as
+table columns. This includes `original_bytes`, `os`, `os_version`, `provider`,
+and future fields without UI changes. Detail values support strings, finite
+numbers, booleans, null, arrays, and objects nested up to 16 levels; structured
+values are displayed as JSON text, never HTML. Only returned result columns are
+included, not upstream query metadata. Keep sensitive data out of query columns.
 Measurements must be nonnegative finite numbers or null; dates must be parseable
 strings or null. The table supports full-URL search, raw-value column sorting,
 manual refresh, and automatic refresh every 60 seconds while visible. Failed
@@ -257,6 +264,16 @@ The desktop-only `#` column numbers the currently filtered and sorted rows from 
 Size is binary MiB; relative dates have full local timestamp tooltips. Metrics
 blend green/neutral/red over each complete returned column; values at or above
 75% of its maximum are bold. Only HTTP(S) URLs without credentials become links.
+
+Each row has an info button that opens deployment details with the full URL,
+local timestamp including its timezone, and exact byte/millisecond measurements.
+Missing values are labeled "Not available". Details remain a snapshot while the
+feed refreshes. Close with the close button or Escape; focus returns to the row,
+or the search field if that deployment is no longer listed.
+Long URL links are limited to two lines in the feed; the full URL is available
+in details. On screens below 768px, the table shows Site, Deployed, and the details button
+without horizontal scrolling. Files, Size, and Duration remain available in the
+details dialog, which appears as a bottom sheet on mobile.
 
 For local end-to-end development, generate the ignored MCP catalog from the
 repository root (this does not deploy):

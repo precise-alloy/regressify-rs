@@ -5,16 +5,28 @@ export interface AdminEnv {
 
 export type AdminFetch = (input: string, init?: RequestInit) => Promise<Response>;
 
+export type SiteDetailValue = string | number | boolean | null | SiteDetailValue[] | { [key: string]: SiteDetailValue };
+
 export interface SiteRecord {
   url: string;
   datetime: string | null;
   file_count: number | null;
   total_bytes: number | null;
   duration_ms: number | null;
+  details?: Record<string, SiteDetailValue>;
 }
 
 const fields = ['url', 'datetime', 'file_count', 'total_bytes', 'duration_ms'] as const;
 const maxBytes = 2 * 1024 * 1024;
+
+function isDetailValue(value: unknown, depth = 0): value is SiteDetailValue {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (depth >= 16 || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.every(item => isDetailValue(item, depth + 1));
+  return (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null) &&
+    Object.values(value).every(item => isDetailValue(item, depth + 1));
+}
 
 function reply(body: unknown, status = 200, extra: Record<string, string> = {}): Response {
   return Response.json(body, {
@@ -35,11 +47,13 @@ export function parseSites(data: unknown): { sites: SiteRecord[]; hasMore: boole
     !Array.isArray(results) || results.length > 10_000 ||
     (hasMore !== undefined && typeof hasMore !== 'boolean')) throw new Error('Invalid result');
   const normalized = columns.map(column => column.trim().toLowerCase());
+  if (normalized.some(column => !column) || new Set(normalized).size !== normalized.length) throw new Error('Invalid columns');
   const indexes = fields.map(field => {
     const index = normalized.indexOf(field);
     if (index === -1 || normalized.lastIndexOf(field) !== index) throw new Error('Invalid columns');
     return index;
   });
+  const additional = normalized.map((key, index) => ({ key, index })).filter(({ key }) => !fields.some(field => field === key));
   const sites = results.map((row: unknown): SiteRecord => {
     if (!Array.isArray(row) || row.length !== columns.length) throw new Error('Invalid row');
     const [url, datetime, fileCount, totalBytes, durationMs] = indexes.map(index => row[index]);
@@ -52,7 +66,15 @@ export function parseSites(data: unknown): { sites: SiteRecord[]; hasMore: boole
         throw new Error('Invalid measurement');
       }
     }
-    return { url, datetime, file_count: fileCount, total_bytes: totalBytes, duration_ms: durationMs };
+    const details = Object.fromEntries(additional.map(({ key, index }) => {
+      const value = row[index];
+      if (!isDetailValue(value)) throw new Error('Invalid detail');
+      return [key, value];
+    }));
+    return {
+      url, datetime, file_count: fileCount, total_bytes: totalBytes, duration_ms: durationMs,
+      ...(additional.length ? { details } : {}),
+    };
   });
   return { sites, hasMore: hasMore === true };
 }

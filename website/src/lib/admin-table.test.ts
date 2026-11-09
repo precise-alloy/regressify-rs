@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { formatSiteValue, metricStyle, safeSiteUrl, selectSites } from './admin-table';
+import { formatSiteDetailValue, formatSiteValue, metricStyle, safeSiteUrl, selectSites, siteDetailEntries } from './admin-table';
 import type { SiteRecord } from './admin-api';
 
 test('formats count grouping, binary MiB, elapsed times and duration carries', () => {
@@ -21,6 +21,54 @@ test('allows only HTTP(S) destinations without embedded credentials', () => {
   for (const value of ['javascript:alert(1)', 'data:text/html,<script>', '/relative', 'https://user:pass@example.com']) {
     expect(safeSiteUrl(value)).toBeNull();
   }
+});
+
+test('formats deployment details with exact measurements, explicit missing values and a zoned timestamp', () => {
+  expect(formatSiteDetailValue('url', 'https://example.com/report/?id=1#result')).toBe('https://example.com/report/?id=1#result');
+  expect(formatSiteDetailValue('file_count', 1234)).toBe('1.234');
+  expect(formatSiteDetailValue('total_bytes', 1048576)).toBe('1.0 MiB (1.048.576 bytes)');
+  expect(formatSiteDetailValue('total_bytes', 0)).toBe('0.0 MiB (0 bytes)');
+  expect(formatSiteDetailValue('duration_ms', 59_500)).toBe('1:00 (59.500 ms)');
+  expect(formatSiteDetailValue('duration_ms', 0)).toBe('0:00 (0 ms)');
+  for (const key of ['datetime', 'file_count', 'total_bytes', 'duration_ms'] as const) {
+    expect(formatSiteDetailValue(key, null)).toBe('Not available');
+  }
+  const timestamp = '2026-10-23T12:34:56Z';
+  expect(formatSiteDetailValue('datetime', timestamp)).toBe(new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'full', timeStyle: 'long',
+  }).format(new Date(timestamp)));
+  expect(formatSiteDetailValue('datetime', 'invalid')).toBe('invalid');
+});
+
+test('lists all additional fields without changing the table columns or requiring new field definitions', () => {
+  const site: SiteRecord = {
+    url: 'https://example.com/', datetime: null, file_count: 1, total_bytes: 0, duration_ms: 0,
+    details: {
+      original_bytes: 2097152, os: 'windows', os_version: '11', provider: 'cloudflare',
+      future_field: { enabled: false }, constructor: 'value',
+    },
+  };
+  expect(siteDetailEntries(site).map(([key, label]) => [key, label])).toEqual([
+    ['url', 'Site'], ['datetime', 'Deployed'], ['file_count', 'Files'], ['total_bytes', 'Size'], ['duration_ms', 'Duration'],
+    ['original_bytes', 'Original Size'], ['os', 'OS'], ['os_version', 'OS Version'], ['provider', 'Provider'],
+    ['future_field', 'Future Field'], ['constructor', 'Constructor'],
+  ]);
+  expect(siteDetailEntries({ ...site, details: undefined })).toHaveLength(5);
+  expect(siteDetailEntries(site).at(-2)?.[2]).toEqual({ enabled: false });
+});
+
+test('formats new and future detail types without hiding falsy values or interpreting markup', () => {
+  expect(formatSiteDetailValue('original_bytes', 2097152)).toBe('2.0 MiB (2.097.152 bytes)');
+  expect(formatSiteDetailValue('upload_ms', 1000)).toBe('0:01 (1.000 ms)');
+  expect(formatSiteDetailValue('os_version', '11')).toBe('11');
+  expect(formatSiteDetailValue('provider', '<img src=x onerror=alert(1)>')).toBe('<img src=x onerror=alert(1)>');
+  expect(formatSiteDetailValue('enabled', false)).toBe('false');
+  expect(formatSiteDetailValue('retry_count', 0)).toBe('0');
+  expect(formatSiteDetailValue('ratio', 0.123456789)).toBe('0.123456789');
+  expect(formatSiteDetailValue('missing', null)).toBe('Not available');
+  expect(formatSiteDetailValue('empty', '')).toBe('');
+  expect(formatSiteDetailValue('metadata', { tags: ['preview', 1], enabled: true })).toBe(JSON.stringify({ tags: ['preview', 1], enabled: true }, null, 2));
+  expect(formatSiteDetailValue('tags', [])).toBe('[]');
 });
 
 test('filters full URLs, sorts raw values, keeps missing values last and does not mutate the feed', () => {
