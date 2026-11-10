@@ -25,6 +25,12 @@ test('allows only HTTP(S) destinations without embedded credentials', () => {
 
 test('hides the account workers.dev suffix from displayed hosts only', () => {
   const host = (value: string) => displaySiteHost(new URL(value));
+  expect(host('https://happy-sea-0a1b2c3d4.5.azurestaticapps.net/report/')).toBe('happy-sea-0a1b2c3d4.5');
+  expect(host('https://my-site.NETLIFY.app/')).toBe('my-site');
+  expect(host('https://deploy-preview-1--my-site.netlify.app:8443/')).toBe('deploy-preview-1--my-site:8443');
+  expect(host('https://netlify.app/')).toBe('netlify.app');
+  expect(host('https://azurestaticapps.net/')).toBe('azurestaticapps.net');
+  expect(host('https://my-site.netlify.app.example/')).toBe('my-site.netlify.app.example');
   expect(host('https://arjo-live.testerviet-tph.workers.dev/')).toBe('arjo-live');
   expect(host('https://a.b.acct.WORKERS.dev:8443/x')).toBe('a.b:8443');
   expect(host('https://acct.workers.dev/')).toBe('acct.workers.dev');

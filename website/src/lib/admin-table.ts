@@ -17,10 +17,16 @@ export function safeSiteUrl(value: string): URL | null {
   }
 }
 
-// Worker URLs are `<worker>.<account>.workers.dev`; the account part is noise in the table.
+// Provider suffixes are noise in the table. Worker URLs are `<worker>.<account>.workers.dev`,
+// so the account label goes too; the other providers only hide their shared domain.
+const hostSuffixes = [/^(.+)\.[^.]+\.workers\.dev$/i, /^(.+)\.azurestaticapps\.net$/i, /^(.+)\.netlify\.app$/i];
+
 export function displaySiteHost(url: URL): string {
-  const match = /^(.+)\.[^.]+\.workers\.dev$/i.exec(url.hostname);
-  return match ? `${match[1]}${url.port ? `:${url.port}` : ''}` : url.host;
+  for (const pattern of hostSuffixes) {
+    const match = pattern.exec(url.hostname);
+    if (match) return `${match[1]}${url.port ? `:${url.port}` : ''}`;
+  }
+  return url.host;
 }
 
 export function formatSiteValue(key: SiteColumn, value: string | number | null, now = Date.now()): string {
