@@ -127,8 +127,8 @@ function Test-DeploymentFlows {
     Invoke-Control 'smoke.tests.json'
     Wait-Control 'Run Suite Reference' | Out-Null
     Invoke-Control 'Deploy'
-    Wait-Control 'Yes, deploy only these 1 of 2 suites' | Out-Null
-    if (Test-ControlInvokable 'Deploy selected reports') { throw 'Subset deployment must require confirmation.' }
+    Wait-Control 'Replace the whole site with the selection' | Out-Null
+    if (Test-ControlInvokable 'Deploy selected reports') { throw 'An unreadable site must not be updated, or replaced without confirmation.' }
     Capture-Window 'deploy-partial-selection'
     foreach ($dimensions in @(@(1000, 640), @(1600, 1000), @(1080, 720))) {
         [RegressifySmokeNative]::SetWindowPos($script:window, [IntPtr]::Zero, $screen.Left + 20, $screen.Top + 20, $dimensions[0], $dimensions[1], 0x0040) | Out-Null
@@ -143,8 +143,8 @@ function Test-DeploymentFlows {
             if ($siteBounds.Top -ne $reportBounds.Top -or $siteBounds.Left -lt $reportBounds.Right) { throw 'Open Site must be beside Open Report.' }
             Capture-Window ('deploy-runs-links-' + $theme.ToLowerInvariant() + '-' + $captureSize)
             Invoke-Control 'Deploy'
-            Wait-Control 'Yes, deploy only these 1 of 2 suites' | Out-Null
-            if (Test-ControlInvokable 'Deploy selected reports') { throw 'Resizing must not bypass subset deployment confirmation.' }
+            Wait-Control 'Replace the whole site with the selection' | Out-Null
+            if (Test-ControlInvokable 'Deploy selected reports') { throw 'Resizing must not bypass the replacement confirmation.' }
             $link = Wait-Control 'Open deployed site'
             if ($link.Current.ControlType -ne [System.Windows.Automation.ControlType]::Hyperlink) { throw 'The resized deployed URL must remain a native link.' }
             $linkBounds = $link.Current.BoundingRectangle
@@ -157,11 +157,15 @@ function Test-DeploymentFlows {
             if ((Read-ControlText 'Azure environment') -cne 'preview') { throw 'Resizing changed the saved Azure environment.' }
             Capture-Window ('deploy-azure-' + $theme.ToLowerInvariant() + '-' + $captureSize)
             Invoke-Control 'Cancel edit'
-            Wait-Control 'Yes, deploy only these 1 of 2 suites' | Out-Null
+            Wait-Control 'Replace the whole site with the selection' | Out-Null
         }
     }
-    Invoke-Control 'Yes, deploy only these 1 of 2 suites'
-    if (-not (Test-ControlInvokable 'Deploy selected reports')) { throw 'Confirmed deployment must be invokable.' }
+    Invoke-Control 'Replace the whole site with the selection'
+    Wait-Control 'Replaces everything on QA reports; the suites it serves are unknown' | Out-Null
+    if (Test-ControlInvokable 'Deploy selected reports') { throw 'Replacing an unknown site must require confirmation.' }
+    Invoke-Control 'I understand everything else on the site will be removed'
+    Wait-WindowState { Test-ControlInvokable 'Deploy selected reports' } 'Confirmed replacement must be invokable.'
+    Capture-Window 'deploy-replace-confirmed'
     [RegressifySmokeCredentials]::Remove($credentialName)
     Invoke-Control 'Deploy selected reports'
     Wait-Control 'Deployment failed' | Out-Null
@@ -275,8 +279,9 @@ function Test-DeploymentFlows {
     Invoke-Control 'smoke.tests.json'
     Wait-Control 'Run Suite Reference' | Out-Null
     Invoke-Control 'Deploy'
-    Wait-Control 'Yes, deploy only these 1 of 2 suites' | Out-Null
-    Invoke-Control 'Yes, deploy only these 1 of 2 suites'
+    Invoke-Control 'Replace the whole site with the selection'
+    Invoke-Control 'I understand everything else on the site will be removed'
+    Wait-WindowState { Test-ControlInvokable 'Deploy selected reports' } 'Confirmed replacement must be invokable.'
     Invoke-Control 'Deploy selected reports'
     Wait-Control 'Deployment failed' | Out-Null
     Wait-Control 'Report deployment' | Out-Null
@@ -298,5 +303,5 @@ function Test-DeploymentFlows {
     Wait-Control 'No deployment targets' | Out-Null
     if ([RegressifySmokeCredentials]::ExistsLocally($credentialName)) { throw 'Netlify credential was not removed with its target.' }
     Invoke-Control 'Close'
-    Write-Output 'Azure and Netlify provider selection, credentials, restart persistence, adjacent saved-site links, selectable deployment logs, subset guards, and safe missing-token failures passed without remote deployment.'
+    Write-Output 'Azure and Netlify provider selection, credentials, restart persistence, adjacent saved-site links, selectable deployment logs, Update/Replace guards for unreadable sites, and safe missing-token failures passed without remote deployment.'
 }

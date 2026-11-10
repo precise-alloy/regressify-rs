@@ -560,8 +560,8 @@ In **Runs**, **Open Site** appears beside **Open Report** in the toolbar and on
 each published suite's row. It opens the most recently deployed site containing
 that suite at `/suites/<suite-id>`. With multiple suites selected, the toolbar
 opens the newest site containing all of them. Publication membership survives
-restarts and other runs; redeploying a subset replaces the previous membership
-for that site. Failed or cancelled deployments preserve it. Destination changes,
+restarts and other runs. It lists every suite the site serves after a deployment,
+including suites an update kept; replacing the site replaces it. Failed or cancelled deployments preserve it. Destination changes,
 target removal, or successful private publication remove the affected links.
 Older saved URLs without suite membership remain available in the deployment
 dialog and gain suite-specific links after the next successful report deployment.
@@ -636,11 +636,55 @@ tokens and does not delete the hosted site. Targets created with the old environ
 their names and Azure environments; edit each target and enter its token once
 to enable deployment.
 
-At least one suite must be selected. When only a subset is selected, the dialog
-lists it and requires explicit confirmation that excluding the other suites is
-intentional. Individual scenario selections do not narrow deployment: the full
-latest report of each selected suite is published. Unsaved changes use the normal
-Save/Cancel guard, and a changed suite catalog requires selection review again.
+Report deployments have two modes:
+
+- **Update selected suites, keep the others on the site** (default) publishes the
+  selected suites and leaves every other suite the site serves untouched, including
+  suites whose local results were cleaned up.
+- **Replace the whole site with the selection** makes the site exactly the selected
+  suites. When that removes suites, the dialog shows how many in red and requires
+  the confirmation checkbox.
+
+The dialog summarizes the change in counts that stay readable for any number of
+suites: suites to update (changed locally since they were published, or every
+selected suite when replacing), add (not on the site), and skip (no changes), plus
+the suites kept on the site. When updating
+on Netlify or Cloudflare, a selected suite whose output files are unchanged since
+this workspace published it, and which the site still serves exactly as published,
+is kept by hash rather than regenerated, staged, and hashed again; the deployment
+log lists these suites. Replace rebuilds every selected suite, so it is also the
+way to start over when a kept copy cannot be used.
+Each count (Update, Add, Skip, Remove, Kept) is a button that lists that group's
+suites by display name, one group at a time, in a list of at most six rows that
+scrolls for longer groups; groups of more than eight suites add a search field and
+a "Showing X of Y" count. The dialog body has a bounded height and scrolls, so its
+buttons stay in the window. Suites on the site that no longer exist in the workspace
+are counted separately and can be removed from the Kept list. Suites this workspace published are compared by their
+recorded inputs, exactly as the deployment compares them; others (published from
+another machine or before records existed) compare run IDs. Individual scenario selections do not narrow
+deployment: the full latest report of each selected suite is published. Unsaved
+changes use the normal Save/Cancel guard, and a changed suite catalog requires
+selection review again.
+
+Below its title, the **Test suites** list names the site its statuses describe
+(**Site: _target_**, which opens Deploy to choose another target) with how many
+suites are deployed there and, when some are, a link to the outdated ones. Each
+suite's second line adds its deployment status in words after its run result:
+**Deployed** (unchanged locally since it was published), **Newer than site**
+(local results changed, including an approval without a new run), or **Not
+deployed**. Statuses are compared again after each run, approval, or cleanup,
+without reading the site. Nothing is shown while the site's suites
+are unknown. The **Outdated** filter and the header link show only suites with
+newer local results, and **All** selects the suites the current filter and search
+show, so filtering by Outdated and pressing All selects every outdated suite. Right-click a published suite and choose **Remove from site: *target*...** to open
+the Deploy dialog for removing just that suite while keeping the others. When the
+right-clicked suite is selected, the item reads **Remove *N* selected suites from
+site: *target*...** and removes every selected suite the site serves; selected
+suites that are not deployed are ignored. The dialog refuses a removal that would
+leave the site empty. For a removal alone, its button reads **Remove *N***. The list
+uses the last state published from this workspace; the site itself is read when
+the Deploy dialog opens, when its target changes, with its refresh button, and
+after each deployment, never in the background.
 
 Deploy validates the token, runs the bundled `snapshot` command for the selected
 suites, and stages the snapshot entry page, versioned JSON, referenced images,
@@ -653,7 +697,93 @@ Snapshot generation also creates fast, deterministic small PNG previews for suit
 browsing. Staging includes those versioned preview dependencies alongside original
 images; comparison and downloads retain full resolution. Preview generation does
 not resize source captures or run expensive image optimization. Repeating it with
-identical inputs produces identical preview bytes and cache versions.
+identical inputs produces identical preview bytes and cache versions. Images whose
+bytes did not change since the previous snapshot reuse their published previews
+instead of being decoded again; see [snapshot preview reuse](commands.md#snapshot-site).
+
+### Site State and Unchanged Deployments
+
+Every report deployment publishes `/_snapshot/deployment.json` with the site. It
+lists each suite the site serves with its summary, capture run, and files, and the
+hash each provider knows each file by. It holds only what the site already exposes:
+suite IDs, paths, hashes, sizes, run IDs, counts, and versions, never workspace
+paths, target names, or credentials. It is served with `Cache-Control: no-cache`,
+and Regressify reads it with a unique query. Because it is published together with
+the reports, it always describes the live site, including Netlify rollbacks and
+deployments from other machines.
+
+An update reads that file first and keeps the other suites without needing their
+local files: Netlify and Cloudflare receive the kept files by hash and upload only
+the selected suites' new content. Azure Static Web Apps accepts only complete
+packages, so an update there re-uploads the suites it keeps (unselected suites, and
+selected ones unchanged since this workspace published them) from this workspace's
+last generated report instead of rebuilding them. Every reused file is checked
+against the size and SHA-256 hash the site state records, before generation; a
+suite whose local copy is missing or different is regenerated from local results,
+and an update fails with a request to replace the site when those are missing.
+Whatever the outcome, the reused files are put back into the local report (which
+then lists the staged suites once staging completed), so the next update can reuse
+them again. Sites published before site
+states existed are read from their report manifest and also regenerate kept suites
+from local results. When the site cannot be read (network failure, private site,
+or an access gateway), the last state published from this workspace is used with a
+warning; without one, only Replace is possible. A site this workspace published to
+(including private Cloudflare Workers without a URL) that now serves no report, or
+whose suites are unknown, is never treated as empty: Replace requires confirmation
+there, and the dialog's counts only use a site read for the dialog's own target.
+Updates cannot remove every suite
+from a site, and a site whose report data format differs from this Regressify must
+be replaced. Two people deploying to one site at the same moment are not detected;
+the later deployment wins. When Cloudflare must optimize images to fit its budget,
+the published state is rewritten to name the optimized files and their refreshed
+versions, so later updates keep exactly what the Worker received.
+
+Each selected suite is also compared on its own. After a deployment, Regressify
+records, beside the target settings, each published suite's output file metadata
+(as in step 1 below) together with a digest of the suite exactly as the site serves
+it. These records hold machine-local file times and are never published. A later
+Netlify or Cloudflare update keeps a selected suite whose metadata matches and
+which the site still serves with the same digest, so only changed suites are
+generated and uploaded. A suite republished from elsewhere, an approval, or a new
+run regenerates it. Records start with the first deployment after upgrading, are
+ignored when unreadable, and are forgotten with the target's destination. Azure
+re-uploads unchanged suites from verified local copies instead. Replace and
+**Deploy anyway** regenerate every selected suite.
+
+Deploy recognizes unchanged sites in two steps, so nothing is uploaded when the
+target already serves the same reports:
+
+1. Before generating anything, it compares the selected suites' output files (paths,
+   sizes, and modification times), the report title/heading/subheading, the
+   Regressify build, and the target's site settings with the inputs recorded for
+   the target's last successful deployment. A match skips report generation,
+   staging, and upload; this check takes milliseconds.
+1. Otherwise it generates and stages the reports and compares the staged site with
+   the last deployment, ignoring generation timestamps. This catches changed inputs
+   that produce the same reports, such as an identical rerun, and remembers those
+   inputs for the next early check.
+
+Target settings that shape the hosted site are part of both comparisons: provider,
+Azure environment, Netlify site, and Cloudflare account, Worker, routing, HTML
+handling, compatibility date, and exclusions. When nothing changed, Activity reports
+**Site already up to date**, keeps **Open Site**, and offers **Deploy anyway**.
+Deploy anyway repeats the same target and suites and publishes without either
+comparison, for example after the site was changed from another workspace or
+machine, which this workspace cannot detect. Any approval, run, metadata edit, or
+retention cleanup in a selected suite counts as a change, even if it restores
+identical bytes; the content comparison then decides. Capture log journals in
+`_diagnostics` are final once their run completes and are not compared.
+
+A skipped deployment does not change the saved URL, suite links, or analytics.
+The first deployment after upgrading, the first deployment to a target, and the
+first deployment after any failed, stopped, or interrupted attempt always publish:
+the recorded content is forgotten before each upload starts, so even an app crash
+cannot leave a stale match, while Open Site links are kept. Destination changes and
+landing-page deployments to the target also forget it. If the target was edited
+or removed after the deployment was prepared, including before **Deploy anyway**,
+the deployment stops before uploading; open Deploy again. Netlify and Cloudflare
+already upload only new file contents when something changed; Azure Static Web Apps
+has no partial upload, so any change still uploads the whole staged report there.
 
 Deployment staging, optimization copies, and upload packages stay inside an
 operation-owned `.staging` container under the selected output folder. Removal

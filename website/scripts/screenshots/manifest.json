@@ -1,0 +1,663 @@
+[
+  {
+    "file": "open-workspace",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Open workspace@1"
+      }
+    ],
+    "crop": "0,0,1440,640"
+  },
+  {
+    "file": "navigator",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Search suites and scenarios"
+      },
+      {
+        "n": 2,
+        "key": "New suite@0"
+      },
+      {
+        "n": 3,
+        "key": "Selected"
+      },
+      {
+        "n": 4,
+        "key": "rect:16,394,100,26"
+      },
+      {
+        "n": 5,
+        "key": "Workspace files (9)"
+      }
+    ],
+    "crop": "0,38,330,862"
+  },
+  {
+    "file": "overview",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Details: checkout"
+      },
+      {
+        "n": 2,
+        "key": "Edit@1"
+      },
+      {
+        "n": 3,
+        "key": "Open Report"
+      },
+      {
+        "n": 4,
+        "key": "Clean up old test runs"
+      },
+      {
+        "n": 5,
+        "key": "Run Reference"
+      },
+      {
+        "n": 6,
+        "key": "Run Test (3 scenarios)"
+      }
+    ],
+    "crop": "320,40,1112,380"
+  },
+  {
+    "file": "new-suite",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Filename"
+      },
+      {
+        "n": 2,
+        "key": "Create"
+      }
+    ],
+    "crop": "480,84,480,180"
+  },
+  {
+    "file": "source-editor",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Source"
+      },
+      {
+        "n": 2,
+        "key": "Suggest"
+      },
+      {
+        "n": 3,
+        "key": "Find in source"
+      },
+      {
+        "n": 4,
+        "key": "Wrap"
+      },
+      {
+        "n": 5,
+        "key": "Line numbers"
+      },
+      {
+        "n": 6,
+        "key": "Save document"
+      }
+    ],
+    "crop": "320,38,1112,560"
+  },
+  {
+    "file": "source-suggestions",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "rect:401,498,440,248"
+      }
+    ],
+    "crop": "320,290,980,470"
+  },
+  {
+    "file": "scenario-fields",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Fields"
+      },
+      {
+        "n": 2,
+        "key": "Find a setting"
+      },
+      {
+        "n": 3,
+        "key": "Advanced"
+      },
+      {
+        "n": 4,
+        "key": "Overrides only"
+      },
+      {
+        "n": 5,
+        "key": "Effective"
+      },
+      {
+        "n": 6,
+        "key": "Run Scenario Test"
+      },
+      {
+        "n": 7,
+        "key": "Run Scenario Reference"
+      }
+    ],
+    "crop": "320,38,1112,520"
+  },
+  {
+    "file": "inherited-value",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Override"
+      },
+      {
+        "n": 2,
+        "key": "rect:1087,401,24,22"
+      }
+    ],
+    "crop": "320,286,1112,200"
+  },
+  {
+    "file": "add-action",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "rect:1296,436,130,452"
+      }
+    ],
+    "crop": "320,380,1112,512"
+  },
+  {
+    "file": "run-reference-confirm",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "rect:393,268,45,30"
+      },
+      {
+        "n": 2,
+        "key": "Run Reference@0"
+      },
+      {
+        "n": 3,
+        "key": "rect:331,180,300,24"
+      },
+      {
+        "n": 4,
+        "key": "Cancel"
+      }
+    ],
+    "crop": "320,38,1112,300",
+    "masks": [
+      {
+        "x": 333,
+        "y": 234,
+        "w": 470,
+        "h": 17,
+        "text": "C:/Projects/northwind-qa/.regressify",
+        "size": 12
+      }
+    ]
+  },
+  {
+    "file": "run-settings",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Run settings"
+      },
+      {
+        "n": 2,
+        "key": "Compare after test"
+      },
+      {
+        "n": 3,
+        "key": "rect:327,376,474,56"
+      },
+      {
+        "n": 4,
+        "key": "rect:817,548,474,46"
+      }
+    ],
+    "crop": "320,150,1112,560"
+  },
+  {
+    "file": "runs-activity",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Activity"
+      },
+      {
+        "n": 2,
+        "key": "Failures only"
+      },
+      {
+        "n": 3,
+        "key": "rect:343,566,1078,50"
+      }
+    ],
+    "crop": "320,150,1112,560"
+  },
+  {
+    "file": "runs-log",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Log"
+      },
+      {
+        "n": 2,
+        "key": "Follow"
+      },
+      {
+        "n": 3,
+        "key": "Copy displayed page"
+      },
+      {
+        "n": 4,
+        "key": "Download complete filtered log"
+      }
+    ],
+    "crop": "320,150,1112,420"
+  },
+  {
+    "file": "results-diff",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Failed"
+      },
+      {
+        "n": 2,
+        "key": "Mismatch Checkout page"
+      },
+      {
+        "n": 3,
+        "key": "Diff"
+      },
+      {
+        "n": 4,
+        "key": "Fit area"
+      }
+    ],
+    "crop": null
+  },
+  {
+    "file": "results-wipe",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Wipe"
+      },
+      {
+        "n": 2,
+        "key": "Adjust Wipe position"
+      }
+    ],
+    "crop": "320,38,1112,820"
+  },
+  {
+    "file": "capture-details",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Scenario information"
+      },
+      {
+        "n": 2,
+        "key": "Copy capture details"
+      },
+      {
+        "n": 3,
+        "key": "Edit suite"
+      },
+      {
+        "n": 4,
+        "key": "Capture Log"
+      }
+    ],
+    "crop": "320,38,1112,260"
+  },
+  {
+    "file": "approve-scenario",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Approve This Scenario@0"
+      },
+      {
+        "n": 2,
+        "key": "rect:331,162,300,48"
+      },
+      {
+        "n": 3,
+        "key": "Cancel"
+      },
+      {
+        "n": 4,
+        "key": "Approve This Scenario@1"
+      }
+    ],
+    "crop": "320,38,1112,230"
+  },
+  {
+    "file": "clean-up-runs",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "rect:457,228,140,34"
+      },
+      {
+        "n": 2,
+        "key": "Checkout (checkout)"
+      },
+      {
+        "n": 3,
+        "key": "Preview"
+      },
+      {
+        "n": 4,
+        "key": "Delete old runs"
+      },
+      {
+        "n": 5,
+        "key": "Close@0"
+      }
+    ],
+    "crop": "430,84,582,440",
+    "masks": [
+      {
+        "x": 456,
+        "y": 172,
+        "w": 524,
+        "h": 19,
+        "text": "C:/Projects/northwind-qa/.regressify",
+        "size": 14
+      }
+    ]
+  },
+  {
+    "file": "git-changes",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "rect:1090,2,98,32"
+      },
+      {
+        "n": 2,
+        "key": "Review visual_tests/checkout.tests.yaml"
+      },
+      {
+        "n": 3,
+        "key": "rect:490,320,938,26"
+      },
+      {
+        "n": 4,
+        "key": "rect:16,770,464,78"
+      },
+      {
+        "n": 5,
+        "key": "rect:20,854,166,28"
+      },
+      {
+        "n": 6,
+        "key": "Comparison Changes"
+      }
+    ],
+    "crop": null,
+    "masks": [
+      {
+        "x": 19,
+        "y": 96,
+        "w": 400,
+        "h": 17,
+        "text": "C:/Projects/northwind-qa",
+        "size": 12
+      }
+    ]
+  },
+  {
+    "file": "deploy-dialog",
+    "raw": "deploy-target",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "rect:1190,2,32,32"
+      },
+      {
+        "n": 2,
+        "key": "Add target"
+      },
+      {
+        "n": 3,
+        "key": "Target name"
+      },
+      {
+        "n": 4,
+        "key": "Deployment provider"
+      },
+      {
+        "n": 5,
+        "key": "Deployment token"
+      },
+      {
+        "n": 6,
+        "key": "Save target"
+      }
+    ],
+    "crop": "480,0,780,420"
+  },
+  {
+    "file": "landing-apps",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "New landing app@1"
+      },
+      {
+        "n": 2,
+        "key": "Landing heading"
+      },
+      {
+        "n": 3,
+        "key": "Landing subheading Markdown"
+      },
+      {
+        "n": 4,
+        "key": "rect:387,435,321,32"
+      },
+      {
+        "n": 5,
+        "key": "Preview"
+      },
+      {
+        "n": 6,
+        "key": "Save"
+      },
+      {
+        "n": 7,
+        "key": "rect:882,570,90,32"
+      }
+    ],
+    "crop": "370,88,702,532"
+  },
+  {
+    "file": "appearance-menu",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Appearance: System"
+      },
+      {
+        "n": 2,
+        "key": "rect:1258,38,128,90"
+      }
+    ],
+    "crop": "980,0,460,180"
+  },
+  {
+    "file": "command-search",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Commands"
+      },
+      {
+        "n": 2,
+        "key": "Search commands"
+      },
+      {
+        "n": 3,
+        "key": "Run Test for current scenario"
+      }
+    ],
+    "crop": "440,0,640,480"
+  },
+  {
+    "file": "simplify-images-fields",
+    "raw": "simplify-fields-raw",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Find a setting"
+      },
+      {
+        "n": 2,
+        "key": "Image simplification"
+      },
+      {
+        "n": 3,
+        "key": "Pixelation block size (px)"
+      },
+      {
+        "n": 4,
+        "key": "rect:343,466,1065,78"
+      },
+      {
+        "n": 5,
+        "key": "Minimum image size (px)"
+      }
+    ],
+    "crop": "320,90,1112,560"
+  },
+  {
+    "file": "simplify-images-result",
+    "raw": "simplify-result-raw",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "rect:507,683,737,174"
+      },
+      {
+        "n": 2,
+        "key": "rect:507,243,912,331"
+      },
+      {
+        "n": 3,
+        "key": "rect:368,161,40,40"
+      }
+    ],
+    "crop": "320,38,1112,862"
+  },
+  {
+    "file": "suite-site-status",
+    "raw": "suite-status",
+    "crop": "0,88,326,306",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Site QA reports, choose another target"
+      },
+      {
+        "n": 2,
+        "key": "Show 1 outdated suites"
+      },
+      {
+        "n": 3,
+        "key": "Newer local results than on QA reports"
+      },
+      {
+        "n": 4,
+        "key": "Outdated 1"
+      }
+    ]
+  },
+  {
+    "file": "deploy-plan",
+    "raw": "deploy-plan",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "rect:513,288,258,24"
+      },
+      {
+        "n": 2,
+        "key": "Suites to update"
+      },
+      {
+        "n": 3,
+        "key": "Deployment mode"
+      },
+      {
+        "n": 4,
+        "key": "Deploy selected reports"
+      }
+    ],
+    "crop": "490,84,462,384"
+  },
+  {
+    "file": "remove-suites-menu",
+    "raw": "remove-menu",
+    "crop": "0,250,500,180",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Remove 2 selected suites from site: QA reports..."
+      }
+    ]
+  },
+  {
+    "file": "remove-suites-dialog",
+    "raw": "remove-dialog",
+    "crop": "490,84,462,408",
+    "callouts": [
+      {
+        "n": 2,
+        "key": "Remove 2 suites from site: QA reports"
+      },
+      {
+        "n": 3,
+        "key": "Remove suites from the site"
+      }
+    ]
+  },
+  {
+    "file": "deploy-unchanged",
+    "crop": "320,150,720,190",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "rect:376,172,172,26"
+      },
+      {
+        "n": 2,
+        "key": "Open Site"
+      },
+      {
+        "n": 3,
+        "key": "Deploy the same reports anyway"
+      }
+    ]
+  }
+]

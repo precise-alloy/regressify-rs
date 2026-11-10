@@ -504,24 +504,40 @@ impl RunSnapshot {
 
     fn save_completed(&self, path: &Path, deployment_path: Option<&Path>) -> Result<()> {
         let published = (|| -> Result<()> {
-            if self.request.command == RunCommand::Deploy
-                && matches!(self.outcome, RunOutcome::Completed)
-                && let (Some(deployment_path), Some(deployment)) =
-                    (deployment_path, self.progress.deployment.as_ref())
-            {
-                let job = self
-                    .request
-                    .options
-                    .deployment
-                    .as_ref()
-                    .context("Completed deployment is missing its target")?;
-                super::deployment::DeployTargets::record_report_publication(
+            let (RunCommand::Deploy, Some(deployment_path)) =
+                (self.request.command, deployment_path)
+            else {
+                return Ok(());
+            };
+            let job = self
+                .request
+                .options
+                .deployment
+                .as_ref()
+                .context("Deployment is missing its target")?;
+            match (&self.outcome, self.progress.deployment.as_ref()) {
+                // A skipped deployment published nothing, so the previous record stays exact.
+                (RunOutcome::Completed, Some(deployment)) if deployment.unchanged => {}
+                (RunOutcome::Completed, Some(deployment)) => {
+                    super::deployment::DeployTargets::record_deployed_report(
+                        deployment_path,
+                        &job.target,
+                        deployment.url.as_deref(),
+                        // Updates keep other suites on the site; links follow its membership.
+                        deployment.suites.as_deref().unwrap_or(&job.suite_ids),
+                        deployment.fingerprint.as_deref(),
+                        deployment.input_fingerprint.as_deref(),
+                    )
+                    .context("Site deployed, but its URL could not be saved to the target")?;
+                }
+                // Failed or stopped uploads may have changed the site; keep links, drop content.
+                _ => super::deployment::DeployTargets::forget_report_fingerprint(
                     deployment_path,
                     &job.target,
-                    deployment.url.as_deref(),
-                    &job.suite_ids,
                 )
-                .context("Site deployed, but its URL could not be saved to the target")?;
+                .context(
+                    "Deployment did not complete, and the target's last deployed content could not be cleared",
+                )?,
             }
             Ok(())
         })();
@@ -1058,6 +1074,11 @@ impl RunManager {
             run: request.clone(),
             events_path: Some(events.path().into()),
             scratch_directory: None,
+            // The worker reads the latest record itself: the dialog's copy can predate the
+            // previous deployment, and a stale match could skip a needed publish.
+            deployment_settings: (request.command == RunCommand::Deploy)
+                .then(|| self.deployment_storage_path.clone())
+                .flatten(),
         })?;
         ensure!(
             payload.len() <= super::worker::MAX_REQUEST_BYTES,
@@ -1244,6 +1265,9 @@ pub(crate) mod tests {
                         suite_ids: vec!["shop".into()],
                         catalog_ids: vec!["shop".into()],
                         partial_confirmed: false,
+                        force: false,
+                        mode: crate::desktop::deployment::DeploymentMode::Replace,
+                        remove_ids: Vec::new(),
                     });
                 }
                 let request: RunRequest =
@@ -1692,6 +1716,10 @@ pub(crate) mod tests {
         invalid[2].progress.deployment = Some(crate::progress::DeploymentResult {
             target: "Unsafe".into(),
             url: Some("file:///C:/untrusted.exe".into()),
+            fingerprint: None,
+            input_fingerprint: None,
+            unchanged: false,
+            suites: None,
         });
         for snapshot in invalid {
             std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
@@ -1753,6 +1781,9 @@ pub(crate) mod tests {
                 suite_ids: vec!["reports".into()],
                 catalog_ids: vec!["reports".into()],
                 partial_confirmed: false,
+                force: false,
+                mode: crate::desktop::deployment::DeploymentMode::Replace,
+                remove_ids: Vec::new(),
             });
             let mut manager = RunManager::default();
             manager.request = Some(request);
@@ -1761,6 +1792,10 @@ pub(crate) mod tests {
                 manager.progress.deployment = Some(crate::progress::DeploymentResult {
                     target: "Display name is not the target ID".into(),
                     url: Some("https://latest.example.com/".into()),
+                    fingerprint: None,
+                    input_fingerprint: None,
+                    unchanged: false,
+                    suites: None,
                 });
             }
             manager.progress.end(false, None);
@@ -1802,6 +1837,107 @@ pub(crate) mod tests {
                 );
                 assert!(RunSnapshot::load(&failed_history, root.path())?.is_some());
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn skipped_deployments_keep_records_and_unfinished_ones_forget_content() -> Result<()> {
+        use super::super::deployment::{DeployTarget, DeployTargets, DeploymentJob};
+
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("targets.json");
+        let history = root.path().join("activity.json");
+        let target: DeployTarget =
+            serde_json::from_value(serde_json::json!({ "id": "qa", "name": "QA" }))?;
+        let recorded = "a".repeat(64);
+        let deployed = "b".repeat(64);
+        let url = "https://reports.example.com/";
+        let save = |outcome: RunOutcome, unchanged: bool| -> Result<DeployTargets> {
+            let mut request = request(RunCommand::Deploy);
+            request.root = root.path().into();
+            request.options.deployment = Some(DeploymentJob {
+                target: target.clone(),
+                suite_ids: vec!["reports".into()],
+                catalog_ids: vec!["reports".into()],
+                partial_confirmed: false,
+                force: false,
+                mode: crate::desktop::deployment::DeploymentMode::Replace,
+                remove_ids: Vec::new(),
+            });
+            let mut manager = RunManager::default();
+            manager.request = Some(request);
+            manager.outcome = Some(outcome);
+            manager.progress.deployment = Some(crate::progress::DeploymentResult {
+                target: "QA".into(),
+                url: Some(url.into()),
+                fingerprint: Some(if unchanged { &recorded } else { &deployed }.clone()),
+                input_fingerprint: Some("c".repeat(64)),
+                unchanged,
+                suites: None,
+            });
+            manager.progress.end(false, None);
+            manager
+                .snapshot()
+                .unwrap()
+                .save_completed(&history, Some(&path))?;
+            DeployTargets::load(&path)
+        };
+        let reset = || -> Result<Vec<u8>> {
+            DeployTargets {
+                targets: vec![target.clone()],
+                selected: Some(target.id.clone()),
+                ..Default::default()
+            }
+            .save(&path)?;
+            DeployTargets::record_deployed_report(
+                &path,
+                &target,
+                Some(url),
+                &["older-report".into()],
+                Some(&recorded),
+                None,
+            )?;
+            Ok(std::fs::read(&path)?)
+        };
+
+        // A skip published nothing: the record, membership, and file stay exactly as they were.
+        let before = reset()?;
+        let settings = save(RunOutcome::Completed, true)?;
+        assert_eq!(std::fs::read(&path)?, before);
+        assert_eq!(
+            settings.report_fingerprint(&target),
+            Some(recorded.as_str())
+        );
+        assert!(settings.latest_report_url(&["reports".into()]).is_none());
+
+        // A confirmed publication records the new content, its inputs, and membership.
+        reset()?;
+        let settings = save(RunOutcome::Completed, false)?;
+        assert_eq!(
+            settings.report_fingerprint(&target),
+            Some(deployed.as_str())
+        );
+        assert_eq!(
+            settings.unchanged_inputs(&target, &"c".repeat(64)),
+            Some((url.to_owned(), deployed.clone()))
+        );
+        assert!(settings.latest_report_url(&["reports".into()]).is_some());
+
+        // Failed or stopped uploads may have changed the site: forget content, keep links.
+        for outcome in [
+            RunOutcome::Failed("Upload failed".into()),
+            RunOutcome::Cancelled,
+        ] {
+            reset()?;
+            let settings = save(outcome, false)?;
+            assert!(settings.report_fingerprint(&target).is_none());
+            assert_eq!(
+                settings
+                    .latest_report_url(&["older-report".into()])
+                    .as_deref(),
+                Some("https://reports.example.com/suites/older-report")
+            );
         }
         Ok(())
     }

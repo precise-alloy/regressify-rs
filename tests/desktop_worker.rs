@@ -1179,6 +1179,9 @@ fn deploy_missing_token_fails_before_snapshot_modifies_output() {
                 suite_ids: vec!["shop".into()],
                 catalog_ids: vec!["shop".into()],
                 partial_confirmed: false,
+                force: false,
+                mode: regressify::desktop::deployment::DeploymentMode::Replace,
+                remove_ids: Vec::new(),
             }),
             ..Default::default()
         },
@@ -1258,6 +1261,9 @@ fn deploy_worker_reads_machine_local_credentials_without_exposing_tokens() {
                 suite_ids: vec!["shop".into()],
                 catalog_ids: vec!["shop".into()],
                 partial_confirmed: false,
+                force: false,
+                mode: regressify::desktop::deployment::DeploymentMode::Replace,
+                remove_ids: Vec::new(),
             }),
             ..Default::default()
         },
@@ -1327,6 +1333,7 @@ fn invoke_with_events(
                 scratch_directory: scratch
                     .as_ref()
                     .map(|directory| directory.path().to_path_buf()),
+                deployment_settings: None,
             })
             .unwrap(),
         )

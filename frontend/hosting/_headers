@@ -67,6 +67,9 @@
   Access-Control-Allow-Origin: *
   Cache-Control: no-cache
 
+/_snapshot/deployment.json
+  Cache-Control: no-cache
+
 /*.ps1
   Content-Type: text/plain; charset=utf-8
 

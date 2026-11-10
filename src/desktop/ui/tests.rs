@@ -6965,8 +6965,22 @@ fn navigator_suite_selection_supports_modifiers_filters_and_empty_space(cx: &mut
         window.render_frame(cx);
         window.click_with_modifiers(("file", indices[2]), shift, cx);
         assert_eq!(selected(cx), ["ui-test"]);
+        window.click("sidebar-select-none", cx);
+        // "All" selects what the search shows, not hidden suites.
+        window.click("sidebar-select-all", cx);
+        assert_eq!(selected(cx), ["ui-test"]);
+        view.update(cx, |this, cx| {
+            this.search
+                .update(cx, |state, cx| state.set_value("", window, cx));
+        });
+        window.render_frame(cx);
         window.click("sidebar-select-all", cx);
         assert_eq!(selected(cx), ["a-ui", "middle", "ui-test"]);
+        view.update(cx, |this, cx| {
+            this.search
+                .update(cx, |state, cx| state.set_value("ui-test", window, cx));
+        });
+        window.render_frame(cx);
         window.click("sidebar-select-none", cx);
         assert!(selected(cx).is_empty());
         window.click(("file", indices[2]), cx);

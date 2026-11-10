@@ -17,6 +17,53 @@ are historical evidence, not open implementation tasks.
   identity is ambiguous, rather than choosing an unrelated first row. Tests cover
   duplicates, missing rows, reordered replacements, and null timestamps.
 
+## Unchanged Report Deployments (2026-11-06)
+
+- Resolved in source (GitHub issue #8): redeploying unchanged suites repeated all
+  local and upload work. On a synthetic 3-suite, 360-image workspace, preview
+  generation took about 4.4 s versus 0.5 s for copying and 0.45 s for hashing
+  the generated files. [Snapshot](src/snapshot/preview_cache.rs) now reuses previews of
+  byte-identical sources with the same thumbnail modes and build, so it stays
+  correct after an approval within the same run. The worker
+  [skips publication](src/desktop/deployment.rs) when the staged content and site
+  settings match the target's last confirmed deployment, and offers Deploy anyway.
+  The new `preview_cache` tests, plus `deployment_fingerprints_`,
+  `report_fingerprints_`, `unchanged_deployments_`, `skipped_deployments_`, and
+  the GUI test `skipped_deployment_reports_up_to_date_and_offers_deploy_anyway`,
+  cover this. A Cloudflare deploy that changed nothing still spent 56 s locally
+  in a debug build (213 MB, about five full hash passes) before skipping the
+  upload. An early `inputFingerprint` check now skips generation in milliseconds,
+  and the content fingerprint reads only unversioned files (14.5 s down to 16 ms).
+  `input_fingerprints_` and `early_checks_` cover it. No live provider deployment
+  was run after this change.
+- Resolved in source: Update deployments keep every unselected suite on the site.
+  They use the site-published `/_snapshot/deployment.json`, and the Deploy dialog
+  and suite list scale to many suites with counts, review, an Outdated filter, and
+  per-suite removal. The `site_state`, `incremental`, `preview`, `merged_staging`,
+  `kept_*`, and `deploy_dialog_summarizes` tests cover it. A mocked Netlify
+  end-to-end test covers update, keep, and remove. No live provider deployment was
+  run.
+- Open: concurrent deployments to one site are not detected (the last writer
+  wins). Sites without a state file regenerate kept suites from current local
+  results, which can publish newer runs than the site had. Azure updates re-upload
+  kept suites from local copies verified against the site's hashes and regenerate
+  only those whose copies are missing or differ (`whole_site_` tests cover it).
+- Resolved in source: Cloudflare uploads that need image optimization publish a
+  site state rewritten for the optimized files instead of none
+  (`optimized_uploads_publish_` covers it). Replace rebuilds every selected suite,
+  so kept-content errors that advise it no longer recur, and the suite list and
+  Deploy dialog compare suites by recorded inputs, so approvals without a new run
+  show as changed (`verification_matches_`, `recorded_inputs_decide_`,
+  `suite_statuses_follow_recorded_inputs`). No live provider deployment was run.
+- Open: deselecting a suite still prunes its published previews, so selecting
+  it again regenerates it in full. Alternating suite sets across targets that
+  share an output gets no reuse for the suites that alternate.
+- Open: publication records are local to the workspace. A site changed from
+  another workspace or machine can be reported as up to date; Deploy anyway is
+  the recovery. Azure still uploads the full package whenever anything changed.
+- Open: deployment settings reject unknown fields, so an older desktop build
+  cannot load settings that already contain `siteFingerprint`.
+
 ## Release Cache Runtime Isolation (2026-11-05)
 
 - Resolved in source: manual Windows builds could seed the tagged static-runtime

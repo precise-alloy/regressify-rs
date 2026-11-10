@@ -110,10 +110,10 @@ function Test-TitlebarFlows {
             Send-FixtureKeys Escape
             Wait-WindowState { $null -eq (Find-Control 'Landing apps') } 'Titlebar command search did not close.'
             Invoke-Control 'Deploy' -Pointer
-            Wait-Control 'Yes, deploy only these 1 of 2 suites' | Out-Null
+            Wait-Control 'Replace the whole site with the selection' | Out-Null
             Capture-Window "stock-sizing-deploy-$($theme.ToLowerInvariant())-$($dimensions[0])"
             Invoke-Control 'Close'
-            Wait-WindowState { $null -eq (Find-Control 'Yes, deploy only these 1 of 2 suites') } 'Titlebar deployment dialog did not close.'
+            Wait-WindowState { $null -eq (Find-Control 'Replace the whole site with the selection') } 'Titlebar deployment dialog did not close.'
         }
     }
     Select-Theme 'Light'
@@ -133,7 +133,7 @@ function Test-TitlebarFlows {
     Invoke-Control 'smoke.tests.json'
     Wait-Control 'Run Suite Reference' | Out-Null
     Invoke-Control 'Deploy' -Pointer
-    Wait-Control 'Yes, deploy only these 1 of 2 suites' | Out-Null
+    Wait-Control 'Replace the whole site with the selection' | Out-Null
     Capture-Window 'titlebar-deploy-pointer'
     Invoke-Control 'Close'
     $before = [RegressifySmokeNative+Rect]::new()

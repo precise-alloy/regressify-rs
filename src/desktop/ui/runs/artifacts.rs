@@ -12,6 +12,17 @@ pub(super) struct ArtifactScan {
 }
 
 impl ArtifactScan {
+    pub(super) fn latest_run_id(&self, id: &str) -> Option<String> {
+        Some(self.suites.get(id)?.as_ref().ok()?.latest()?.run_id.clone())
+    }
+
+    pub(super) fn latest_run_ids(&self) -> BTreeMap<String, String> {
+        self.suites
+            .keys()
+            .filter_map(|id| Some((id.clone(), self.latest_run_id(id)?)))
+            .collect()
+    }
+
     pub(super) fn clear(&mut self) {
         self.generation += 1;
         self.root = None;
@@ -139,7 +150,29 @@ impl RunPanel {
                 panel.artifacts.suites = artifacts;
                 panel.artifacts.loading = false;
                 match publications {
-                    Ok(publications) => panel.artifacts.publications = publications,
+                    Ok(publications) => {
+                        // The target the site scan follows (the Deploy dialog may have chosen
+                        // one), else the saved selection; refreshed from its saved settings.
+                        let followed = panel
+                            .site_target()
+                            .map(|target| target.id.clone())
+                            .or_else(|| publications.selected.clone());
+                        let saved = followed.and_then(|id| {
+                            publications
+                                .targets
+                                .iter()
+                                .find(|target| target.id == id)
+                                .cloned()
+                        });
+                        let reload = std::mem::take(&mut panel.site.reload_pending);
+                        if reload || saved.as_ref() != panel.site_target() {
+                            panel.refresh_site(saved, reload, cx);
+                        } else {
+                            // Local results may have changed without a new run (an approval).
+                            panel.verify_site(cx);
+                        }
+                        panel.artifacts.publications = publications;
+                    }
                     Err(error) => {
                         panel.artifacts.publications = DeployTargets::default();
                         panel.status = format!("Cannot load deployed sites: {error:#}");

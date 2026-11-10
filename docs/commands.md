@@ -519,6 +519,18 @@ generated files are removed, and desktop deployment stages only the active
 manifest's dependencies. Legacy entry pages are removed. Comparison data remains
 compatible with the desktop app.
 
+Decoding captures and encoding their previews is the slowest part of a snapshot.
+After each successful generation, `<output>/.preview-cache.json` records which
+source bytes and grid thumbnail modes produced each published preview. The next
+snapshot copies those previews instead of decoding an image again when its source
+bytes, thumbnail modes, and Regressify build all match and the published preview
+files still match their recorded versions; anything else, including an approved
+baseline in the same run, regenerates that image. Output is identical either way.
+The file is local build state: it is never deployed, the managed output
+`.gitignore` ignores it, and deleting it only makes the next snapshot slower.
+Suites excluded from a snapshot lose their published previews and are regenerated
+in full when selected again.
+
 Snapshot needs write and cleanup access to the selected report output directory,
 not just read access to its captures. Temporary `.snapshot-*` directories are
 created inside that output directory. Filesystem errors identify the operation

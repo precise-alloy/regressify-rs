@@ -17,6 +17,10 @@ pub struct WorkerRequest {
     pub events_path: Option<PathBuf>,
     #[serde(default)]
     pub scratch_directory: Option<PathBuf>,
+    /// Deployment target settings holding the last recorded publication of each target.
+    /// Without it, every deployment publishes.
+    #[serde(default)]
+    pub deployment_settings: Option<PathBuf>,
 }
 
 pub fn read_request(input: impl Read) -> Result<WorkerRequest> {
@@ -142,48 +146,126 @@ fn run_request() -> Result<()> {
                     } else {
                         None
                     };
-                    if deployment.is_some() {
-                        use crate::diagnostics::{record::Stage, runtime};
-                        super::deployment::with_heartbeat(
-                            "Generating selected report snapshots",
-                            runtime::stage(
-                                Stage::SnapshotStaging,
-                                [],
-                                crate::application::execute(cli),
-                            ),
-                        )
-                        .await
-                        .context("Cannot generate report snapshots for deployment")?;
-                    } else {
-                        crate::application::execute_with(cli, engine_options(&request.run)).await?;
-                    }
                     if let Some((job, client)) = deployment {
                         let directory = request
                             .scratch_directory
                             .as_deref()
                             .or_else(|| managed_staging.as_ref().map(|staging| staging.path()))
-                            .context("Deployment staging directory is missing")?;
-                        let output = request.run.options.output_directory(&request.run.root);
-                        let staging = directory.join("report");
-                        let destination = staging.clone();
-                        let suites = job.suite_ids.clone();
-                        let diagnostic_context = crate::diagnostics::runtime::current();
-                        super::deployment::with_heartbeat(
-                            "Staging selected reports",
-                            tokio::task::spawn_blocking(move || {
-                                crate::diagnostics::runtime::in_scope(diagnostic_context, || {
-                                    super::deployment::stage_reports(&output, &suites, &destination)
-                                })
-                            }),
-                        )
-                        .await
-                        .context("Deployment staging task failed")?
-                        .context("Cannot stage selected reports for deployment")?;
-                        let url = client.deploy(&staging, &job.target).await?;
+                            .context("Deployment staging directory is missing")?
+                            .to_path_buf();
+                        let options = &request.run.options;
+                        let context = super::deployment::incremental::ReportDeployment {
+                            job: job.clone(),
+                            root: request.run.root.clone(),
+                            output: options.output_directory(&request.run.root),
+                            settings: request.deployment_settings.clone(),
+                            title: options.title.clone(),
+                            heading: options.heading.clone(),
+                            subheading: options.subheading.clone(),
+                        };
+                        use super::deployment::incremental::Preparation;
+                        let outcome = match context.prepare().await? {
+                            Preparation::Done(outcome) => outcome,
+                            Preparation::Generate(mut prepared) => {
+                                // Reused suites' files are copied out before generation prunes
+                                // them from the report output.
+                                if !prepared.plan.local.is_empty() {
+                                    let stash = directory.join("local");
+                                    let checker = context.clone();
+                                    let scope = crate::diagnostics::runtime::current();
+                                    prepared = super::deployment::with_heartbeat(
+                                        "Checking local copies of kept suites",
+                                        tokio::task::spawn_blocking(move || {
+                                            crate::diagnostics::runtime::in_scope(scope, || {
+                                                checker
+                                                    .stash_local(&mut prepared, &stash)
+                                                    .map(|()| prepared)
+                                            })
+                                        }),
+                                    )
+                                    .await
+                                    .context("Local copy check failed")??;
+                                }
+                                let plan = &prepared.plan;
+                                let generated = async {
+                                    if plan.generate.is_empty() {
+                                        // Removals and unchanged selections generate no suite. The
+                                        // shared site files are built in scratch space so the local
+                                        // report keeps its suites.
+                                        let scratch = directory.join("generated");
+                                        std::fs::create_dir_all(&scratch)?;
+                                        let workspace =
+                                            crate::config::load_workspace_config(&context.root)?;
+                                        let args = context.args();
+                                        let target = scratch.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            crate::snapshot::generate_site(
+                                                &target,
+                                                &[],
+                                                &args,
+                                                &workspace,
+                                            )
+                                        })
+                                        .await
+                                        .context("Snapshot generation task failed")??;
+                                        anyhow::Ok(scratch)
+                                    } else {
+                                        let mut cli = cli;
+                                        // Kept suites may need regeneration too (Azure, legacy sites).
+                                        if let crate::cli::Command::Snapshot(args) =
+                                            &mut cli.command
+                                        {
+                                            args.test_suite = plan
+                                                .generate
+                                                .iter()
+                                                .map(|id| glob::Pattern::escape(id))
+                                                .collect();
+                                        }
+                                        use crate::diagnostics::{record::Stage, runtime};
+                                        super::deployment::with_heartbeat(
+                                            "Generating selected report snapshots",
+                                            runtime::stage(
+                                                Stage::SnapshotStaging,
+                                                [],
+                                                crate::application::execute(cli),
+                                            ),
+                                        )
+                                        .await
+                                        .context(
+                                            "Cannot generate report snapshots for deployment",
+                                        )?;
+                                        Ok(context.output.clone())
+                                    }
+                                }
+                                .await;
+                                // Generation may have pruned reused suites from the output.
+                                let generated = match generated {
+                                    Ok(generated) => generated,
+                                    Err(error) => {
+                                        context.restore_after_failure(&prepared);
+                                        return Err(error);
+                                    }
+                                };
+                                context
+                                    .publish(
+                                        *prepared,
+                                        &generated,
+                                        &directory.join("report"),
+                                        &client,
+                                    )
+                                    .await?
+                            }
+                        };
                         crate::progress::emit(crate::progress::Event::Deployed {
                             target: job.target.name.clone(),
-                            url,
+                            url: outcome.url,
+                            fingerprint: outcome.fingerprint,
+                            input_fingerprint: outcome.inputs,
+                            unchanged: outcome.unchanged,
+                            suites: outcome.suites,
                         });
+                    } else {
+                        crate::application::execute_with(cli, engine_options(&request.run)).await?;
                     }
                     Ok(())
                 };
@@ -223,6 +305,7 @@ mod tests {
             run: request.clone(),
             events_path: None,
             scratch_directory: None,
+            deployment_settings: None,
         })
         .unwrap();
         let decoded = read_request(encoded.as_slice()).unwrap();

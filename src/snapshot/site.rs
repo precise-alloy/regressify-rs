@@ -77,9 +77,9 @@ pub(super) struct Manifest {
     pub suites: Vec<SuiteSummary>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct SuiteSummary {
+pub(crate) struct SuiteSummary {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -211,7 +211,7 @@ pub(super) struct Dimensions {
     pub height: i64,
 }
 
-pub(super) fn valid_segment(value: &str) -> bool {
+pub(crate) fn valid_segment(value: &str) -> bool {
     !value.is_empty()
         && value != "."
         && value != ".."
@@ -221,7 +221,7 @@ pub(super) fn valid_segment(value: &str) -> bool {
         && !crate::helpers::is_windows_reserved_path_component(value)
 }
 
-pub(super) fn valid_suite_id(value: &str) -> bool {
+pub(crate) fn valid_suite_id(value: &str) -> bool {
     valid_segment(value)
         && !value.starts_with('.')
         && !crate::test::is_reserved_suite_identifier(value)
@@ -760,6 +760,43 @@ fn create_output_gitignore(
     }
 }
 
+/// The Regressify build that generated a snapshot; its frontend and report format.
+pub(crate) const GENERATOR: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("BINARY_GIT_HASH"),
+    ")"
+);
+
+/// Report title, heading, and subheading: explicit arguments, then workspace settings, then
+/// built-in defaults. Explicit empty strings are preserved.
+fn report_text(args: &SnapshotArgs, workspace: &WorkspaceConfig) -> [String; 3] {
+    [
+        (
+            &args.title,
+            &workspace.snapshot_title,
+            "Visual Tests Summary | Regressify",
+        ),
+        (
+            &args.heading,
+            &workspace.snapshot_heading,
+            "Visual Tests Summary",
+        ),
+        (
+            &args.subheading,
+            &workspace.snapshot_subheading,
+            "Snapshot regression test results",
+        ),
+    ]
+    .map(|(explicit, configured, default)| {
+        explicit
+            .as_deref()
+            .or(configured.as_deref())
+            .unwrap_or(default)
+            .to_owned()
+    })
+}
+
 pub(crate) fn generate_site(
     root: &Path,
     suites: &[String],
@@ -791,6 +828,7 @@ pub(crate) fn generate_site(
     let mut summaries = Vec::new();
     let mut images = BTreeMap::new();
     let mut logs = super::logs::LogCache::new();
+    let preview_cache = super::preview_cache::PreviewCache::load(&root);
     if !suites.is_empty() {
         snapshot_phase(&format!(
             "Preparing report snapshot for {} {}",
@@ -804,9 +842,15 @@ pub(crate) fn generate_site(
             index + 1,
             suites.len()
         ));
-        if let Some(report) =
-            super::capture_report::load_suite(&root, &staged_root, id, &mut images, &mut logs)
-                .with_context(|| format!("Failed to process snapshot suite '{id}'"))?
+        if let Some(report) = super::capture_report::load_suite(
+            &root,
+            &staged_root,
+            id,
+            &mut images,
+            &mut logs,
+            &preview_cache,
+        )
+        .with_context(|| format!("Failed to process snapshot suite '{id}'"))?
         {
             let passed = report
                 .tests
@@ -833,36 +877,14 @@ pub(crate) fn generate_site(
         }
     }
     summaries.sort_by(|first, second| first.id.cmp(&second.id));
+    let [title, heading, subheading] = report_text(args, workspace);
     let manifest = Manifest {
         version: 2,
-        title: args
-            .title
-            .as_deref()
-            .or(workspace.snapshot_title.as_deref())
-            .unwrap_or("Visual Tests Summary | Regressify")
-            .into(),
-        heading: args
-            .heading
-            .as_deref()
-            .or(workspace.snapshot_heading.as_deref())
-            .unwrap_or("Visual Tests Summary")
-            .into(),
-        subheading: args
-            .subheading
-            .as_deref()
-            .or(workspace.snapshot_subheading.as_deref())
-            .unwrap_or("Snapshot regression test results")
-            .into(),
+        title,
+        heading,
+        subheading,
         generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        regressify_version: Some(
-            concat!(
-                env!("CARGO_PKG_VERSION"),
-                " (",
-                env!("BINARY_GIT_HASH"),
-                ")"
-            )
-            .into(),
-        ),
+        regressify_version: Some(GENERATOR.into()),
         suites: summaries,
     };
     for (name, bytes) in FRONTEND_FILES {
@@ -896,6 +918,16 @@ pub(crate) fn generate_site(
     publish_staged_files(&staged_root, &root, &dependencies)?;
     prune_generated_files(&root, &dependencies)?;
     artifact_paths(&root, &selected)?;
+    // Saved only after publication so the index never describes files that were not written.
+    // A failed save loses reuse for the next generation, not this valid snapshot.
+    if let Err(error) = super::preview_cache::PreviewCache::save(
+        &root,
+        super::capture_report::preview_cache_entries(&images),
+    ) {
+        super::preview_cache::warn(&format!(
+            "Warning: Snapshot previews will be regenerated next time: {error:#}"
+        ));
+    }
     for suite in &manifest.suites {
         remove_legacy(&root, &format!("{}/html_report/index.html", suite.id))?;
         for name in [
@@ -1074,7 +1106,7 @@ fn prune_generated_files(root: &Path, active: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn versioned_path(path: &str, kind: &str) -> Result<PathBuf> {
+pub(crate) fn versioned_path(path: &str, kind: &str) -> Result<PathBuf> {
     let extension = if kind == "data" { ".json" } else { ".png" };
     let (relative, version) = path
         .split_once("?v=")
@@ -1163,15 +1195,49 @@ fn read_manifest(root: &Path) -> Result<(String, Manifest)> {
 /// Inventory only the active manifest, never stale assets, captures, or workspace state.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 pub(crate) fn artifact_paths(output: &Path, selected: &[String]) -> Result<Vec<PathBuf>> {
+    let inventory = artifact_inventory(output, selected, &[])?;
+    let mut paths = inventory.shared;
+    for files in inventory.suites.into_values() {
+        paths.extend(files);
+    }
+    Ok(paths.into_iter().collect())
+}
+
+/// Verified files of a snapshot site, split into site-wide files and each suite's own files.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+#[derive(Debug, Default)]
+pub(crate) struct SiteInventory {
+    /// Entry page, manifest, status summary, and bundled frontend and hosting files.
+    pub shared: BTreeSet<PathBuf>,
+    /// Each present suite's JSON, images, and log chunks. Log chunks are keyed by operation, so
+    /// two suites can list the same chunk.
+    pub suites: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// Capture run of each present suite.
+    pub runs: BTreeMap<String, String>,
+}
+
+/// Verifies a snapshot site whose manifest lists exactly the `present` and `absent` suites.
+///
+/// Present suites are fully verified: every suite JSON, image, and log chunk must exist and
+/// match its cache version. Absent suites are only checked at the summary level, because a
+/// site that keeps them already serves their files; a merged staging site can therefore be
+/// verified without them.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) fn artifact_inventory(
+    output: &Path,
+    present: &[String],
+    absent: &[String],
+) -> Result<SiteInventory> {
     let root = output.canonicalize()?;
     let (manifest_path, manifest) = read_manifest(&root)?;
     let mut expected = BTreeSet::new();
-    for id in selected {
+    for id in present.iter().chain(absent) {
         ensure!(
             valid_suite_id(id) && expected.insert(id.as_str()),
             "Invalid or duplicate snapshot suite selection"
         );
     }
+    let absent = absent.iter().map(String::as_str).collect::<BTreeSet<_>>();
     ensure!(
         manifest.suites.len() == expected.len()
             && manifest
@@ -1181,25 +1247,30 @@ pub(crate) fn artifact_paths(output: &Path, selected: &[String]) -> Result<Vec<P
         "Regenerate the snapshot for the selected suites before deploying"
     );
     let mut seen = BTreeSet::new();
-    let mut paths = BTreeSet::from([
-        PathBuf::from("index.html"),
-        versioned_path(&manifest_path, "data")?,
-    ]);
+    let mut inventory = SiteInventory {
+        shared: BTreeSet::from([
+            PathBuf::from("index.html"),
+            versioned_path(&manifest_path, "data")?,
+        ]),
+        ..SiteInventory::default()
+    };
     if let Some(path) = checked_file(&root, Path::new(STATUS_PATH), true)? {
         let status: SiteStatus = serde_json::from_slice(&read_bounded(&path, 64 * 1024)?)?;
         ensure!(
             status == SiteStatus::from_manifest(&manifest)?,
             "Snapshot status does not match the published report; regenerate the snapshot"
         );
-        paths.insert(PathBuf::from(STATUS_PATH));
+        inventory.shared.insert(PathBuf::from(STATUS_PATH));
     }
     let mut image_versions = BTreeMap::<PathBuf, String>::new();
     let mut validated_logs = BTreeSet::new();
+    // Each versioned file is read once, even when several suites list it.
+    let mut verified = BTreeSet::new();
     for (name, _) in FRONTEND_FILES {
         if *name != "gitignore" {
             let relative = PathBuf::from(name);
             checked_file(&root, &relative, false)?;
-            paths.insert(relative);
+            inventory.shared.insert(relative);
         }
     }
     for summary in manifest.suites {
@@ -1215,6 +1286,9 @@ pub(crate) fn artifact_paths(output: &Path, selected: &[String]) -> Result<Vec<P
             report_path == Path::new(&format!("_snapshot/data/suites/{}.json", summary.id)),
             "Snapshot suite report path does not match its summary"
         );
+        if absent.contains(summary.id.as_str()) {
+            continue;
+        }
         let report: SuiteReport =
             serde_json::from_slice(&read_versioned(&root, &summary.report, "data")?)?;
         let passed = report
@@ -1235,7 +1309,11 @@ pub(crate) fn artifact_paths(output: &Path, selected: &[String]) -> Result<Vec<P
                 && errors == summary.errors,
             "Snapshot suite data does not match its summary"
         );
-        paths.insert(report_path);
+        inventory
+            .runs
+            .insert(summary.id.clone(), report.run_id.clone());
+        let files = inventory.suites.entry(summary.id.clone()).or_default();
+        files.insert(report_path);
         let mut captures = BTreeSet::new();
         for capture in report.tests {
             ensure!(
@@ -1253,7 +1331,8 @@ pub(crate) fn artifact_paths(output: &Path, selected: &[String]) -> Result<Vec<P
                         "Conflicting cache versions for a snapshot image"
                     );
                 }
-                if paths.insert(relative) {
+                files.insert(relative.clone());
+                if verified.insert(relative) {
                     read_versioned(&root, image, "images")?;
                 }
             }
@@ -1305,15 +1384,253 @@ pub(crate) fn artifact_paths(output: &Path, selected: &[String]) -> Result<Vec<P
                             }
                             let bytes = read_versioned(&root, chunk, "data")?;
                             super::logs::validate_chunk(&bytes, log, &mut records)?;
-                            paths.insert(relative);
+                            verified.insert(relative.clone());
+                            files.insert(relative);
                         }
                         ensure!(records == log.records, "Snapshot log record count mismatch");
+                    } else {
+                        // Verified for another capture or suite already; still list the chunks
+                        // so that every suite's file set is complete.
+                        for chunk in &log.chunks {
+                            files.insert(versioned_path(chunk, "data")?);
+                        }
                     }
                 }
             }
         }
     }
-    Ok(paths.into_iter().collect())
+    Ok(inventory)
+}
+
+/// Suite summaries of a generated snapshot, for merging into a site that keeps other suites.
+#[cfg(feature = "desktop")]
+pub(crate) fn suite_summaries(output: &Path) -> Result<Vec<SuiteSummary>> {
+    Ok(read_manifest(&output.canonicalize()?)?.1.suites)
+}
+
+/// Publishes the entry page, manifest, and status summary of a merged site into `destination`.
+///
+/// Report text and generator come from the snapshot generated in `generated`. `kept` summaries
+/// describe suites the site already serves and are copied verbatim, including their versioned
+/// report URLs, so that their published files stay valid.
+#[cfg(feature = "desktop")]
+pub(crate) fn publish_merged_index(
+    destination: &Path,
+    generated: &Path,
+    kept: Vec<SuiteSummary>,
+) -> Result<()> {
+    let (_, mut manifest) = read_manifest(&generated.canonicalize()?)?;
+    let mut ids = manifest
+        .suites
+        .iter()
+        .map(|suite| suite.id.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    for summary in &kept {
+        ensure!(
+            valid_suite_id(&summary.id)
+                && ids.insert(summary.id.to_ascii_lowercase())
+                && summary.passed.checked_add(summary.failed) == Some(summary.total)
+                && summary.errors <= summary.failed
+                && versioned_path(&summary.report, "data")?
+                    == Path::new(&format!("_snapshot/data/suites/{}.json", summary.id)),
+            "Invalid or duplicate kept suite summary"
+        );
+    }
+    manifest.suites.extend(kept);
+    manifest
+        .suites
+        .sort_by(|first, second| first.id.cmp(&second.id));
+    publish_index(&destination.canonicalize()?, &manifest)
+}
+
+/// Content identity of a snapshot site for `selected` that `artifact_paths` already verified.
+///
+/// Verification proves every suite JSON matches the `?v=` version the manifest records, and
+/// every image and log chunk matches the version its suite JSON records. The manifest, with
+/// `generatedAt` cleared, therefore pins all versioned content without hashing it again. Only
+/// unversioned files are read: the entry page (minus the manifest URL, whose version covers
+/// the timestamp), the status summary (minus its timestamp), and the bundled frontend and
+/// hosting files. Two verified snapshots share a fingerprint exactly when publishing either
+/// would serve the same reports.
+#[cfg(feature = "desktop")]
+pub(crate) fn site_fingerprint(verified: &Path, selected: &[String]) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let root = verified.canonicalize()?;
+    let (manifest_url, mut manifest) = read_manifest(&root)?;
+    let mut expected = selected.iter().collect::<Vec<_>>();
+    expected.sort();
+    ensure!(
+        manifest
+            .suites
+            .iter()
+            .map(|suite| &suite.id)
+            .eq(expected.iter().copied()),
+        "Regenerate the snapshot for the selected suites before deploying"
+    );
+    manifest.generated_at.clear();
+    let read = |relative: &str| -> Result<Vec<u8>> {
+        let source = checked_file(&root, Path::new(relative), false)?
+            .with_context(|| format!("Snapshot artifact missing: {relative}"))?;
+        read_bounded(&source, MAX_REPORT_BYTES)
+    };
+    let mut hasher = Sha256::new();
+    let mut add = |name: &str, bytes: &[u8]| {
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update(Sha256::digest(bytes));
+    };
+    add("regressify-site-fingerprint-v2", &[]);
+    add(
+        "_snapshot/data/manifest.json",
+        &serde_json::to_vec(&manifest)?,
+    );
+    add(
+        "index.html",
+        String::from_utf8(read("index.html")?)
+            .context("Snapshot entry page is not UTF-8")?
+            .replace(&manifest_url, "")
+            .as_bytes(),
+    );
+    if checked_file(&root, Path::new(STATUS_PATH), true)?.is_some() {
+        let mut status: SiteStatus = serde_json::from_slice(&read(STATUS_PATH)?)?;
+        status.generated_at.clear();
+        add(STATUS_PATH, &serde_json::to_vec(&status)?);
+    }
+    for (name, _) in FRONTEND_FILES {
+        if *name != "gitignore" {
+            add(name, &read(name)?);
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Identity of everything a snapshot of `suites` is generated from, computed from file
+/// metadata without reading or generating report content.
+///
+/// It covers the generator build, the resolved report text, the sorted suite selection, and
+/// the relative path, size, and modification time of every file under each selected suite's
+/// output directory. Runs, approvals, metadata edits, and retention cleanup all write files
+/// there, so any of them changes the identity. Lock files, which are touched by every read, and
+/// dot-prefixed temporary directories and `.tmp` files of in-progress writers are excluded.
+/// Capture logs are read from `_diagnostics` journals that are final once their run completes,
+/// so they are not tracked. Equal identities mean the same snapshot, so the caller may reuse
+/// what that snapshot produced; any doubt only costs a full generation.
+#[cfg(feature = "desktop")]
+pub(crate) fn input_fingerprint(
+    output: &Path,
+    suites: &[String],
+    args: &SnapshotArgs,
+    workspace: &WorkspaceConfig,
+) -> Result<String> {
+    let root = output.canonicalize()?;
+    let mut suites = suites.iter().collect::<Vec<_>>();
+    suites.sort();
+    let mut hasher = InputHasher::new(b"regressify-snapshot-inputs-v1");
+    for text in report_text(args, workspace) {
+        hasher.add(text.as_bytes());
+    }
+    for suite in suites {
+        add_suite_inputs(&root, suite, &mut hasher)?;
+    }
+    Ok(hasher.finish())
+}
+
+/// Identity of what one suite's snapshot pages are generated from: the generator build and
+/// the suite's output files, as in `input_fingerprint`. Report text is left out because it
+/// only shapes site-wide files, so the desktop app can compare a suite with what a target
+/// received without knowing the deployment's report text.
+#[cfg(feature = "desktop")]
+pub(crate) fn suite_input_fingerprint(output: &Path, suite: &str) -> Result<String> {
+    let root = output.canonicalize()?;
+    let mut hasher = InputHasher::new(b"regressify-suite-inputs-v1");
+    add_suite_inputs(&root, suite, &mut hasher)?;
+    Ok(hasher.finish())
+}
+
+/// Length-prefixed SHA-256 of input fingerprint parts, starting with the fingerprint kind,
+/// the generator build, and the preview format, which every input fingerprint covers.
+#[cfg(feature = "desktop")]
+struct InputHasher(sha2::Sha256);
+
+#[cfg(feature = "desktop")]
+impl InputHasher {
+    fn new(kind: &[u8]) -> Self {
+        let mut hasher = Self(sha2::Digest::new());
+        hasher.add(kind);
+        hasher.add(GENERATOR.as_bytes());
+        hasher.add(super::preview_cache::FORMAT.to_string().as_bytes());
+        hasher
+    }
+
+    fn add(&mut self, part: &[u8]) {
+        use sha2::Digest;
+        self.0.update((part.len() as u64).to_le_bytes());
+        self.0.update(part);
+    }
+
+    fn finish(self) -> String {
+        use sha2::Digest;
+        format!("{:x}", self.0.finalize())
+    }
+}
+
+/// Feeds the suite ID and the path, size, and modification time of each of its output files.
+#[cfg(feature = "desktop")]
+fn add_suite_inputs(root: &Path, suite: &str, hasher: &mut InputHasher) -> Result<()> {
+    ensure!(valid_suite_id(suite), "Invalid snapshot suite ID");
+    hasher.add(suite.as_bytes());
+    let directory = root.join(suite);
+    ensure!(
+        fs::symlink_metadata(&directory)
+            .with_context(|| format!("Snapshot suite output is unavailable: {suite}"))?
+            .is_dir(),
+        "Snapshot suite output must be a directory: {suite}"
+    );
+    let entries = walkdir::WalkDir::new(&directory)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            !(entry.depth() > 0 && entry.file_type().is_dir() && name.starts_with('.'))
+        });
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "Failed to list snapshot suite files in '{}'",
+                directory.display()
+            )
+        })?;
+        let name = entry.file_name().to_string_lossy();
+        if entry.file_type().is_dir() || name.ends_with(".lock") || name.ends_with(".tmp") {
+            continue;
+        }
+        let metadata = entry.metadata().with_context(|| {
+            format!(
+                "Failed to inspect snapshot input '{}'",
+                entry.path().display()
+            )
+        })?;
+        // Without a modification time an edit could go unnoticed, so refuse instead.
+        let modified = metadata
+            .modified()
+            .context("Snapshot input has no modification time")?
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("Snapshot input modification time predates 1970")?
+            .as_nanos();
+        let relative = entry
+            .path()
+            .strip_prefix(&directory)?
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        hasher.add(relative.as_bytes());
+        hasher.add(&[u8::from(entry.file_type().is_symlink())]);
+        hasher.add(&metadata.len().to_le_bytes());
+        hasher.add(&modified.to_le_bytes());
+    }
+    Ok(())
 }
 
 #[cfg(feature = "desktop")]
@@ -1529,6 +1846,7 @@ pub(crate) fn refresh_site_versions(output: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
     #[test]
     fn manifest_round_trips_optional_execution_log_fields() {
         use crate::diagnostics::journal::ArchiveState;
@@ -2479,5 +2797,38 @@ mod tests {
             roles[&versioned_path(&preview, "images").unwrap()],
             ImageRole::Protected
         );
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn suite_input_fingerprints_follow_only_their_own_suite_files() {
+        let output = tempfile::tempdir().unwrap();
+        for id in ["one", "two"] {
+            fs::create_dir_all(output.path().join(id)).unwrap();
+            fs::write(output.path().join(id).join("report.json"), id).unwrap();
+        }
+        let one = super::suite_input_fingerprint(output.path(), "one").unwrap();
+        let two = super::suite_input_fingerprint(output.path(), "two").unwrap();
+        assert_ne!(one, two);
+        // Locks and temporary files of in-progress writers are not inputs.
+        fs::write(output.path().join("one/.runs.lock"), "").unwrap();
+        fs::write(output.path().join("one/runs.json.tmp"), "").unwrap();
+        assert_eq!(
+            super::suite_input_fingerprint(output.path(), "one").unwrap(),
+            one
+        );
+        // Another suite's change leaves this one alone; its own change does not.
+        fs::write(output.path().join("two/report.json"), "changed").unwrap();
+        assert_eq!(
+            super::suite_input_fingerprint(output.path(), "one").unwrap(),
+            one
+        );
+        fs::write(output.path().join("one/report.json"), "changed!").unwrap();
+        assert_ne!(
+            super::suite_input_fingerprint(output.path(), "one").unwrap(),
+            one
+        );
+        assert!(super::suite_input_fingerprint(output.path(), "missing").is_err());
+        assert!(super::suite_input_fingerprint(output.path(), "../one").is_err());
     }
 }
