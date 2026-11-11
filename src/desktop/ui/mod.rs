@@ -310,7 +310,7 @@ impl Workbench {
                         this.status = format!("{error:#}");
                     }
                     this.sync_suites(cx);
-                    let (approval, comparison) = {
+                    let (approval, comparison, capture) = {
                         let manager = &this.runs.read(cx).manager;
                         let approval = manager
                             .request
@@ -342,7 +342,18 @@ impl Workbench {
                                     targets,
                                 )
                             });
-                        (approval, comparison)
+                        let capture = manager
+                            .request
+                            .as_ref()
+                            .filter(|request| {
+                                request.command.captures()
+                                    && matches!(
+                                        manager.outcome,
+                                        Some(crate::desktop::runner::RunOutcome::Completed)
+                                    )
+                            })
+                            .map(|request| request.options.output_directory(&request.root));
+                        (approval, comparison, capture)
                     };
                     if let Some(outcome) = approval {
                         let suites = this.session.suites.clone();
@@ -360,6 +371,10 @@ impl Workbench {
                                 panel.show_run(root, run_id, window, cx);
                             }
                         });
+                    } else if let Some(root) = capture {
+                        // A finished capture supersedes any run the user pinned in Results.
+                        this.results.update(cx, |panel, _| panel.follow_latest());
+                        this.refresh_results_at(root, window, cx);
                     } else {
                         this.refresh_results(window, cx);
                     }
@@ -879,6 +894,16 @@ impl Workbench {
     }
 
     fn refresh_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.runs.read(cx).output_root() {
+            Ok(root) => self.refresh_results_at(root, window, cx),
+            Err(error) => {
+                self.status = format!("{error:#}");
+                cx.notify();
+            }
+        }
+    }
+
+    fn refresh_results_at(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let suites = self.session.suites.clone();
         let active = self
             .session
@@ -887,25 +912,21 @@ impl Workbench {
             .filter(|open| open.entry.kind == DocumentKind::Suite)
             .map(|open| open.entry.clone())
             .or_else(|| suites.first().map(|suite| suite.entry.clone()));
-        match self.runs.read(cx).output_root() {
-            Ok(root) => self.results.update(cx, |panel, cx| {
-                panel.set_suites(suites);
-                if panel.active_suite().is_none()
-                    && let Some(entry) = active
-                {
-                    panel.select_suite(&entry, window, cx);
-                }
-                if self.main_tab == 2 {
-                    panel.refresh(root, window, cx);
-                } else {
-                    panel.refresh_existing(root, window, cx);
-                }
-            }),
-            Err(error) => {
-                self.status = format!("{error:#}");
-                cx.notify();
+        self.results.update(cx, |panel, cx| {
+            panel.set_suites(suites);
+            if panel.active_suite().is_none()
+                && let Some(entry) = active
+            {
+                panel.select_suite(&entry, window, cx);
             }
-        }
+            // Hidden refreshes only read saved reports; missing comparisons are
+            // generated once the user opens Results.
+            if self.main_tab == 2 {
+                panel.refresh(root, window, cx);
+            } else {
+                panel.refresh_existing(root, window, cx);
+            }
+        });
     }
 
     fn sync_suites(&mut self, cx: &mut Context<Self>) {

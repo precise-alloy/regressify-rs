@@ -1860,6 +1860,14 @@ away from Runs or including unrelated suites that share the same run name.
 Failed or cancelled comparisons do not switch the reviewed run; scoped approval
 continues to refresh the reviewed report in place.
 
+After Run Test or Run Reference completes successfully, Results drops any pinned
+run or saved-report selection and follows the latest default report in the
+request's output folder. Only completed full-suite captures become the default,
+so partial runs do not displace the latest full-suite results. While Results is
+hidden, this refresh reads saved reports only; a capture whose comparison was
+skipped is compared when Results is opened. Failed or cancelled captures retain
+the reviewed report.
+
 Stop terminates the process group, including children. Closing during a run
 requests cancellation; close again after it stops to handle unsaved work.
 The live log is searchable, read-only, and capped at 2 MiB. Its bounded queue may

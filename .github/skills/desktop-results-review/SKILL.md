@@ -24,6 +24,7 @@ description: 'Use when changing desktop comparison reports, image previews, nami
 1. Results exposes Approve This Scenario for the current viewport, never whole-run approval. Pin the output root, suite, run, scenario, and capture key. Confirm inline in the comparison and retain draft/preflight guards without switching to Runs. Dismiss pending approval on capture changes or refresh; keep whole-run approval in Runs.
 1. Refresh the currently viewed report in place after scoped approval, preserving capture/filter/view state and its output root. Recompute its complete original scope, including unapproved failures, without recapturing or changing thresholds; show approval errors in Results.
 1. Successful Compare completion replaces older run/saved-report pins with the completed request's output root and run ID, scoped to suites recorded in comparison progress. Unrelated suites sharing a run name must not appear. Do not use mutable Run settings or switch tabs automatically. Failed/cancelled commands retain the reviewed run; scoped approval keeps its in-place refresh path.
+1. Successful Test/Reference completion clears old run/saved-report pins and refreshes the latest default in the completed request's output root. Full-suite runs become the default; partial runs leave the latest completed full-suite report selected. Follow the hidden-refresh rule above: only a visible Results tab generates missing comparisons. Failed/cancelled captures retain the reviewed report. Cover hidden, visible, full, partial, failed and cancelled cases in the completion GUI tests.
 1. Idle Results suite badges use the loaded report's scenario/viewport totals, not stale Activity history or raw screenshot counts. Keep live execution counts while a worker is running.
 1. Keep expensive image/file loading off the UI thread and reject stale completion after selection changes. Own popup menus/subscriptions without retained cycles.
 1. Image context menus use ContextMenuExt on generation-scoped scroll surfaces, freezing validated paths/URLs when built. Invalidate on capture/mode/refresh/Results exit, cancel pan on right-click, and retain the guarded weak dismissal helper. Pane activation requires both mouse down/up to be Left so mixed Left-down/Right-up cannot open a pane; preserve keyboard/touch activation and pathless-error exclusions.
@@ -41,6 +42,7 @@ description: 'Use when changing desktop comparison reports, image previews, nami
 cargo test --features desktop --lib desktop::results::tests
 cargo test --features desktop --lib snapshot::capture_report::tests
 cargo test --features gui-tests --lib comparison_completion_
+cargo test --features gui-tests --lib capture_completion_
 cargo test --features gui-tests --lib crosshairs_
 cargo test --features gui-tests --lib -- image_previews_ side_by_side_scrolls
 cargo test --features gui-tests --lib desktop::ui::tests
