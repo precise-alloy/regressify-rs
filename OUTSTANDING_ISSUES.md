@@ -3,6 +3,17 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Desktop Capture Results Refresh (2026-11-11)
+
+- Resolved: after a successful Test or Reference, Results could retain a pinned
+  report from an older run. Completion now drops the pins and follows the latest
+  default in the completed request's output folder; partial runs remain available
+  for explicit selection but do not replace the completed full-suite default.
+  While Results is hidden the refresh reads saved reports only, so skipped
+  comparisons are still generated only when Results is opened. GUI regressions
+  cover full Test selection, partial Reference fallback, failed/cancelled
+  retention, and hidden versus visible comparison generation.
+
 ## Admin Deployment Details Review (2026-11-09)
 
 - Resolved in source: additional field names could amplify a bounded upstream
