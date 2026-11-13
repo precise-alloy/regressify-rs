@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -17,6 +17,340 @@ use crate::helpers::png::{
 const MIB: u64 = 1024 * 1024;
 const QUALITY_STEPS: [u8; 8] = [99, 95, 90, 85, 80, 70, 60, 50];
 const MIN_COMPARISON_QUALITY: u8 = 80;
+/// The lowest quality a full deployment reduces passed comparisons to.
+pub(super) const LOWEST_QUALITY: u8 = 50;
+/// The lowest quality while a Cloudflare site still keeps suites without local files: the
+/// deployment brings back more suites before going lower, as a full deployment reduces every
+/// image at one floor before the next.
+pub(super) const SPREAD_QUALITY: u8 = 85;
+/// Images recompressed at once. Each holds a decoded image (up to
+/// `MAX_VISUAL_IMAGE_DECOMPRESSED_BYTES`) plus oxipng's working copies, which bounds memory.
+const PARALLEL_IMAGES: usize = 4;
+
+/// What an optimization must fit and how it may change the report to get there.
+#[derive(Clone, Copy)]
+pub(super) struct Request<'a> {
+    /// The storage budget, in uncompressed bytes.
+    pub limit: u64,
+    pub deadline: Instant,
+    /// Suites the snapshot manifest lists that the site keeps without local files: their data
+    /// is neither read nor rewritten, and `limit` is what they leave of the provider's budget.
+    pub kept: &'a BTreeSet<String>,
+    /// Without one, images are only recompressed losslessly; with one, quality is reduced no
+    /// lower than it (nor than the comparison minimum).
+    pub quality_floor: Option<u8>,
+    /// Reuses results across attempts and deployments.
+    pub cache: Option<&'a OptimizationCache>,
+}
+
+static NOTHING_KEPT: BTreeSet<String> = BTreeSet::new();
+
+impl Request<'_> {
+    /// Fits `limit` by `deadline` down to a full deployment's quality floors, with nothing
+    /// kept and nothing cached.
+    pub(super) fn new(limit: u64, deadline: Instant) -> Self {
+        Self {
+            limit,
+            deadline,
+            kept: &NOTHING_KEPT,
+            quality_floor: Some(LOWEST_QUALITY),
+            cache: None,
+        }
+    }
+}
+
+/// The report cannot be optimized into its storage limit, which it still exceeds by
+/// `remaining` bytes. A provider whose site keeps suites from earlier deployments may still
+/// fit once those suites can be optimized too.
+#[derive(Debug)]
+pub(super) struct DoesNotFit {
+    message: String,
+    pub remaining: u64,
+}
+
+impl std::fmt::Display for DoesNotFit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DoesNotFit {}
+
+/// Bumped whenever recompression or quantization settings change (`lossless_options`,
+/// `quantize`), so stored results from other settings are never reused.
+const CACHE_FORMAT: u32 = 1;
+/// Bytes of optimization results the desktop app keeps across deployments; the least recently
+/// used go first.
+const CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Image optimization results by source content. A Cloudflare report deployment that retries
+/// over its budget recompresses and reduces the same images in every attempt, and later
+/// deployments regenerate the same suites again. oxipng's output depends only on the bytes and
+/// the fixed `lossless_options`, and a quantization only on the bytes and its quality, so
+/// results are reused as they are.
+///
+/// A persistent cache lives in the desktop app's cache directory, shared by deployments and
+/// pruned to `CACHE_BYTES` when opened; since it outlives this process, a stored result is only
+/// reused as a PNG of the source's dimensions. The default cache is temporary and removed with
+/// it.
+#[derive(Default)]
+pub(super) struct OptimizationCache {
+    /// Where persistent results go; without one, a temporary directory is used.
+    root: Option<PathBuf>,
+    directory: std::sync::Mutex<Option<CacheDirectory>>,
+    recompressions: CacheCounts,
+    quantizations: CacheCounts,
+}
+
+/// Lookups and reused results, which deployment logs report per attempt so a cache that does
+/// not help shows.
+#[derive(Default)]
+struct CacheCounts {
+    lookups: std::sync::atomic::AtomicUsize,
+    reused: std::sync::atomic::AtomicUsize,
+}
+
+impl CacheCounts {
+    fn record(&self, reused: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.lookups.fetch_add(1, Relaxed);
+        if reused {
+            self.reused.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// Lookups and reused results so far.
+    fn get(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.lookups.load(Relaxed), self.reused.load(Relaxed))
+    }
+}
+
+/// Logs how many of the lookups since `before` an earlier attempt or deployment answered.
+fn report_reuse(counts: &CacheCounts, before: (usize, usize), work: &str) {
+    let (lookups, reused) = counts.get();
+    let (lookups, reused) = (lookups - before.0, reused - before.1);
+    if lookups > 0 {
+        phase(&format!(
+            "{work} reused {reused} of {lookups} results from the optimization cache"
+        ));
+    }
+}
+
+enum CacheDirectory {
+    Persistent(PathBuf),
+    Temporary(tempfile::TempDir),
+}
+
+impl CacheDirectory {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Persistent(path) => path,
+            Self::Temporary(directory) => directory.path(),
+        }
+    }
+}
+
+impl OptimizationCache {
+    /// Results in the desktop app's cache directory, shared with later deployments.
+    pub(super) fn persistent() -> Self {
+        Self {
+            root: crate::desktop::project_directories().map(|directories| {
+                directories
+                    .cache_dir()
+                    .join("image-optimization")
+                    .join(format!("v{CACHE_FORMAT}"))
+            }),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn at(root: PathBuf) -> Self {
+        Self {
+            root: Some(root),
+            ..Self::default()
+        }
+    }
+
+    fn directory(&self) -> Option<PathBuf> {
+        let mut directory = self.directory.lock().ok()?;
+        if directory.is_none() {
+            *directory = self.open();
+        }
+        directory
+            .as_ref()
+            .map(|directory| directory.path().to_path_buf())
+    }
+
+    fn open(&self) -> Option<CacheDirectory> {
+        if let Some(root) = &self.root
+            && fs::create_dir_all(root).is_ok()
+        {
+            prune(root, CACHE_BYTES);
+            return Some(CacheDirectory::Persistent(root.clone()));
+        }
+        tempfile::Builder::new()
+            .prefix("regressify-optimization-")
+            .tempdir()
+            .ok()
+            .map(CacheDirectory::Temporary)
+    }
+
+    /// `source` recompressed losslessly, from an earlier result for the same bytes when there
+    /// is one. Results that do not shrink the image are recorded too, so they are not retried.
+    fn recompress(&self, source: &[u8], options: &oxipng::Options) -> Result<Vec<u8>> {
+        let Some(directory) = self.directory() else {
+            return Ok(oxipng::optimize_from_memory(source, options)?);
+        };
+        let key = content_key(source);
+        let smaller = directory.join(format!("{key}.png"));
+        let unchanged = directory.join(format!("{key}.same"));
+        if let Some(bytes) = stored(&smaller, png_dimensions(source)) {
+            self.recompressions.record(true);
+            return Ok(bytes);
+        }
+        if marked(&unchanged) {
+            self.recompressions.record(true);
+            return Ok(source.to_vec());
+        }
+        self.recompressions.record(false);
+        let optimized = oxipng::optimize_from_memory(source, options)?;
+        // The cache only saves time: a result it cannot store is recomputed when needed again.
+        // Atomic writes keep concurrent workers with the same image from reading a partial file.
+        let _ = if optimized.len() < source.len() {
+            crate::helpers::write_file_atomically(&smaller, &optimized)
+        } else {
+            crate::helpers::write_file_atomically(&unchanged, b"")
+        };
+        Ok(optimized)
+    }
+
+    /// The image with content `key` and `dimensions` quantized at `quality`, which `compute`
+    /// produces, from an earlier result when there is one. Qualities an image cannot reach are
+    /// recorded too.
+    fn quantize(
+        &self,
+        key: &str,
+        dimensions: Option<(u32, u32)>,
+        quality: u8,
+        compute: impl FnOnce() -> Result<Option<Vec<u8>>>,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(directory) = self.directory() else {
+            return compute();
+        };
+        let reduced = directory.join(format!("{key}-q{quality}.png"));
+        let unreachable = directory.join(format!("{key}-q{quality}.none"));
+        if let Some(bytes) = stored(&reduced, dimensions) {
+            self.quantizations.record(true);
+            return Ok(Some(bytes));
+        }
+        if marked(&unreachable) {
+            self.quantizations.record(true);
+            return Ok(None);
+        }
+        self.quantizations.record(false);
+        let result = compute()?;
+        // As for recompression, a result the cache cannot store only costs time later.
+        let _ = match &result {
+            Some(bytes) => crate::helpers::write_file_atomically(&reduced, bytes),
+            None => crate::helpers::write_file_atomically(&unreachable, b""),
+        };
+        Ok(result)
+    }
+}
+
+/// A stored result when it is a PNG of the source's `dimensions`, marked as recently used.
+fn stored(path: &Path, dimensions: Option<(u32, u32)>) -> Option<Vec<u8>> {
+    let bytes = fs::read(path).ok()?;
+    if dimensions.is_none() || png_dimensions(&bytes) != dimensions {
+        return None;
+    }
+    touch(path);
+    Some(bytes)
+}
+
+/// Whether a marker result exists, marking it as recently used.
+fn marked(path: &Path) -> bool {
+    let exists = path.is_file();
+    if exists {
+        touch(path);
+    }
+    exists
+}
+
+/// Records a use for `prune`, which keeps the most recently used results.
+fn touch(path: &Path) {
+    let _ = fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(std::time::SystemTime::now()));
+}
+
+/// Removes the least recently used results until `directory` holds at most `limit` bytes.
+/// Files another deployment holds open may refuse removal; they are skipped.
+fn prune(directory: &Path, limit: u64) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut files = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let metadata = entry.metadata().ok()?;
+            metadata.is_file().then(|| {
+                (
+                    metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    metadata.len(),
+                    entry.path(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut total = files
+        .iter()
+        .fold(0_u64, |total, (_, size, _)| total.saturating_add(*size));
+    if total <= limit {
+        return;
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+    for (_, size, path) in files {
+        if total <= limit {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(size);
+        }
+    }
+}
+
+/// Width and height from a PNG's header, or none for anything else.
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+    if bytes.get(..8)? != SIGNATURE || bytes.get(12..16)? != b"IHDR" {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| {
+        Some(u32::from_be_bytes(bytes.get(range)?.try_into().ok()?))
+    };
+    Some((number(16..20)?, number(20..24)?))
+}
+
+fn content_key(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// The fixed lossless recompression settings: pixels, transparency, interlacing, and chunks
+/// stay as they are. Bump `CACHE_FORMAT` when they change.
+fn lossless_options() -> oxipng::Options {
+    let mut options = oxipng::Options::from_preset(1);
+    options.optimize_alpha = false;
+    options.scale_16 = false;
+    options.interlace = None;
+    options.strip = oxipng::StripChunks::None;
+    options.max_decompressed_size = Some(MAX_VISUAL_IMAGE_DECOMPRESSED_BYTES);
+    options
+}
 
 pub(super) struct PreparedReport {
     source: PathBuf,
@@ -25,6 +359,15 @@ pub(super) struct PreparedReport {
 }
 
 impl PreparedReport {
+    /// The report at `source` as it is, for deployments without a storage budget.
+    pub fn unchanged(source: &Path, original_bytes: u64) -> Self {
+        Self {
+            source: source.to_path_buf(),
+            temporary: None,
+            original_bytes,
+        }
+    }
+
     pub fn path(&self) -> &Path {
         self.temporary
             .as_ref()
@@ -98,8 +441,13 @@ fn check_deadline(deadline: Instant) -> Result<()> {
     Ok(())
 }
 
-fn classify_images(root: &Path, files: &mut [ReportFile], deadline: Instant) -> Result<()> {
-    if let Some(roles) = crate::snapshot::image_roles(root)? {
+fn classify_images(
+    root: &Path,
+    files: &mut [ReportFile],
+    deadline: Instant,
+    kept: &BTreeSet<String>,
+) -> Result<()> {
+    if let Some(roles) = crate::snapshot::image_roles(root, kept)? {
         for file in files {
             check_deadline(deadline)?;
             file.priority = match roles.get(&file.relative) {
@@ -177,6 +525,7 @@ fn quantize(
     deadline: Instant,
 ) -> Result<Option<Vec<u8>>> {
     check_deadline(deadline)?;
+    // Stored quantizations depend on these settings: bump `CACHE_FORMAT` when they change.
     let mut attributes = imagequant::new();
     attributes.set_speed(6)?;
     attributes.set_quality(quality, quality)?;
@@ -234,14 +583,24 @@ fn reduce_images(
     destination: &Path,
     files: &mut [ReportFile],
     total: &mut u64,
-    limit: u64,
     skipped: &mut usize,
-    deadline: Instant,
+    request: Request,
 ) -> Result<()> {
+    let Request {
+        limit,
+        deadline,
+        quality_floor,
+        cache,
+        ..
+    } = request;
+    let Some(floor) = quality_floor else {
+        return Ok(());
+    };
     for priority in [Priority::Passed, Priority::Comparison] {
         let mut previous_quality = 100;
         for quality in QUALITY_STEPS {
             if *total <= limit
+                || quality < floor
                 || priority == Priority::Comparison && quality < MIN_COMPARISON_QUALITY
             {
                 break;
@@ -289,8 +648,28 @@ fn reduce_images(
                     last_update = Instant::now();
                 }
                 let result = (|| -> Result<Option<(Vec<u8>, u8)>> {
-                    let image = lodepng::decode32(&read_png(root, &file.relative)?)?;
-                    let Some(bytes) = quantize(&image, quality, deadline)? else {
+                    let source = read_png(root, &file.relative)?;
+                    let key = cache.map(|_| (content_key(&source), png_dimensions(&source)));
+                    // Decoded only when a quality is not cached yet.
+                    let mut decoded = None;
+                    let mut encode = |quality: u8| -> Result<Option<Vec<u8>>> {
+                        let mut compute = || {
+                            let image = match decoded.take() {
+                                Some(image) => image,
+                                None => lodepng::decode32(&source)?,
+                            };
+                            let result = quantize(&image, quality, deadline);
+                            decoded = Some(image);
+                            result
+                        };
+                        match (cache, &key) {
+                            (Some(cache), Some((key, dimensions))) => {
+                                cache.quantize(key, *dimensions, quality, compute)
+                            }
+                            _ => compute(),
+                        }
+                    };
+                    let Some(bytes) = encode(quality)? else {
                         return Ok(None);
                     };
                     if bytes.len() as u64 >= file.bytes {
@@ -302,7 +681,7 @@ fn reduce_images(
                         quality,
                         previous_quality,
                         target_bytes,
-                        |higher| quantize(&image, higher, deadline),
+                        &mut encode,
                     )?))
                 })();
                 check_deadline(deadline)?;
@@ -357,21 +736,21 @@ pub(super) fn prepare(root: &Path, limit: u64, deadline: Instant) -> Result<Prep
     check_deadline(deadline)?;
     phase("Measuring uncompressed deployment content");
     let (files, original_bytes) = inventory(root)?;
-    prepare_report(root, files, original_bytes, limit, deadline)
+    prepare_report(root, files, original_bytes, Request::new(limit, deadline))
 }
 
+/// Optimizes the selected `paths` of the snapshot site at `root` as `request` asks.
 pub(super) fn prepare_files(
     root: &Path,
     paths: impl IntoIterator<Item = PathBuf>,
-    limit: u64,
-    deadline: Instant,
+    request: Request,
 ) -> Result<PreparedReport> {
     let mut files = Vec::new();
     let mut total = 0_u64;
-    check_deadline(deadline)?;
+    check_deadline(request.deadline)?;
     phase("Measuring uncompressed deployment content");
     for relative in paths {
-        check_deadline(deadline)?;
+        check_deadline(request.deadline)?;
         let source = super::artifact_source(root, &relative, false)?
             .context("Deployment file is unavailable")?;
         let bytes = fs::metadata(source)?.len();
@@ -390,29 +769,28 @@ pub(super) fn prepare_files(
             "Deployment exceeds the 100000-file package limit; select fewer suites"
         );
     }
-    prepare_report(root, files, total, limit, deadline)
+    prepare_report(root, files, total, request)
 }
 
 fn prepare_report(
     root: &Path,
     files: Vec<ReportFile>,
     original_bytes: u64,
-    limit: u64,
-    deadline: Instant,
+    request: Request,
 ) -> Result<PreparedReport> {
     use crate::diagnostics::{record::*, runtime};
     runtime::stage_sync(
         Stage::PackagingOptimization,
         [
             (Field::BytesBefore, FieldValue::Number(original_bytes)),
-            (Field::BudgetBytes, FieldValue::Number(limit)),
+            (Field::BudgetBytes, FieldValue::Number(request.limit)),
             (Field::FileCount, FieldValue::Number(files.len() as u64)),
             (
                 Field::Compression,
-                FieldValue::Boolean(original_bytes > limit),
+                FieldValue::Boolean(original_bytes > request.limit),
             ),
         ],
-        || prepare_report_inner(root, files, original_bytes, limit, deadline),
+        || prepare_report_inner(root, files, original_bytes, request),
     )
 }
 
@@ -420,26 +798,37 @@ fn prepare_report_inner(
     root: &Path,
     mut files: Vec<ReportFile>,
     original_bytes: u64,
-    limit: u64,
-    deadline: Instant,
+    request: Request,
 ) -> Result<PreparedReport> {
+    let Request {
+        limit,
+        deadline,
+        kept,
+        quality_floor,
+        cache,
+    } = request;
     check_deadline(deadline)?;
     let log_files = files
         .iter()
         .filter(|file| file.relative.starts_with("_snapshot/data/logs"))
         .collect::<Vec<_>>();
     let log_bytes = log_files.iter().map(|file| file.bytes).sum::<u64>();
-    ensure!(
-        log_bytes <= limit,
-        "Capture log assets require {} MiB, exceeding this provider's {} MiB storage budget (largest log: {}). Select fewer suites or use a larger provider allowance; logs are never truncated.",
-        log_bytes.div_ceil(MIB),
-        limit / MIB,
-        log_files
-            .iter()
-            .max_by_key(|file| file.bytes)
-            .map(|file| file.relative.display().to_string())
-            .unwrap_or_default()
-    );
+    if log_bytes > limit {
+        return Err(DoesNotFit {
+            remaining: original_bytes.saturating_sub(limit),
+            message: format!(
+            "Capture log assets require {} MiB, exceeding this provider's {} MiB storage budget (largest log: {}). Select fewer suites or use a larger provider allowance; logs are never truncated.",
+            log_bytes.div_ceil(MIB),
+            limit / MIB,
+            log_files
+                .iter()
+                .max_by_key(|file| file.bytes)
+                .map(|file| file.relative.display().to_string())
+                .unwrap_or_default()
+            ),
+        }
+        .into());
+    }
     files.sort_by(|left, right| {
         right
             .bytes
@@ -474,7 +863,7 @@ fn prepare_report_inner(
 
     let source_root = root.canonicalize()?;
     phase("Classifying report images by comparison role for optimization");
-    classify_images(&source_root, &mut files, deadline)?;
+    classify_images(&source_root, &mut files, deadline, kept)?;
     let temporary = tempfile::Builder::new()
         .prefix(".optimization-")
         .tempdir_in(
@@ -526,12 +915,8 @@ fn prepare_report_inner(
     prepared.temporary = Some(temporary);
     let mut total = original_bytes;
     let mut skipped = 0;
-    let mut options = oxipng::Options::from_preset(1);
-    options.optimize_alpha = false;
-    options.scale_16 = false;
-    options.interlace = None;
-    options.strip = oxipng::StripChunks::None;
-    options.max_decompressed_size = Some(MAX_VISUAL_IMAGE_DECOMPRESSED_BYTES);
+    let mut options = lossless_options();
+    let recompressions = cache.map(|cache| cache.recompressions.get());
     let image_count = files
         .iter()
         .filter(|file| {
@@ -546,19 +931,29 @@ fn prepare_report_inner(
     ));
     let mut processed = 0_usize;
     let mut last_update = Instant::now();
-    for file in &mut files {
+    let pngs = files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| {
+            file.relative
+                .extension()
+                .is_some_and(|extension| extension == "png")
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .clamp(1, PARALLEL_IMAGES);
+    // Largest images first, a few at a time. Results apply in order and stop as soon as the
+    // report fits, so exactly the files one-at-a-time optimization would change are changed;
+    // a batch's later results are discarded then.
+    'batches: for batch in pngs.chunks(workers) {
         check_deadline(deadline)?;
         if total <= limit {
             break;
         }
-        if file
-            .relative
-            .extension()
-            .is_none_or(|extension| extension != "png")
-        {
-            continue;
-        }
         if processed == 0 || last_update.elapsed().as_secs() >= 1 {
+            let file = &files[batch[0]];
             phase(&format!(
                 "Lossless optimization: processing image {} of {image_count} ({}, {:.1} KiB); report {:.2} MiB",
                 processed + 1,
@@ -569,72 +964,100 @@ fn prepare_report_inner(
             last_update = Instant::now();
         }
         options.timeout = Some(deadline.saturating_duration_since(Instant::now()));
-        let optimized = (|| -> Result<Vec<u8>> {
-            Ok(oxipng::optimize_from_memory(
-                &read_png(&source_root, &file.relative)?,
-                &options,
-            )?)
-        })();
+        let results = {
+            use rayon::prelude::*;
+            let (files, options, source_root) = (&files, &options, &source_root);
+            batch
+                .par_iter()
+                .map(|&index| -> Result<Vec<u8>> {
+                    let source = read_png(source_root, &files[index].relative)?;
+                    match cache {
+                        Some(cache) => cache.recompress(&source, options),
+                        None => Ok(oxipng::optimize_from_memory(&source, options)?),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
         check_deadline(deadline)?;
-        processed += 1;
-        match optimized {
-            Ok(bytes) if (bytes.len() as u64) < file.bytes => {
-                crate::helpers::write_file_atomically(
-                    &prepared.path().join(&file.relative),
-                    &bytes,
-                )?;
-                total -= file.bytes - bytes.len() as u64;
-                file.bytes = bytes.len() as u64;
+        for (&index, optimized) in batch.iter().zip(results) {
+            if total <= limit {
+                break 'batches;
             }
-            Ok(_) => {}
-            Err(error) => {
-                skipped += 1;
-                file.optimizable = false;
+            let file = &mut files[index];
+            processed += 1;
+            match optimized {
+                Ok(bytes) if (bytes.len() as u64) < file.bytes => {
+                    crate::helpers::write_file_atomically(
+                        &prepared.path().join(&file.relative),
+                        &bytes,
+                    )?;
+                    total -= file.bytes - bytes.len() as u64;
+                    file.bytes = bytes.len() as u64;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    skipped += 1;
+                    file.optimizable = false;
+                    phase(&format!(
+                        "Keeping image unchanged: {} ({error})",
+                        file.relative.display()
+                    ));
+                }
+            }
+            if processed == 1
+                || processed == image_count
+                || processed.is_multiple_of(10)
+                || last_update.elapsed().as_secs() >= 1
+            {
                 phase(&format!(
-                    "Keeping image unchanged: {} ({error})",
-                    file.relative.display()
+                    "Lossless optimization: image {processed} of {image_count}; report {:.2} MiB",
+                    total as f64 / MIB as f64
                 ));
+                last_update = Instant::now();
             }
-        }
-        if processed == 1
-            || processed == image_count
-            || processed.is_multiple_of(10)
-            || last_update.elapsed().as_secs() >= 1
-        {
-            phase(&format!(
-                "Lossless optimization: image {processed} of {image_count}; report {:.2} MiB",
-                total as f64 / MIB as f64
-            ));
-            last_update = Instant::now();
         }
     }
-    if total > limit {
+    if let (Some(cache), Some(before)) = (cache, recompressions) {
+        report_reuse(&cache.recompressions, before, "Lossless recompression");
+    }
+    if total > limit && quality_floor.is_some() {
+        let quantizations = cache.map(|cache| cache.quantizations.get());
         reduce_images(
             &source_root,
             prepared.path(),
             &mut files,
             &mut total,
-            limit,
             &mut skipped,
-            deadline,
+            request,
         )?;
+        if let (Some(cache), Some(before)) = (cache, quantizations) {
+            report_reuse(&cache.quantizations, before, "Quality reduction");
+        }
     }
-    ensure!(
-        total <= limit,
-        "Report cannot fit the deployment storage limit: {:.2} MiB originally, {:.2} MiB after optimization, {:.2} MiB allowed ({skipped} images could not be optimized). Failed diffs, error placeholders, and image dimensions were preserved. Select fewer suites or use a larger deployment storage budget. Original reports and baselines are unchanged.",
-        original_bytes as f64 / MIB as f64,
-        total as f64 / MIB as f64,
-        limit as f64 / MIB as f64
-    );
-    if crate::snapshot::image_roles(prepared.path())?.is_some() {
+    if total > limit {
+        return Err(DoesNotFit {
+            remaining: total - limit,
+            message: format!(
+                "Report cannot fit the deployment storage limit: {:.2} MiB originally, {:.2} MiB after optimization, {:.2} MiB allowed ({skipped} images could not be optimized). Failed diffs, error placeholders, and image dimensions were preserved. Select fewer suites or use a larger deployment storage budget. Original reports and baselines are unchanged.",
+                original_bytes as f64 / MIB as f64,
+                total as f64 / MIB as f64,
+                limit as f64 / MIB as f64
+            ),
+        }
+        .into());
+    }
+    if crate::snapshot::image_roles(prepared.path(), kept)?.is_some() {
         check_deadline(deadline)?;
         phase("Refreshing snapshot cache versions for optimized images");
-        crate::snapshot::refresh_site_versions(prepared.path())?;
+        crate::snapshot::refresh_site_versions(prepared.path(), kept)?;
         total = inventory(prepared.path())?.1;
-        ensure!(
-            total <= limit,
-            "Updated snapshot metadata exceeds the deployment storage limit"
-        );
+        if total > limit {
+            return Err(DoesNotFit {
+                remaining: total - limit,
+                message: "Updated snapshot metadata exceeds the deployment storage limit".into(),
+            }
+            .into());
+        }
     }
     let reduced = files.iter().filter(|file| file.quality < 100).count();
     use crate::diagnostics::{record::*, runtime};
@@ -753,6 +1176,206 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn lossless_only_preparation_reports_what_still_does_not_fit() -> Result<()> {
+        let root = report_fixture()?;
+        let source = root.path().canonicalize()?;
+        let (files, total) = inventory(&source)?;
+        let before = files
+            .iter()
+            .map(|file| fs::read(source.join(&file.relative)))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let short = |quality_floor| -> Result<u64> {
+            let error = prepare_files(
+                &source,
+                files.iter().map(|file| file.relative.clone()),
+                Request {
+                    quality_floor,
+                    ..Request::new(1, deadline())
+                },
+            )
+            .err()
+            .context("a one-byte limit cannot fit")?;
+            Ok(error
+                .downcast_ref::<DoesNotFit>()
+                .context("typed shortfall")?
+                .remaining)
+        };
+        let lossless = short(None)?;
+        // Lossless recompression saved something, and what it could not save is reported.
+        assert!(lossless > 0 && lossless < total - 1);
+        // Quality reduction saves more, so the lossless-only pass never ran it, and going down
+        // to the lowest floor saves more than stopping at the spreading floor.
+        let spread = short(Some(SPREAD_QUALITY))?;
+        assert!(spread < lossless);
+        assert!(short(Some(LOWEST_QUALITY))? < spread);
+        let after = files
+            .iter()
+            .map(|file| fs::read(source.join(&file.relative)))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        assert_eq!(before, after);
+        Ok(())
+    }
+
+    #[test]
+    fn lossless_results_are_reused_for_the_same_bytes() -> Result<()> {
+        let cache = OptimizationCache::default();
+        let options = lossless_options();
+        let source = sample_png()?;
+        let first = cache.recompress(&source, &options)?;
+        assert!(first.len() < source.len());
+        assert_eq!(first, oxipng::optimize_from_memory(&source, &options)?);
+        let directory = cache.directory().context("cache directory")?;
+        let entries = || -> Result<Vec<PathBuf>> {
+            Ok(fs::read_dir(&directory)?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<std::io::Result<_>>()?)
+        };
+        let stored = entries()?;
+        assert_eq!(stored.len(), 1);
+        // A later attempt takes the stored result instead of recompressing.
+        let substitute =
+            lodepng::encode32(&vec![rgb::RGBA8::new(1, 2, 3, 255); 256 * 128], 256, 128)?;
+        fs::write(&stored[0], &substitute)?;
+        assert_eq!(cache.recompress(&source, &options)?, substitute);
+        // Anything but a PNG of the source's dimensions is recomputed and replaced.
+        for invalid in [
+            b"stored result".to_vec(),
+            lodepng::encode32(&[rgb::RGBA8::default()], 1, 1)?,
+        ] {
+            fs::write(&stored[0], &invalid)?;
+            assert_eq!(cache.recompress(&source, &options)?, first);
+            assert_eq!(fs::read(&stored[0])?, first);
+        }
+        // Results that cannot shrink an image are remembered as such.
+        let again = cache.recompress(&first, &options)?;
+        assert!(again.len() >= first.len());
+        assert_eq!(entries()?.len(), 2);
+        assert_eq!(cache.recompress(&first, &options)?, first);
+        // The directory goes with the cache.
+        drop(cache);
+        assert!(!directory.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn quantizations_are_reused_for_the_same_bytes_and_quality() -> Result<()> {
+        let source = sample_png()?;
+        let dimensions = png_dimensions(&source);
+        assert_eq!(dimensions, Some((256, 128)));
+        let reduced = lodepng::encode32(&vec![rgb::RGBA8::new(9, 9, 9, 255); 256 * 128], 256, 128)?;
+        let root = tempfile::tempdir()?;
+        let computed = std::cell::Cell::new(0);
+        let quantize = |cache: &OptimizationCache, quality, result: Option<&[u8]>| {
+            cache.quantize("key", dimensions, quality, || {
+                computed.set(computed.get() + 1);
+                Ok(result.map(<[u8]>::to_vec))
+            })
+        };
+        let first = OptimizationCache::at(root.path().join("cache"));
+        assert_eq!(quantize(&first, 90, Some(&reduced))?, Some(reduced.clone()));
+        // A later attempt takes the stored result without computing it again.
+        assert_eq!(quantize(&first, 90, Some(&source))?, Some(reduced.clone()));
+        // Each quality is its own result, and unreachable ones are remembered as such.
+        assert_eq!(quantize(&first, 99, None)?, None);
+        assert_eq!(quantize(&first, 99, Some(&source))?, None);
+        assert_eq!(computed.get(), 2);
+        // A persistent cache outlives its client: a later deployment reuses the results.
+        drop(first);
+        let later = OptimizationCache::at(root.path().join("cache"));
+        assert_eq!(quantize(&later, 90, Some(&source))?, Some(reduced));
+        assert_eq!(quantize(&later, 99, Some(&source))?, None);
+        assert_eq!(computed.get(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn persistent_results_are_pruned_least_recently_used_first() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let now = std::time::SystemTime::now();
+        for (name, age) in [("old", 300), ("middle", 200), ("recent", 100)] {
+            let path = root.path().join(name);
+            fs::write(&path, vec![0_u8; 100])?;
+            fs::File::options()
+                .write(true)
+                .open(&path)?
+                .set_modified(now - std::time::Duration::from_secs(age))?;
+        }
+        // A use makes "old" the most recent.
+        touch(&root.path().join("old"));
+        prune(root.path(), 250);
+        let mut left = fs::read_dir(root.path())?
+            .map(|entry| Ok(entry?.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>>>()?;
+        left.sort();
+        assert_eq!(left, ["old", "recent"]);
+        // Within the limit, nothing goes.
+        prune(root.path(), 200);
+        assert_eq!(fs::read_dir(root.path())?.count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn cached_attempts_prepare_the_same_report() -> Result<()> {
+        let root = report_fixture()?;
+        let source = root.path().canonicalize()?;
+        let (files, total) = inventory(&source)?;
+        let shortfall = |cache: Option<&OptimizationCache>, quality_floor| -> Result<u64> {
+            let error = prepare_files(
+                &source,
+                files.iter().map(|file| file.relative.clone()),
+                Request {
+                    quality_floor,
+                    cache,
+                    ..Request::new(1, deadline())
+                },
+            )
+            .err()
+            .context("a one-byte limit cannot fit")?;
+            Ok(error
+                .downcast_ref::<DoesNotFit>()
+                .context("typed shortfall")?
+                .remaining)
+        };
+        for quality_floor in [None, Some(LOWEST_QUALITY)] {
+            let cache = OptimizationCache::default();
+            let uncached = shortfall(None, quality_floor)?;
+            assert!(uncached < total - 1);
+            // The first attempt fills the cache and the second reuses it, with the same outcome.
+            assert_eq!(shortfall(Some(&cache), quality_floor)?, uncached);
+            let filled = (cache.recompressions.get(), cache.quantizations.get());
+            assert!(filled.0.1 < filled.0.0);
+            assert_eq!(shortfall(Some(&cache), quality_floor)?, uncached);
+            // Every lookup of the second attempt was answered by the first.
+            let (recompressions, quantizations) =
+                (cache.recompressions.get(), cache.quantizations.get());
+            assert_eq!(recompressions.0 - filled.0.0, recompressions.1 - filled.0.1);
+            assert_eq!(quantizations.0 - filled.1.0, quantizations.1 - filled.1.1);
+            assert_eq!(quantizations.0 > 0, quality_floor.is_some());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn parallel_recompression_changes_only_the_images_needed_to_fit() -> Result<()> {
+        let root = report_fixture()?;
+        let (files, total) = inventory(root.path())?;
+        // One byte over: the first image of the first batch is enough, even though its whole
+        // batch was recompressed.
+        let prepared = prepare(root.path(), total - 1, deadline())?;
+        let changed = files
+            .iter()
+            .filter(|file| {
+                fs::read(root.path().join(&file.relative)).ok()
+                    != fs::read(prepared.path().join(&file.relative)).ok()
+            })
+            .map(|file| file.relative.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>();
+        // Equal images go in path order.
+        assert_eq!(changed, ["one/bitmaps_reference/failed.png"]);
+        Ok(())
+    }
+
+    #[test]
     fn oversized_reports_reduce_passed_images_in_temp_and_preserve_failures_and_sources()
     -> Result<()> {
         let root = report_fixture()?;
@@ -821,7 +1444,7 @@ pub(super) mod tests {
         data["tests"][1]["pair"]["engineErrorMsg"] = json!("Capture failed");
         fs::write(config, format!("report({data});"))?;
         let (mut files, _) = inventory(root.path())?;
-        classify_images(root.path(), &mut files, deadline())?;
+        classify_images(root.path(), &mut files, deadline(), &BTreeSet::new())?;
         let priorities = files
             .into_iter()
             .map(|file| (file.relative, file.priority))
@@ -859,7 +1482,11 @@ pub(super) mod tests {
         let root = directory.path().canonicalize()?;
         fs::write(root.join("index.html"), "report")?;
         fs::write(root.join("unselected.txt"), "unselected content")?;
-        let prepared = prepare_files(&root, [PathBuf::from("index.html")], 6, deadline())?;
+        let prepared = prepare_files(
+            &root,
+            [PathBuf::from("index.html")],
+            Request::new(6, deadline()),
+        )?;
         assert_eq!(prepared.path(), root);
         for relative in [
             PathBuf::from("../outside"),
@@ -867,7 +1494,7 @@ pub(super) mod tests {
             PathBuf::from("index.html?version"),
             root.join("index.html"),
         ] {
-            assert!(prepare_files(&root, [relative], 6, deadline()).is_err());
+            assert!(prepare_files(&root, [relative], Request::new(6, deadline())).is_err());
         }
         assert_eq!(fs::read(root.join("index.html"))?, b"report");
         Ok(())

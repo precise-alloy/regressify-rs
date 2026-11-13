@@ -177,6 +177,16 @@ fn page_location(url: &str, root: Option<&std::path::Path>) -> String {
     url.to_string()
 }
 
+/// Which suites the suite list shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum SuiteFilter {
+    #[default]
+    All,
+    Selected,
+    /// On the deployment target's site with newer local results.
+    Outdated,
+}
+
 impl Workbench {
     fn select_visible_suites(&mut self, visible: &[String], cx: &mut Context<Self>) {
         if self.busy || visible.is_empty() {
@@ -517,7 +527,14 @@ impl Workbench {
                     .suites
                     .iter()
                     .find(|suite| suite.entry.path == entry.path);
-                if self.selected_only && !suite.is_some_and(|suite| runs.selected(&suite.name)) {
+                let shown = match self.suite_filter {
+                    SuiteFilter::All => true,
+                    SuiteFilter::Selected => suite.is_some_and(|suite| runs.selected(&suite.name)),
+                    SuiteFilter::Outdated => {
+                        suite.is_some_and(|suite| runs.site_status(&suite.output_id) == Some(true))
+                    }
+                };
+                if !shown {
                     return None;
                 }
                 let matches = if open {
@@ -582,6 +599,34 @@ impl Workbench {
                 .collect::<Vec<_>>(),
         );
         let all_names = visible.clone();
+        let shown_names = visible.clone();
+        let outdated = self
+            .session
+            .suites
+            .iter()
+            .filter(|suite| runs.site_status(&suite.output_id) == Some(true))
+            .count();
+        let site_target = runs.site_target().map(|target| target.name.clone());
+        let deployed = runs.site_suites().map(|_| {
+            self.session
+                .suites
+                .iter()
+                .filter(|suite| runs.site_status(&suite.output_id).is_some())
+                .count()
+        });
+        let site_loading = *runs.site_source() == super::runs::SiteSource::Loading;
+        // A removal opened on a selected suite acts on every selected suite the site serves,
+        // like other list context menus act on the selection; shared to avoid a copy per row.
+        let selected_on_site = std::sync::Arc::new(
+            self.session
+                .suites
+                .iter()
+                .filter(|suite| {
+                    runs.selected(&suite.name) && runs.site_status(&suite.output_id).is_some()
+                })
+                .map(|suite| suite.output_id.clone())
+                .collect::<Vec<_>>(),
+        );
         let move_names = visible.clone();
         let move_paths = paths.clone();
         let toggle_names = visible.clone();
@@ -687,6 +732,47 @@ impl Workbench {
             let menu_entry = entry.clone();
             let rename_entry = entry.clone();
             let delete_entry = entry.clone();
+            // Site status against the deployment target the suite list describes.
+            let site = suite.and_then(|suite| {
+                Some((
+                    suite.output_id.clone(),
+                    runs.site_status(&suite.output_id)?,
+                    site_target.clone()?,
+                    runs.site_target()?.id.clone(),
+                ))
+            });
+            let removal = suite.and_then(|suite| {
+                let target = site_target.clone()?;
+                let target_id = runs.site_target()?.id.clone();
+                let ids = if selected {
+                    selected_on_site.clone()
+                } else {
+                    site.as_ref()?;
+                    std::sync::Arc::new(vec![suite.output_id.clone()])
+                };
+                (!ids.is_empty()).then_some((ids, target, target_id))
+            });
+            let deployment = suite.and_then(|suite| {
+                let target = site_target.clone()?;
+                runs.site_suites()?;
+                Some(match runs.site_status(&suite.output_id) {
+                    Some(true) => (
+                        "Newer than site",
+                        format!("Newer local results than on {target}"),
+                        cx.theme().primary,
+                    ),
+                    Some(false) => (
+                        "Deployed",
+                        format!("Deployed to {target}"),
+                        cx.theme().muted_foreground,
+                    ),
+                    None => (
+                        "Not deployed",
+                        format!("Not deployed to {target}"),
+                        cx.theme().muted_foreground.opacity(0.7),
+                    ),
+                })
+            });
             let menu_view = cx.entity().downgrade();
             let menu_focus = self.suite_list.focus.clone();
             let menu_epoch = self.suite_menu_epoch;
@@ -826,14 +912,43 @@ impl Workbench {
                                 )
                                 .child(
                                     div()
-                                        .id(("suite-activity", index))
-                                        .role(Role::Status)
-                                        .aria_label(detail.clone())
-                                        .test_support()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .min_w_0()
                                         .text_xs()
-                                        .truncate()
-                                        .text_color(status_color)
-                                        .child(detail),
+                                        .when(!detail.is_empty(), |line| {
+                                            line.child(
+                                                div()
+                                                    .id(("suite-activity", index))
+                                                    .role(Role::Status)
+                                                    .aria_label(detail.clone())
+                                                    .test_support()
+                                                    .truncate()
+                                                    .text_color(status_color)
+                                                    .child(detail.clone()),
+                                            )
+                                        })
+                                        .when_some(deployment, |line, (text, label, color)| {
+                                            line.when(!detail.is_empty(), |line| {
+                                                line.child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child("·"),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .id(("suite-site-status", index))
+                                                    .role(Role::Status)
+                                                    .aria_label(label)
+                                                    .test_support()
+                                                    .flex_shrink_0()
+                                                    .text_color(color)
+                                                    .child(text),
+                                            )
+                                        }),
                                 ),
                         )
                         .disabled(self.busy)
@@ -874,8 +989,10 @@ impl Workbench {
                     );
                     let rename_view = menu_view.clone();
                     let delete_view = menu_view.clone();
+                    let removal_view = menu_view.clone();
                     let rename_entry = rename_entry.clone();
                     let delete_entry = delete_entry.clone();
+                    let removal = removal.clone();
                     menu.action_context(menu_focus.clone())
                         .item(
                             PopupMenuItem::new("Rename suite").on_click(move |_, window, cx| {
@@ -907,6 +1024,27 @@ impl Workbench {
                                 });
                             }),
                         )
+                        // Removing from the site is a deployment, kept apart from deleting the
+                        // suite's local files.
+                        .when_some(removal, |menu, (ids, target, target_id)| {
+                            let label = match ids.len() {
+                                1 => format!("Remove from site: {target}..."),
+                                count => {
+                                    format!("Remove {count} selected suites from site: {target}...")
+                                }
+                            };
+                            menu.separator().item(PopupMenuItem::new(label).on_click(
+                                move |_, window, cx| {
+                                    let ids = ids.to_vec();
+                                    let target_id = target_id.clone();
+                                    let _ = removal_view.update(cx, |this, cx| {
+                                        if this.suite_menu_epoch == menu_epoch {
+                                            this.open_site_removal(ids, target_id, window, cx);
+                                        }
+                                    });
+                                },
+                            ))
+                        })
                 })
                 .into_any_element()
             };
@@ -987,6 +1125,68 @@ impl Workbench {
                             })),
                     ),
             )
+            // Which site the suite statuses describe, with counts and a shortcut to the
+            // outdated suites.
+            .when_some(site_target.clone(), |pane, target| {
+                let busy = self.busy || runs.running();
+                let summary = match deployed {
+                    Some(deployed) => format!("{deployed} deployed"),
+                    None if site_loading => "reading the site...".into(),
+                    None => "status unknown".into(),
+                };
+                pane.child(
+                    div()
+                        .id("suite-site-summary")
+                        .role(Role::Group)
+                        .aria_label(format!("Site {target}: {summary}"))
+                        .test_support()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .px_3()
+                        .pb_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(
+                            Button::new("suite-site-target")
+                                .ghost()
+                                .xsmall()
+                                .label(format!("Site: {target}"))
+                                .icon(IconName::ChevronDown)
+                                .tooltip("The deployment target these statuses describe; open Deploy to choose another")
+                                .accessibility_label(format!("Site {target}, choose another target"))
+                                .disabled(busy)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_deployment(window, cx)
+                                })),
+                        )
+                        .child("·")
+                        .child(
+                            div()
+                                .id("suite-site-deployed")
+                                .role(Role::Status)
+                                .aria_label(summary.clone())
+                                .test_support()
+                                .child(summary),
+                        )
+                        .when(outdated > 0, |row| {
+                            row.child("·").child(
+                                Button::new("suite-site-outdated")
+                                    .link()
+                                    .xsmall()
+                                    .label(format!("{outdated} outdated"))
+                                    .tooltip("Show only suites with newer local results")
+                                    .accessibility_label(format!("Show {outdated} outdated suites"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.suite_filter = SuiteFilter::Outdated;
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
+                )
+            })
             .child(
                 div().px_3().pb_2().child(
                     Input::new(&self.search)
@@ -1006,13 +1206,22 @@ impl Workbench {
                     .child(
                         TabBar::new("navigator-filter")
                             .segmented()
-                            .selected_index(usize::from(self.selected_only))
-                            .on_click(cx.listener(|this, index, _, cx| {
-                                this.selected_only = *index == 1;
+                            .selected_index(match self.suite_filter {
+                                SuiteFilter::All => 0,
+                                SuiteFilter::Selected => 1,
+                                SuiteFilter::Outdated => 2,
+                            })
+                            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                                this.suite_filter = match *index {
+                                    1 => SuiteFilter::Selected,
+                                    2 => SuiteFilter::Outdated,
+                                    _ => SuiteFilter::All,
+                                };
                                 cx.notify();
                             }))
                             .child(Tab::new().label("All"))
-                            .child(Tab::new().label("Selected")),
+                            .child(Tab::new().label("Selected"))
+                            .child(Tab::new().label(format!("Outdated {outdated}"))),
                     )
                     .child(
                         div()
@@ -1038,11 +1247,13 @@ impl Workbench {
                                 Button::new("sidebar-select-all")
                                     .ghost()
                                     .label("All")
-                                    .accessibility_label("Select all suites")
-                                    .disabled(self.busy || runs.running() || valid == 0)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.runs
-                                            .update(cx, |panel, cx| panel.select_all(true, cx));
+                                    // Filters and searches narrow what "All" selects.
+                                    .accessibility_label("Select all shown suites")
+                                    .disabled(
+                                        self.busy || runs.running() || valid == 0 || shown_names.is_empty(),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.select_visible_suites(&shown_names, cx);
                                     })),
                             ),
                     ),

@@ -1,5 +1,5 @@
 use super::*;
-use crate::desktop::deployment::DeployTargets;
+use crate::desktop::deployment::{DeployTarget, DeployTargets};
 use crate::desktop::results::{SavedRun, SuiteArtifacts};
 
 #[derive(Default)]
@@ -12,6 +12,17 @@ pub(super) struct ArtifactScan {
 }
 
 impl ArtifactScan {
+    pub(super) fn latest_run_id(&self, id: &str) -> Option<String> {
+        Some(self.suites.get(id)?.as_ref().ok()?.latest()?.run_id.clone())
+    }
+
+    pub(super) fn latest_run_ids(&self) -> BTreeMap<String, String> {
+        self.suites
+            .keys()
+            .filter_map(|id| Some((id.clone(), self.latest_run_id(id)?)))
+            .collect()
+    }
+
     pub(super) fn clear(&mut self) {
         self.generation += 1;
         self.root = None;
@@ -139,7 +150,17 @@ impl RunPanel {
                 panel.artifacts.suites = artifacts;
                 panel.artifacts.loading = false;
                 match publications {
-                    Ok(publications) => panel.artifacts.publications = publications,
+                    Ok(publications) => {
+                        let saved = followed_target(panel.site_target(), &publications);
+                        let reload = std::mem::take(&mut panel.site.reload_pending);
+                        if reload || saved.as_ref() != panel.site_target() {
+                            panel.refresh_site(saved, reload, cx);
+                        } else {
+                            // Local results may have changed without a new run (an approval).
+                            panel.verify_site(cx);
+                        }
+                        panel.artifacts.publications = publications;
+                    }
                     Err(error) => {
                         panel.artifacts.publications = DeployTargets::default();
                         panel.status = format!("Cannot load deployed sites: {error:#}");
@@ -364,4 +385,18 @@ impl RunPanel {
             )
             .into_any_element()
     }
+}
+
+/// The target the site scan should show, refreshed from its saved settings: the one it follows
+/// (the Deploy dialog may have chosen it) while the loaded settings still hold it, else the saved
+/// selection. A target from another workspace, or one since deleted, falls back to the selection.
+pub(super) fn followed_target(
+    followed: Option<&DeployTarget>,
+    publications: &DeployTargets,
+) -> Option<DeployTarget> {
+    let find = |id: &str| publications.targets.iter().find(|target| target.id == id);
+    followed
+        .and_then(|target| find(&target.id))
+        .or_else(|| publications.selected.as_deref().and_then(find))
+        .cloned()
 }

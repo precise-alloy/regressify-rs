@@ -1233,7 +1233,7 @@ impl Preferences {
     }
 
     pub fn path() -> Result<PathBuf> {
-        directories::ProjectDirs::from("", "Regressify", "Regressify Desktop")
+        super::project_directories()
             .map(|directories| directories.config_dir().join("settings.json"))
             .ok_or_else(|| anyhow!("Cannot determine the desktop settings directory"))
     }

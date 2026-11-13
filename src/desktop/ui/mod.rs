@@ -174,7 +174,7 @@ pub struct Workbench {
     workspace_list: Entity<navigation::WorkspaceListState>,
     sequence_list: Entity<sequence::SequenceListState>,
     workspace_files_open: bool,
-    selected_only: bool,
+    suite_filter: navigation::SuiteFilter,
     field_search: Entity<InputState>,
     overrides_only: bool,
     collapsed_fields: BTreeSet<usize>,
@@ -306,6 +306,12 @@ impl Workbench {
                 runs::RunEvent::Requested(intent) => this.guard_run(intent.clone(), window, cx),
                 runs::RunEvent::Finished => {
                     this.status = "Command finished".into();
+                    if this.runs.read(cx).last_command()
+                        == Some(crate::desktop::runner::RunCommand::Deploy)
+                    {
+                        this.runs
+                            .update(cx, |panel, cx| panel.reload_site_after_deployment(cx));
+                    }
                     if let Err(error) = this.session.refresh() {
                         this.status = format!("{error:#}");
                     }
@@ -549,7 +555,7 @@ impl Workbench {
             workspace_list,
             sequence_list,
             workspace_files_open: false,
-            selected_only: false,
+            suite_filter: navigation::SuiteFilter::All,
             field_search,
             overrides_only: false,
             collapsed_fields: BTreeSet::new(),
@@ -749,7 +755,7 @@ impl Workbench {
                 this.scenario_search
                     .update(cx, |state, cx| state.set_value("", window, cx));
                 this.workspace_files_open = false;
-                this.selected_only = false;
+                this.suite_filter = navigation::SuiteFilter::All;
                 this.search
                     .update(cx, |state, cx| state.set_value("", window, cx));
                 this.results.update(cx, |panel, cx| panel.clear(window, cx));

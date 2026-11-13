@@ -165,14 +165,22 @@ impl NetlifyClient {
     }
 
     pub async fn deploy(&self, root: &Path, target: &DeployTarget) -> Result<String> {
-        self.deploy_with_stats(root, target, &mut super::DeploymentStats::default())
-            .await
+        self.deploy_with_stats(
+            root,
+            target,
+            &super::KeptFiles::new(),
+            &mut super::DeploymentStats::default(),
+        )
+        .await
     }
 
+    /// Publishes `root` plus `kept` files the site already serves, which are listed in the
+    /// deploy by digest without being uploaded.
     pub(super) async fn deploy_with_stats(
         &self,
         root: &Path,
         target: &DeployTarget,
+        kept: &super::KeptFiles,
         stats: &mut super::DeploymentStats,
     ) -> Result<String> {
         target.validate()?;
@@ -202,6 +210,7 @@ impl NetlifyClient {
             );
             phase("Hashing selected report files for Netlify");
             let directory = root.to_path_buf();
+            let kept = kept.clone();
             let diagnostic_context = crate::diagnostics::runtime::current();
             let manifest = tokio::task::spawn_blocking(move || {
                 crate::diagnostics::runtime::in_scope(diagnostic_context, || {
@@ -212,21 +221,26 @@ impl NetlifyClient {
                             (Field::Provider, FieldValue::Kind(SafeValue::Netlify)),
                             (Field::Compression, FieldValue::Boolean(false)),
                         ],
-                        || Manifest::create(&directory, deadline),
+                        || {
+                            let mut manifest = Manifest::create(&directory, deadline)?;
+                            manifest.keep(&kept, MAX_FILES)?;
+                            Ok(manifest)
+                        },
                     )
                 })
             })
             .await??;
+            // The published site includes kept files, so stats count them like Cloudflare's.
+            let counts = manifest.counts();
             *stats = super::DeploymentStats {
-                file_count: manifest.files.len() as u64,
-                original_bytes: manifest.bytes,
-                total_bytes: manifest.bytes,
+                file_count: counts.files() as u64,
+                original_bytes: counts.bytes(),
+                total_bytes: counts.bytes(),
+                state_dropped: false,
             };
             phase(&format!(
-                "Netlify manifest ready: {} files ({:.2} MiB, {} unique digests)",
-                manifest.files.len(),
-                manifest.bytes as f64 / (1024.0 * 1024.0),
-                manifest.contents.len()
+                "Netlify manifest ready: {}",
+                counts.describe("digests", "digest")
             ));
             {
                 use crate::diagnostics::{record::*, runtime};
@@ -235,11 +249,8 @@ impl NetlifyClient {
                     DiagnosticEvent::Decision,
                     Severity::Info,
                     [
-                        (Field::Bytes, FieldValue::Number(manifest.bytes)),
-                        (
-                            Field::FileCount,
-                            FieldValue::Number(manifest.files.len() as u64),
-                        ),
+                        (Field::Bytes, FieldValue::Number(counts.bytes())),
+                        (Field::FileCount, FieldValue::Number(counts.files() as u64)),
                         (Field::Compression, FieldValue::Boolean(false)),
                     ],
                 );
@@ -252,8 +263,8 @@ impl NetlifyClient {
             );
             phase(&format!(
                 "Creating Netlify deployment for {} files ({:.2} MiB content)",
-                manifest.files.len(),
-                manifest.bytes as f64 / (1024.0 * 1024.0)
+                counts.files(),
+                counts.bytes() as f64 / (1024.0 * 1024.0)
             ));
             let create_started = Instant::now();
             diagnostics::request_started(
@@ -564,7 +575,13 @@ struct Manifest {
     root: PathBuf,
     files: BTreeMap<String, String>,
     contents: BTreeMap<String, ManifestFile>,
+    /// Bytes of the staged files only; kept files are counted in `kept_bytes`.
     bytes: u64,
+    /// Digests of files kept on the site without local content.
+    kept: BTreeSet<String>,
+    /// Paths and sizes of kept files, which `files` lists but `bytes` and `contents` do not.
+    kept_files: usize,
+    kept_bytes: u64,
 }
 
 impl Manifest {
@@ -588,6 +605,9 @@ impl Manifest {
             files: BTreeMap::new(),
             contents: BTreeMap::new(),
             bytes: 0,
+            kept: BTreeSet::new(),
+            kept_files: 0,
+            kept_bytes: 0,
         };
         let mut last_update = Instant::now();
         for entry in walkdir::WalkDir::new(&manifest.root)
@@ -714,6 +734,50 @@ impl Manifest {
         Ok(file)
     }
 
+    /// Lists files the site already serves by their digests. They are untrusted state from the
+    /// site, so they are validated like local paths and may not shadow staged files.
+    fn keep(&mut self, kept: &super::KeptFiles, file_limit: usize) -> Result<()> {
+        for (path, file) in kept {
+            ensure!(
+                super::site_state::valid_site_path(path) && super::is_lower_hex(&file.hash, 40),
+                "Invalid kept Netlify file '{path}'"
+            );
+            let key = format!("/{path}");
+            // Suites captured by one run share its capture-log chunks, so a regenerated suite
+            // can stage a chunk a kept suite also lists. Identical content is listed once;
+            // different content at one path cannot be published and fails.
+            if let Some(staged) = self.files.get(&key) {
+                ensure!(
+                    *staged == file.hash,
+                    "A kept suite file differs from the staged file at {path}"
+                );
+                continue;
+            }
+            self.files.insert(key, file.hash.clone());
+            ensure!(
+                self.files.len() <= file_limit,
+                "Netlify deployment exceeds the {file_limit}-file limit"
+            );
+            self.kept.insert(file.hash.clone());
+            self.kept_files += 1;
+            self.kept_bytes = self
+                .kept_bytes
+                .checked_add(file.size)
+                .context("Kept Netlify content size overflow")?;
+        }
+        Ok(())
+    }
+
+    fn counts(&self) -> super::ManifestCounts {
+        super::ManifestCounts {
+            staged_files: self.files.len() - self.kept_files,
+            staged_bytes: self.bytes,
+            unique: self.contents.len(),
+            kept_files: self.kept_files,
+            kept_bytes: self.kept_bytes,
+        }
+    }
+
     fn required_files(&self, required: &[String]) -> Result<Vec<(&str, &ManifestFile)>> {
         let mut files = Vec::new();
         let mut seen = BTreeSet::new();
@@ -723,6 +787,12 @@ impl Manifest {
                 "Netlify returned an invalid required-file digest"
             );
             let digest = digest.to_ascii_lowercase();
+            // Content of a kept suite that Netlify no longer stores cannot be uploaded from
+            // here; failing before any upload leaves the published site untouched.
+            ensure!(
+                self.contents.contains_key(&digest) || !self.kept.contains(&digest),
+                "Netlify no longer has the content of a suite kept on this site; replace the whole site"
+            );
             let (digest, file) = self
                 .contents
                 .get_key_value(&digest)
@@ -906,7 +976,7 @@ fn validate_static_configuration(root: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[tokio::test]
     async fn netlify_retry_then_success_records_attempts() -> Result<()> {
         let uploads = Arc::new(AtomicUsize::new(0));
@@ -948,10 +1018,10 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    const SITE_ID: &str = "eacbea58-4222-4e16-9611-f3b91082a8aa";
+    pub(crate) const SITE_ID: &str = "eacbea58-4222-4e16-9611-f3b91082a8aa";
     const TOKEN: &str = "synthetic-netlify-access-token";
 
-    fn target() -> DeployTarget {
+    pub(crate) fn target() -> DeployTarget {
         DeployTarget {
             id: "netlify".into(),
             name: "Netlify QA".into(),
@@ -965,7 +1035,7 @@ mod tests {
         }
     }
 
-    fn client(origin: &str) -> NetlifyClient {
+    pub(crate) fn client(origin: &str) -> NetlifyClient {
         let mut client = NetlifyClient::new(TOKEN).unwrap();
         client.endpoint = Url::parse(&format!("{origin}/api/v1/")).unwrap();
         client.backoff = Duration::from_millis(1);
@@ -1102,7 +1172,12 @@ mod tests {
         let mut stats = super::super::DeploymentStats::default();
         assert_eq!(
             client(&site.origin)
-                .deploy_with_stats(root.path(), &target(), &mut stats)
+                .deploy_with_stats(
+                    root.path(),
+                    &target(),
+                    &super::super::KeptFiles::new(),
+                    &mut stats,
+                )
                 .await?,
             "https://qa-reports.netlify.app/"
         );
@@ -1139,6 +1214,158 @@ mod tests {
                 .iter()
                 .any(|record| record.0 == "GET" && record.1.ends_with("/deploys/deploy-123"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn kept_files_shared_with_staged_files_are_listed_once() -> Result<()> {
+        // A capture-log chunk a regenerated suite stages and a kept suite also lists.
+        const HELLO: &str = "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d";
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("index.html"), "hello")?;
+        std::fs::create_dir_all(root.path().join("_snapshot/data/logs"))?;
+        std::fs::write(root.path().join("_snapshot/data/logs/run.json"), "hello")?;
+        let shared = |hash: &str| {
+            super::super::KeptFiles::from([(
+                "_snapshot/data/logs/run.json".to_owned(),
+                super::super::site_state::StateFile {
+                    size: 5,
+                    hash: hash.into(),
+                },
+            )])
+        };
+        let mut manifest = Manifest::create(root.path(), Instant::now() + Duration::from_secs(60))?;
+        manifest.keep(&shared(HELLO), MAX_FILES)?;
+        let counts = manifest.counts();
+        assert_eq!(
+            (counts.staged_files, counts.kept_files, counts.kept_bytes),
+            (2, 0, 0)
+        );
+        assert!(manifest.kept.is_empty());
+        // Different content at one path cannot be published.
+        let mut conflicting =
+            Manifest::create(root.path(), Instant::now() + Duration::from_secs(60))?;
+        let error = conflicting
+            .keep(&shared(&"1".repeat(40)), MAX_FILES)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("differs from the staged file"), "{error}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn kept_files_are_listed_by_digest_and_never_uploaded() -> Result<()> {
+        const KEPT: &str = "1111111111111111111111111111111111111111";
+        for required_kept in [false, true] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let captured = requests.clone();
+            let site = crate::test::browser_tests::Site::new(move |mut request| {
+                let method = request.method().as_str().to_owned();
+                let path = request.url().to_owned();
+                let mut body = Vec::new();
+                request.as_reader().read_to_end(&mut body).unwrap();
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), path.clone(), body.clone()));
+                let response = if path == format!("/api/v1/sites/{SITE_ID}") {
+                    json!({"id":SITE_ID})
+                } else if method == "POST" {
+                    // Netlify lost the kept content in the second case.
+                    let required = if required_kept {
+                        json!([KEPT])
+                    } else {
+                        json!(["aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"])
+                    };
+                    json!({"id":"deploy-123", "site_id":SITE_ID, "state":"prepared",
+                        "required":required})
+                } else if method == "PUT" {
+                    json!({})
+                } else {
+                    json!({"id":"deploy-123", "site_id":SITE_ID, "state":"ready",
+                        "ssl_url":"https://qa-reports.netlify.app/"})
+                };
+                let _ = request.respond(tiny_http::Response::from_string(response.to_string()));
+            })?;
+            let root = tempfile::tempdir()?;
+            std::fs::write(root.path().join("index.html"), "hello")?;
+            let kept = super::super::KeptFiles::from([(
+                "_snapshot/images/kept/test/home.png".to_owned(),
+                super::super::site_state::StateFile {
+                    size: 7,
+                    hash: KEPT.into(),
+                },
+            )]);
+            let mut stats = super::super::DeploymentStats::default();
+            let result = client(&site.origin)
+                .deploy_with_stats(root.path(), &target(), &kept, &mut stats)
+                .await;
+            // The published site includes the kept file: 5 staged bytes plus 7 kept.
+            assert_eq!((stats.file_count, stats.total_bytes), (2, 12));
+            let mut manifest =
+                Manifest::create(root.path(), Instant::now() + Duration::from_secs(60))?;
+            manifest.keep(&kept, MAX_FILES)?;
+            assert_eq!(
+                manifest.counts().describe("digests", "digest"),
+                "2 files: 1 staged (0.00 MiB, 1 unique digests), 1 kept by digest (0.00 MiB)"
+            );
+            let records = requests.lock().unwrap();
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &records
+                    .iter()
+                    .find(|record| record.0 == "POST")
+                    .context("missing deploy")?
+                    .2,
+            )?;
+            assert_eq!(
+                manifest["files"]["/_snapshot/images/kept/test/home.png"],
+                KEPT
+            );
+            assert!(
+                records
+                    .iter()
+                    .filter(|record| record.0 == "PUT")
+                    .all(|record| !record.1.contains("kept")),
+                "kept files must never be uploaded"
+            );
+            if required_kept {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("replace the whole site"), "{error}");
+                assert!(records.iter().all(|record| record.0 != "PUT"));
+            } else {
+                assert_eq!(result?, "https://qa-reports.netlify.app/");
+            }
+        }
+
+        // Kept entries are untrusted: invalid digests, unsafe paths, and staged collisions fail
+        // before Netlify is contacted.
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("index.html"), "hello")?;
+        for (path, hash) in [
+            ("_snapshot/images/kept/test/home.png", "XYZ"),
+            ("_snapshot/../escape.png", KEPT),
+            ("index.html", KEPT),
+        ] {
+            let mut manifest =
+                Manifest::create(root.path(), Instant::now() + Duration::from_secs(60))?;
+            let kept = super::super::KeptFiles::from([(
+                path.to_owned(),
+                super::super::site_state::StateFile {
+                    size: 1,
+                    hash: hash.into(),
+                },
+            )]);
+            assert!(manifest.keep(&kept, MAX_FILES).is_err(), "{path}");
+        }
+        let mut manifest = Manifest::create(root.path(), Instant::now() + Duration::from_secs(60))?;
+        let kept = super::super::KeptFiles::from([(
+            "_snapshot/images/kept/a.png".to_owned(),
+            super::super::site_state::StateFile {
+                size: 1,
+                hash: KEPT.into(),
+            },
+        )]);
+        assert!(manifest.keep(&kept, 1).is_err());
         Ok(())
     }
 

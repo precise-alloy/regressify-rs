@@ -12,9 +12,14 @@ use sha2::{Digest, Sha256};
 pub mod cloudflare;
 pub mod credentials;
 mod diagnostics;
+pub(crate) mod incremental;
 pub mod netlify;
 mod optimization;
 mod package;
+// The preview serves the native UI only.
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub(crate) mod preview;
+pub(crate) mod site_state;
 pub mod swa;
 pub mod tokens;
 
@@ -30,6 +35,12 @@ pub enum DeploymentProvider {
 }
 
 impl DeploymentProvider {
+    /// Whether a deployment can keep files already on the site by their hash. Azure Static
+    /// Web Apps accepts only whole packages, so everything it keeps must be uploaded again.
+    pub(crate) fn keeps_files_by_hash(self) -> bool {
+        self != Self::AzureSwa
+    }
+
     pub(crate) fn diagnostic_value(self) -> crate::diagnostics::record::SafeValue {
         use crate::diagnostics::record::SafeValue;
         match self {
@@ -127,6 +138,20 @@ impl<'de> Deserialize<'de> for DeployTarget {
     }
 }
 
+/// How a report deployment changes the site.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum DeploymentMode {
+    /// The site becomes exactly the selected suites. The default for requests saved before
+    /// incremental deployment existed.
+    #[default]
+    Replace,
+    /// Publish the selected suites and keep every other suite already on the site.
+    Update,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeploymentJob {
@@ -134,30 +159,55 @@ pub struct DeploymentJob {
     pub suite_ids: Vec<String>,
     pub catalog_ids: Vec<String>,
     pub partial_confirmed: bool,
+    /// Publish even when the staged site matches the target's last recorded deployment.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+    /// Requests saved before incremental deployment existed replace the site.
+    #[serde(default)]
+    pub mode: DeploymentMode,
+    /// Suites to remove from the site in `Update` mode. They may no longer exist in the
+    /// workspace, so they are not limited to the catalog.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_ids: Vec<String>,
 }
 
 impl DeploymentJob {
     pub fn validate(&self) -> Result<()> {
         self.target.validate()?;
-        ensure!(
-            !self.suite_ids.is_empty(),
-            "Select at least one test suite to deploy"
-        );
         let selected = self.suite_ids.iter().collect::<BTreeSet<_>>();
         let catalog = self.catalog_ids.iter().collect::<BTreeSet<_>>();
+        let remove = self.remove_ids.iter().collect::<BTreeSet<_>>();
         ensure!(
             selected.len() == self.suite_ids.len()
                 && catalog.len() == self.catalog_ids.len()
-                && selected.is_subset(&catalog),
+                && remove.len() == self.remove_ids.len()
+                && selected.is_subset(&catalog)
+                && selected.is_disjoint(&remove),
             "Deployment suite selection is invalid"
         );
-        for suite in &self.catalog_ids {
+        for suite in self.catalog_ids.iter().chain(&self.remove_ids) {
             validate_suite_id(suite)?;
         }
-        ensure!(
-            selected == catalog || self.partial_confirmed,
-            "Confirm that you intend to deploy only the selected test suites"
-        );
+        match self.mode {
+            DeploymentMode::Replace => {
+                ensure!(
+                    !self.suite_ids.is_empty(),
+                    "Select at least one test suite to deploy"
+                );
+                ensure!(
+                    self.remove_ids.is_empty(),
+                    "Replacing the site removes suites by deselecting them"
+                );
+                ensure!(
+                    selected == catalog || self.partial_confirmed,
+                    "Confirm that you intend to deploy only the selected test suites"
+                );
+            }
+            DeploymentMode::Update => ensure!(
+                !self.suite_ids.is_empty() || !self.remove_ids.is_empty(),
+                "Select at least one test suite to deploy or remove"
+            ),
+        }
         Ok(())
     }
 }
@@ -298,6 +348,17 @@ impl DeployTarget {
                 _ => false,
             }
     }
+
+    /// Everything that decides where and how a deployment publishes, including credentials
+    /// and Cloudflare asset options; display names and saved URLs are excluded.
+    fn same_publication_settings(&self, other: &Self) -> bool {
+        let publication = |target: &Self| Self {
+            name: String::new(),
+            published_url: None,
+            ..target.clone()
+        };
+        publication(self) == publication(other)
+    }
 }
 
 pub fn validate_published_url(value: &str) -> Result<()> {
@@ -339,6 +400,85 @@ fn same_published_site(left: &str, right: &str) -> bool {
 pub struct ReportPublication {
     pub target_id: String,
     pub suite_ids: Vec<String>,
+    /// `deployment_fingerprint` of the published content. Absent for legacy records and after
+    /// an attempt whose outcome is unknown, so the next deployment always publishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_fingerprint: Option<String>,
+    /// `deployment_input_fingerprint` of inputs known to generate `site_fingerprint`'s content,
+    /// so an unchanged deployment can be recognized before generating anything. Only valid
+    /// together with `site_fingerprint`; cleared with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_fingerprint: Option<String>,
+}
+
+/// Saved site URL and published content fingerprint of a deployment that needs no upload.
+pub type UnchangedSite = (String, String);
+
+fn valid_fingerprint(value: &str) -> bool {
+    is_lower_hex(value, 64)
+}
+
+/// Whether `value` is exactly `len` lowercase hex digits, the form Regressify writes every
+/// fingerprint and provider hash in. Records read back must match it exactly, because they are
+/// compared as strings.
+pub(crate) fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Identity of what a report deployment publishes: the staged site content plus the target
+/// settings that shape the provider site (routing, HTML handling, exclusions, environment).
+/// Display names, saved URLs, and credential references do not change the published site.
+///
+/// `staging` must already be verified by `stage_reports`; see `snapshot::site_fingerprint`.
+pub fn deployment_fingerprint(
+    staging: &Path,
+    suite_ids: &[String],
+    target: &DeployTarget,
+) -> Result<String> {
+    let site = crate::snapshot::site_fingerprint(staging, suite_ids)?;
+    target_bound_fingerprint(b"regressify-deployment-fingerprint-v1", &site, target)
+}
+
+/// Identity of what a report deployment would be generated from: the snapshot inputs of its
+/// suites and report text plus the same target settings as `deployment_fingerprint`. Equal to
+/// a publication's recorded inputs, it proves the deployment would publish that content again.
+pub fn deployment_input_fingerprint(
+    output: &Path,
+    job: &DeploymentJob,
+    args: &crate::cli::args::SnapshotArgs,
+    workspace: &crate::config::WorkspaceConfig,
+) -> Result<String> {
+    let inputs = crate::snapshot::input_fingerprint(output, &job.suite_ids, args, workspace)?;
+    // The mode and removals shape the published site as much as the generated suites do.
+    let mut removals = job.remove_ids.clone();
+    removals.sort();
+    let content = format!("{inputs}\0{:?}\0{}", job.mode, removals.join("\0"));
+    target_bound_fingerprint(b"regressify-deployment-inputs-v2", &content, &job.target)
+}
+
+fn target_bound_fingerprint(kind: &[u8], content: &str, target: &DeployTarget) -> Result<String> {
+    #[derive(Serialize)]
+    struct PublishedSettings<'a> {
+        provider: DeploymentProvider,
+        environment: &'a str,
+        site_id: &'a str,
+        cloudflare: &'a Option<cloudflare::CloudflareTarget>,
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(kind);
+    hasher.update([0]);
+    hasher.update(content.as_bytes());
+    hasher.update([0]);
+    hasher.update(serde_json::to_vec(&PublishedSettings {
+        provider: target.provider,
+        environment: &target.environment,
+        site_id: &target.site_id,
+        cloudflare: &target.cloudflare,
+    })?);
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -421,7 +561,7 @@ impl DeployTargets {
         target: &DeployTarget,
         url: Option<&str>,
     ) -> Result<Self> {
-        Self::record_publication_for_suites(path, target, url, &[])
+        Self::record_publication_for_suites(path, target, url, &[], None, None)
     }
 
     pub fn record_report_publication(
@@ -430,11 +570,145 @@ impl DeployTargets {
         url: Option<&str>,
         suite_ids: &[String],
     ) -> Result<Self> {
+        Self::record_deployed_report(path, target, url, suite_ids, None, None)
+    }
+
+    /// Records a confirmed report publication with the fingerprint of its published content and
+    /// of the inputs it was generated from.
+    pub fn record_deployed_report(
+        path: &Path,
+        target: &DeployTarget,
+        url: Option<&str>,
+        suite_ids: &[String],
+        fingerprint: Option<&str>,
+        inputs: Option<&str>,
+    ) -> Result<Self> {
         ensure!(
             !suite_ids.is_empty(),
             "Published reports must contain at least one suite"
         );
-        Self::record_publication_for_suites(path, target, url, suite_ids)
+        ensure!(
+            inputs.is_none() || fingerprint.is_some(),
+            "Report inputs can only be recorded with their published content"
+        );
+        Self::record_publication_for_suites(path, target, url, suite_ids, fingerprint, inputs)
+    }
+
+    /// The fingerprint of `target`'s last confirmed report publication, if it still describes
+    /// the saved target's destination.
+    pub fn report_fingerprint(&self, target: &DeployTarget) -> Option<&str> {
+        self.targets
+            .iter()
+            .find(|saved| saved.id == target.id)
+            .filter(|saved| saved.published_url.is_some() && saved.same_destination(target))?;
+        self.report_publications
+            .iter()
+            .find(|publication| publication.target_id == target.id)?
+            .site_fingerprint
+            .as_deref()
+    }
+
+    /// The saved site URL when `fingerprint` matches `target`'s last confirmed publication, so
+    /// publishing again would serve the same site.
+    pub fn unchanged_site_url(&self, target: &DeployTarget, fingerprint: &str) -> Option<String> {
+        if self.report_fingerprint(target)? != fingerprint {
+            return None;
+        }
+        self.saved_url(target)
+    }
+
+    /// The saved site URL and published content fingerprint when `inputs` match the inputs
+    /// recorded for `target`'s last confirmed publication, so generating the deployment again
+    /// would reproduce that content.
+    pub fn unchanged_inputs(&self, target: &DeployTarget, inputs: &str) -> Option<UnchangedSite> {
+        let fingerprint = self.report_fingerprint(target)?;
+        let publication = self
+            .report_publications
+            .iter()
+            .find(|publication| publication.target_id == target.id)?;
+        if publication.input_fingerprint.as_deref() != Some(inputs) {
+            return None;
+        }
+        Some((self.saved_url(target)?, fingerprint.to_owned()))
+    }
+
+    fn saved_url(&self, target: &DeployTarget) -> Option<String> {
+        self.targets
+            .iter()
+            .find(|saved| saved.id == target.id)?
+            .published_url
+            .clone()
+    }
+
+    /// Records that `inputs` generate the content `fingerprint` already published to
+    /// `target_id`, after a deployment skipped its upload because only the inputs changed
+    /// (for example, a new run with identical captures). Nothing changes when the published
+    /// content is no longer `fingerprint`.
+    pub fn record_report_inputs(
+        path: &Path,
+        target_id: &str,
+        fingerprint: &str,
+        inputs: &str,
+    ) -> Result<()> {
+        let mut settings = Self::load(path)?;
+        let Some(publication) = settings
+            .report_publications
+            .iter_mut()
+            .find(|publication| publication.target_id == target_id)
+            .filter(|publication| {
+                publication.site_fingerprint.as_deref() == Some(fingerprint)
+                    && publication.input_fingerprint.as_deref() != Some(inputs)
+            })
+        else {
+            return Ok(());
+        };
+        publication.input_fingerprint = Some(inputs.to_owned());
+        settings.save(path)
+    }
+
+    /// Forgets the recorded content of every target publishing to `target`'s site before or
+    /// after a deployment attempt whose effect on the site is unknown, while keeping suite
+    /// membership for Open Site links. Otherwise a failed upload followed by a return to the
+    /// recorded content could skip a needed publish.
+    ///
+    /// Targets share a site when they have the same destination or the same saved site URL,
+    /// matching how a confirmed publication replaces the membership of a shared site.
+    pub fn forget_report_fingerprint(path: &Path, target: &DeployTarget) -> Result<()> {
+        let mut settings = Self::load(path)?;
+        let saved_url = settings
+            .targets
+            .iter()
+            .find(|saved| saved.id == target.id)
+            .and_then(|saved| saved.published_url.clone());
+        let shared = settings
+            .targets
+            .iter()
+            .filter(|saved| {
+                saved.id == target.id
+                    || saved.same_destination(target)
+                    || saved.published_url.as_deref().is_some_and(|url| {
+                        saved_url
+                            .as_deref()
+                            .is_some_and(|own| same_published_site(url, own))
+                    })
+            })
+            .map(|saved| saved.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut changed = false;
+        for publication in &mut settings.report_publications {
+            if (shared.contains(&publication.target_id) || publication.target_id == target.id)
+                && (publication.site_fingerprint.is_some()
+                    || publication.input_fingerprint.is_some())
+            {
+                publication.site_fingerprint = None;
+                publication.input_fingerprint = None;
+                changed = true;
+            }
+        }
+        if changed {
+            settings.save(path)?;
+        }
+        Ok(())
     }
 
     fn record_publication_for_suites(
@@ -442,6 +716,8 @@ impl DeployTargets {
         target: &DeployTarget,
         url: Option<&str>,
         suite_ids: &[String],
+        fingerprint: Option<&str>,
+        inputs: Option<&str>,
     ) -> Result<Self> {
         if let Some(url) = url {
             validate_published_url(url)?;
@@ -482,6 +758,8 @@ impl DeployTargets {
             settings.report_publications.push(ReportPublication {
                 target_id: target.id.clone(),
                 suite_ids: suite_ids.to_vec(),
+                site_fingerprint: fingerprint.map(str::to_owned),
+                input_fingerprint: inputs.map(str::to_owned),
             });
         }
         settings.save(path)?;
@@ -563,6 +841,13 @@ impl DeployTargets {
             next.report_publications
                 .retain(|publication| publication.target_id != target.id);
         }
+        // An Azure token identifies the app, so replacing it may point at another site.
+        let other_site = self.targets.iter().any(|previous| {
+            previous.id == target.id
+                && (!previous.same_destination(&target)
+                    || (target.provider == DeploymentProvider::AzureSwa && !token.is_empty()))
+        });
+        let target_id = target.id.clone();
         next.selected = Some(target.id.clone());
         next.targets.push(target);
         next.validate()?;
@@ -613,6 +898,9 @@ impl DeployTargets {
             return Err(error).context("Cannot save deployment target settings");
         }
         *self = next;
+        if other_site {
+            forget_site_records(path, &target_id);
+        }
         Ok(())
     }
 
@@ -644,6 +932,11 @@ impl DeployTargets {
             .flatten();
         let mut next = self.clone();
         next.targets.retain(|entry| entry.id != target.id);
+        let other_site = self
+            .targets
+            .iter()
+            .any(|previous| previous.id == target.id && !previous.same_destination(&target));
+        let target_id = target.id.clone();
         if target.published_url.is_none() {
             next.report_publications
                 .retain(|publication| publication.target_id != target.id);
@@ -663,6 +956,9 @@ impl DeployTargets {
             return Err(error).context("Cannot save deployment target settings");
         }
         *self = next;
+        if other_site {
+            forget_site_records(path, &target_id);
+        }
         Ok(())
     }
 
@@ -702,6 +998,7 @@ impl DeployTargets {
             return Err(error).context("Cannot remove deployment target settings");
         }
         *self = next;
+        forget_site_records(path, id);
         Ok(())
     }
 
@@ -745,6 +1042,19 @@ impl DeployTargets {
                 !publication.suite_ids.is_empty(),
                 "Published reports must contain at least one suite"
             );
+            ensure!(
+                publication
+                    .site_fingerprint
+                    .as_deref()
+                    .is_none_or(valid_fingerprint)
+                    && publication
+                        .input_fingerprint
+                        .as_deref()
+                        .is_none_or(valid_fingerprint)
+                    && (publication.input_fingerprint.is_none()
+                        || publication.site_fingerprint.is_some()),
+                "Invalid published report fingerprint"
+            );
             for id in &publication.suite_ids {
                 validate_suite_id(id)?;
                 ensure!(
@@ -757,11 +1067,152 @@ impl DeployTargets {
     }
 }
 
+/// Forgets the local records of a target's site after its settings were committed. The
+/// settings are already saved, so a failure is a warning rather than an error that would make
+/// the editor treat the saved change as failed; a stale copy is still destination-checked
+/// when read back through the site, and the next deployment to the target replaces it.
+fn forget_site_records(path: &Path, target_id: &str) {
+    if let Err(error) = site_state::forget_target(path, target_id) {
+        eprintln!("Warning: Cannot clear the previous site state of the target: {error:#}");
+    }
+}
+
+/// Files a site keeps serving without local content, by site-relative path, with the
+/// provider's content identity from the site's published state.
+pub(crate) type KeptFiles = std::collections::BTreeMap<String, site_state::StateFile>;
+
+/// Files a deployment keeps on the site by hash, and how the images uploaded beside them may
+/// change to fit a storage budget.
+#[derive(Clone, Copy)]
+pub(crate) struct Keeping<'a> {
+    pub files: &'a KeptFiles,
+    /// The uploaded images may be reduced in quality, not only recompressed losslessly,
+    /// although files stay kept (Cloudflare only).
+    pub reduce_quality: bool,
+}
+
+impl<'a> Keeping<'a> {
+    /// Keeps `files`, recompressing the images beside them only losslessly.
+    pub(crate) fn files(files: &'a KeptFiles) -> Self {
+        Self {
+            files,
+            reduce_quality: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DeploymentStats {
     file_count: u64,
     original_bytes: u64,
     total_bytes: u64,
+    /// A site state was staged but not published: excluded by the target, or, for optimized
+    /// Cloudflare uploads, impossible to rewrite for the optimized files.
+    state_dropped: bool,
+}
+
+/// What a provider manifest lists: staged files with local content, and files kept on the
+/// site by their provider identity (which have no local content to deduplicate).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ManifestCounts {
+    pub staged_files: usize,
+    pub staged_bytes: u64,
+    /// Distinct local contents among the staged files.
+    pub unique: usize,
+    pub kept_files: usize,
+    pub kept_bytes: u64,
+}
+
+impl ManifestCounts {
+    pub fn files(&self) -> usize {
+        self.staged_files + self.kept_files
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.staged_bytes.saturating_add(self.kept_bytes)
+    }
+
+    /// A log summary that keeps staged and kept counts apart, e.g. "743 files: 150 staged
+    /// (89.55 MiB, 130 unique digests), 593 kept by digest (2.10 MiB)".
+    pub fn describe(&self, unique: &str, kept_by: &str) -> String {
+        let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+        if self.kept_files == 0 {
+            return format!(
+                "{} files ({:.2} MiB, {} unique {unique})",
+                self.staged_files,
+                mib(self.staged_bytes),
+                self.unique
+            );
+        }
+        format!(
+            "{} files: {} staged ({:.2} MiB, {} unique {unique}), {} kept by {kept_by} ({:.2} MiB)",
+            self.files(),
+            self.staged_files,
+            mib(self.staged_bytes),
+            self.unique,
+            self.kept_files,
+            mib(self.kept_bytes)
+        )
+    }
+}
+
+/// Share of PNG bytes lossless recompression is expected to save on report screenshots. About
+/// 10% was measured on the largest Chromium captures and more on smaller ones. It only ranks
+/// the kept suites a Cloudflare update brings back to optimize; the staged suites' savings are
+/// measured, and the optimizer stops as soon as the site fits.
+const EXPECTED_LOSSLESS_SAVING_PERCENT: u64 = 10;
+
+/// Bytes lossless recompression of `png_bytes` is expected to save.
+pub(crate) fn expected_lossless_saving(png_bytes: u64) -> u64 {
+    percent_of(png_bytes, EXPECTED_LOSSLESS_SAVING_PERCENT)
+}
+
+/// Share of a suite's original PNG bytes quality reduction down to the spreading floor (85)
+/// is roughly expected to save beyond lossless recompression, as measured on report
+/// screenshots (about a third together). It only decides how many kept suites a Cloudflare
+/// retry brings back to spread the reduction over; every attempt measures what is still
+/// missing.
+const EXPECTED_REDUCTION_SAVING_PERCENT: u64 = 20;
+
+/// Bytes quality reduction of `png_bytes` is roughly expected to save.
+pub(crate) fn expected_reduction_saving(png_bytes: u64) -> u64 {
+    percent_of(png_bytes, EXPECTED_REDUCTION_SAVING_PERCENT)
+}
+
+/// `percent` of `bytes`, rounded down, without overflowing.
+fn percent_of(bytes: u64, percent: u64) -> u64 {
+    (u128::from(bytes) * u128::from(percent) / 100) as u64
+}
+
+/// The site exceeds Cloudflare's storage budget by `remaining` bytes even after the staged
+/// suites were recompressed losslessly, and kept suites cannot be optimized without their
+/// files. `staged_png` counts the staged suites' PNG bytes before optimization. A report
+/// deployment then brings back kept suites and tries again
+/// (`ReportDeployment::generate_and_publish`).
+#[derive(Debug)]
+pub(crate) struct KeptSuitesOverBudget {
+    pub remaining: u64,
+    pub staged_png: u64,
+}
+
+impl std::fmt::Display for KeptSuitesOverBudget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "The site exceeds the Cloudflare content budget by {:.2} MiB, which the selected suites cannot be optimized to cover while other suites are kept; replace the whole site",
+            self.remaining as f64 / (1024.0 * 1024.0)
+        )
+    }
+}
+
+impl std::error::Error for KeptSuitesOverBudget {}
+
+/// A confirmed report publication.
+pub(crate) struct Published {
+    pub url: Option<String>,
+    /// Whether the site serves the staged `deployment.json`, as the provider may have
+    /// rewritten it in staging.
+    pub state_published: bool,
 }
 
 pub enum DeploymentClient {
@@ -783,16 +1234,37 @@ impl DeploymentClient {
     }
 
     pub async fn deploy(&self, root: &Path, target: &DeployTarget) -> Result<Option<String>> {
+        Ok(self
+            .deploy_keeping(root, target, Keeping::files(&KeptFiles::new()))
+            .await?
+            .url)
+    }
+
+    /// Publishes `root` as the whole site, plus the files `keeping` names that the site already
+    /// serves. Only Netlify and Cloudflare address content by hash; Azure uploads complete
+    /// packages, so its deployments must stage every file.
+    pub(crate) async fn deploy_keeping(
+        &self,
+        root: &Path,
+        target: &DeployTarget,
+        keeping: Keeping<'_>,
+    ) -> Result<Published> {
         target.validate()?;
         let started = std::time::Instant::now();
         let mut stats = DeploymentStats::default();
         let result = match self {
-            Self::Azure(client) => client
-                .deploy_with_stats(root, target, &mut stats)
-                .await
-                .map(Some),
+            Self::Azure(client) => {
+                ensure!(
+                    keeping.files.is_empty(),
+                    "Azure Static Web Apps cannot keep files that are not uploaded"
+                );
+                client
+                    .deploy_with_stats(root, target, &mut stats)
+                    .await
+                    .map(Some)
+            }
             Self::Netlify(client) => client
-                .deploy_with_stats(root, target, &mut stats)
+                .deploy_with_stats(root, target, keeping.files, &mut stats)
                 .await
                 .map(Some),
             Self::Cloudflare(client) => {
@@ -807,6 +1279,7 @@ impl DeploymentClient {
                             .cloudflare
                             .as_ref()
                             .context("Cloudflare target settings are missing")?,
+                        keeping,
                         &mut stats,
                     )
                     .await
@@ -817,7 +1290,10 @@ impl DeploymentClient {
         {
             crate::analytics::capture("site", "deployed", properties).await;
         }
-        result
+        result.map(|url| Published {
+            url,
+            state_published: !stats.state_dropped,
+        })
     }
 }
 
@@ -1095,7 +1571,188 @@ fn report_image_relative(suite: &str, key: &str, image: &str) -> Result<PathBuf>
     Ok(Path::new(suite).join(image))
 }
 
+/// Fingerprints the staged reports of `job` and decides whether they must be published.
+///
+/// Returns the saved site URL as well when the target's last confirmed publication already
+/// has this content and `job` is not forced; nothing must be uploaded then. Otherwise the
+/// target's recorded content is forgotten before returning, so an upload interrupted by a
+/// crash or kill, which never reaches the runner's completion handling, cannot leave a
+/// record that matches content the site may no longer serve.
+///
+/// Settings are read from disk here rather than taken from the request: the request can be
+/// older than the latest deployment (a stale record could match) or than target edits (Deploy
+/// anyway replays a saved request), so a removed or edited target is refused.
+///
+/// When the upload is skipped and `inputs` are known, they are recorded as generating the
+/// published content, so the next unchanged deployment is recognized by `unchanged_inputs`
+/// before any generation. Deployments call `decide_publication` with the site's fingerprint;
+/// this local-only form is the tests' entry point.
+#[cfg(test)]
+pub fn unchanged_deployment(
+    staging: &Path,
+    job: &DeploymentJob,
+    settings: Option<&Path>,
+    inputs: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    phase("Comparing staged reports with the last deployment to this target");
+    let fingerprint = deployment_fingerprint(staging, &job.suite_ids, &job.target)?;
+    let url = decide_publication(job, settings, &fingerprint, None, inputs)?;
+    Ok((fingerprint, url))
+}
+
+/// Decides whether content with `fingerprint` must be published; see `unchanged_deployment`.
+///
+/// `remote` is the fingerprint the site itself reports, when it could be read. It is the
+/// authority: the local record only decides when the site could not be read, because another
+/// machine may have changed the site since this workspace recorded it.
+pub(crate) fn decide_publication(
+    job: &DeploymentJob,
+    settings: Option<&Path>,
+    fingerprint: &str,
+    remote: Option<&str>,
+    inputs: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(path) = settings else {
+        return Ok(None);
+    };
+    let saved = current_settings(path, job)?;
+    let unchanged_url = || match remote {
+        Some(remote) if remote == fingerprint => saved
+            .targets
+            .iter()
+            .find(|target| target.id == job.target.id)
+            .and_then(|target| target.published_url.clone()),
+        Some(_) => None,
+        None => saved.unchanged_site_url(&job.target, fingerprint),
+    };
+    if job.force {
+        phase("Deploy anyway requested; publishing without comparing to the last deployment");
+    } else if let Some(url) = unchanged_url() {
+        phase("No changes since the last deployment to this target; skipping the upload");
+        if let Some(inputs) = inputs
+            && let Err(error) =
+                DeployTargets::record_report_inputs(path, &job.target.id, fingerprint, inputs)
+        {
+            // Only the next deployment's early check depends on it; this one is complete.
+            eprintln!(
+                "Warning: Cannot remember the unchanged report inputs; the next deployment will regenerate its reports before comparing: {error:#}"
+            );
+        }
+        return Ok(Some(url));
+    }
+    // The local site copy stays: whether this upload lands or not, the suites it lists are on
+    // the site before or after, so it remains the safest plan for a later unreadable update.
+    DeployTargets::forget_report_fingerprint(path, &job.target)
+        .context("Cannot clear the target's last deployment record before publishing")?;
+    Ok(None)
+}
+
+/// The early check before any report generation: returns the saved site URL and published
+/// content fingerprint when `inputs` match the inputs recorded for the target's last confirmed
+/// publication and `job` is not forced. Applies the same stale-target checks as
+/// `decide_publication`; a mismatch publishes nothing and changes nothing. When the site's own
+/// fingerprint is known, it must still report the recorded content: another machine may have
+/// published to it since.
+pub(crate) fn unchanged_deployment_inputs_on(
+    job: &DeploymentJob,
+    settings: Option<&Path>,
+    inputs: &str,
+    remote: Option<&str>,
+) -> Result<Option<UnchangedSite>> {
+    let Some(path) = settings else {
+        return Ok(None);
+    };
+    let saved = current_settings(path, job)?;
+    if job.force {
+        return Ok(None);
+    }
+    let unchanged = saved
+        .unchanged_inputs(&job.target, inputs)
+        .filter(|(_, fingerprint)| remote.is_none_or(|remote| remote == fingerprint));
+    if unchanged.is_some() {
+        phase(
+            "No changes to the selected reports since the last deployment to this target; skipping report generation and upload",
+        );
+    }
+    Ok(unchanged)
+}
+
+/// Computes the deployment's input fingerprint and runs the early check.
+///
+/// Returns the inputs (to record after publishing) and, when they match the last confirmed
+/// publication, its URL and content fingerprint. Inputs that cannot be fingerprinted only
+/// disable the early check: report generation and the content comparison still decide. Stale
+/// targets and unreadable settings fail, as they would after generation. Deployments call
+/// `check_unchanged_inputs_on` with the site's fingerprint; this form is the tests' entry point.
+#[cfg(test)]
+pub fn check_unchanged_inputs(
+    output: &Path,
+    root: &Path,
+    job: &DeploymentJob,
+    args: &crate::cli::args::SnapshotArgs,
+    settings: Option<&Path>,
+) -> Result<(Option<String>, Option<UnchangedSite>)> {
+    check_unchanged_inputs_on(output, root, job, args, settings, None)
+}
+
+pub(crate) fn check_unchanged_inputs_on(
+    output: &Path,
+    root: &Path,
+    job: &DeploymentJob,
+    args: &crate::cli::args::SnapshotArgs,
+    settings: Option<&Path>,
+    remote: Option<&str>,
+) -> Result<(Option<String>, Option<UnchangedSite>)> {
+    phase("Checking the selected reports for changes since the last deployment");
+    let inputs = match crate::config::load_workspace_config(root)
+        .and_then(|workspace| deployment_input_fingerprint(output, job, args, &workspace))
+    {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            eprintln!(
+                "Warning: Cannot check the selected reports for changes before generating them: {error:#}"
+            );
+            return Ok((None, None));
+        }
+    };
+    let unchanged = unchanged_deployment_inputs_on(job, settings, &inputs, remote)?;
+    Ok((Some(inputs), unchanged))
+}
+
+/// Current settings, refusing a job prepared for a target that was since removed or edited.
+fn current_settings(path: &Path, job: &DeploymentJob) -> Result<DeployTargets> {
+    let saved = DeployTargets::load(path)?;
+    let current = saved
+        .targets
+        .iter()
+        .find(|saved| saved.id == job.target.id)
+        .context("The deployment target no longer exists; open Deploy and choose a target")?;
+    ensure!(
+        current.same_publication_settings(&job.target),
+        "The deployment target changed after this deployment was prepared; open Deploy again"
+    );
+    Ok(saved)
+}
+
 pub fn stage_reports(output: &Path, suite_ids: &[String], destination: &Path) -> Result<()> {
+    ensure!(
+        !suite_ids.is_empty(),
+        "Select at least one test suite to deploy"
+    );
+    stage_site(output, suite_ids, &[], destination).map(drop)
+}
+
+/// Stages a site of the generated `suite_ids` plus `kept` suites the site already serves.
+///
+/// Only generated suites' files and the bundled frontend are copied; kept suites contribute
+/// their summaries to a merged manifest, status, and entry page, and their files stay on the
+/// site. The staged site is verified with kept suites absent, and its inventory is returned.
+pub(crate) fn stage_site(
+    output: &Path,
+    suite_ids: &[String],
+    kept: &[crate::snapshot::SuiteSummary],
+    destination: &Path,
+) -> Result<crate::snapshot::SiteInventory> {
     use crate::diagnostics::{record::*, runtime};
     runtime::stage_sync(
         Stage::SnapshotStaging,
@@ -1109,15 +1766,16 @@ pub fn stage_reports(output: &Path, suite_ids: &[String], destination: &Path) ->
                 FieldValue::Identity(SafeIdentity::fingerprint("index.html")),
             ),
         ],
-        || stage_reports_inner(output, suite_ids, destination),
+        || stage_site_inner(output, suite_ids, kept, destination),
     )
 }
 
-fn stage_reports_inner(output: &Path, suite_ids: &[String], destination: &Path) -> Result<()> {
-    ensure!(
-        !suite_ids.is_empty(),
-        "Select at least one test suite to deploy"
-    );
+fn stage_site_inner(
+    output: &Path,
+    suite_ids: &[String],
+    kept: &[crate::snapshot::SuiteSummary],
+    destination: &Path,
+) -> Result<crate::snapshot::SiteInventory> {
     let output = output
         .canonicalize()
         .context("Report output directory is unavailable")?;
@@ -1134,7 +1792,19 @@ fn stage_reports_inner(output: &Path, suite_ids: &[String], destination: &Path) 
             "suites"
         }
     ));
-    let dependencies = crate::snapshot::artifact_paths(&output, suite_ids)?;
+    let inventory = crate::snapshot::artifact_inventory(&output, suite_ids, &[])?;
+    let mut dependencies = inventory.shared;
+    if !kept.is_empty() {
+        // A merged entry page, manifest, and status replace the generated ones below.
+        dependencies.retain(|path| {
+            path != Path::new("index.html")
+                && path != Path::new("_snapshot/status.json")
+                && !path.starts_with("_snapshot/data")
+        });
+    }
+    for files in inventory.suites.into_values() {
+        dependencies.extend(files);
+    }
     let dependency_count = dependencies.len();
     fs::create_dir_all(destination).with_context(|| {
         format!(
@@ -1148,7 +1818,7 @@ fn stage_reports_inner(output: &Path, suite_ids: &[String], destination: &Path) 
     let mut copied = BTreeSet::new();
     let mut copied_bytes = 0_u64;
     let mut last_update = std::time::Instant::now();
-    let staged = (|| -> Result<()> {
+    let staged = (|| -> Result<crate::snapshot::SiteInventory> {
         {
             let mut copy = |relative: &Path, missing_reference: bool| -> Result<()> {
                 let Some(source) = artifact_source(&output, relative, missing_reference)
@@ -1224,25 +1894,39 @@ fn stage_reports_inner(output: &Path, suite_ids: &[String], destination: &Path) 
                 copy(&relative, false)?;
             }
         }
+        let kept_ids = kept
+            .iter()
+            .map(|summary| summary.id.clone())
+            .collect::<Vec<_>>();
+        if !kept.is_empty() {
+            phase(&format!(
+                "Merging {} kept {} into the site manifest",
+                kept.len(),
+                if kept.len() == 1 { "suite" } else { "suites" }
+            ));
+            crate::snapshot::publish_merged_index(destination, &output, kept.to_vec())?;
+        }
         phase(&format!(
             "Verifying {} staged report files ({:.2} MiB)",
             copied.len(),
             copied_bytes as f64 / (1024.0 * 1024.0)
         ));
-        crate::snapshot::artifact_paths(destination, suite_ids)?;
-        Ok(())
+        crate::snapshot::artifact_inventory(destination, suite_ids, &kept_ids)
     })();
-    if let Err(error) = staged {
-        let _ = fs::remove_dir_all(destination);
-        return Err(error);
-    }
+    let staged = match staged {
+        Ok(staged) => staged,
+        Err(error) => {
+            let _ = fs::remove_dir_all(destination);
+            return Err(error);
+        }
+    };
     phase(&format!(
         "Staging complete: {} files ({:.2} MiB) for {} suites",
         copied.len(),
         copied_bytes as f64 / (1024.0 * 1024.0),
         suite_ids.len()
     ));
-    Ok(())
+    Ok(staged)
 }
 
 #[cfg(test)]
@@ -1321,6 +2005,10 @@ mod tests {
             crate::progress::emit(crate::progress::Event::Deployed {
                 target: "fixture".into(),
                 url: Some("https://reports.example.test/".into()),
+                fingerprint: None,
+                input_fingerprint: None,
+                unchanged: false,
+                suites: None,
             });
             Ok::<_, anyhow::Error>(())
         });
@@ -1410,6 +2098,7 @@ mod tests {
                     file_count: 3,
                     original_bytes: 8192,
                     total_bytes: 4096,
+                    state_dropped: false,
                 },
                 std::time::Duration::from_millis(1234),
             )
@@ -1495,8 +2184,9 @@ mod tests {
         for expected in [
             "Preparing report snapshot for 1 suite",
             "Loading snapshot suite 1/1: one",
-            "Resizing and staging",
-            "Resized ",
+            "Preparing 6 capture preview images",
+            "Prepared ",
+            "Reused 0 cached and resized 6 capture preview images",
             "Publishing ",
             "Validating snapshot manifest and asset versions for 1 selected suite",
             "Staging ",
@@ -1581,6 +2271,9 @@ mod tests {
             suite_ids: Vec::new(),
             catalog_ids: vec!["one".into(), "two".into()],
             partial_confirmed: false,
+            force: false,
+            mode: crate::desktop::deployment::DeploymentMode::Replace,
+            remove_ids: Vec::new(),
         };
         assert!(job.validate().is_err());
         job.suite_ids = vec!["one".into()];
@@ -2487,6 +3180,713 @@ mod tests {
             assert!(stage_reports(&output, &selection, &root.path().join("wrong")).is_err());
         }
         assert!(!root.path().join("missing").exists());
+    }
+
+    fn regenerate(output: &Path, title: Option<&str>) {
+        crate::snapshot::generate_site(
+            output,
+            &["one".into()],
+            &crate::cli::args::SnapshotArgs {
+                test_suite: Vec::new(),
+                title: title.map(str::to_owned),
+                heading: None,
+                subheading: None,
+            },
+            &crate::config::WorkspaceConfig::default(),
+        )
+        .unwrap();
+    }
+
+    fn staged(output: &Path, destination: &Path) -> PathBuf {
+        stage_reports(output, &["one".into()], destination).unwrap();
+        destination.to_path_buf()
+    }
+
+    fn azure_target() -> DeployTarget {
+        serde_json::from_value(serde_json::json!({ "id": "qa", "name": "QA" })).unwrap()
+    }
+
+    #[test]
+    fn deployment_fingerprints_ignore_generation_time_and_follow_published_content() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("output");
+        snapshot_fixture(&output);
+        let suites = vec!["one".to_string()];
+        let target = azure_target();
+        let first = staged(&output, &root.path().join("first"));
+        let fingerprint = deployment_fingerprint(&first, &suites, &target).unwrap();
+        assert!(valid_fingerprint(&fingerprint));
+
+        // generatedAt has second resolution; a later generation must still match.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        regenerate(&output, None);
+        let second = staged(&output, &root.path().join("second"));
+        let manifest = |root: &Path| fs::read(root.join("_snapshot/data/manifest.json")).unwrap();
+        assert_ne!(manifest(&first), manifest(&second));
+        assert_ne!(
+            fs::read(first.join("index.html")).unwrap(),
+            fs::read(second.join("index.html")).unwrap()
+        );
+        assert_eq!(
+            deployment_fingerprint(&second, &suites, &target).unwrap(),
+            fingerprint
+        );
+
+        // Names, saved URLs, and credential references do not change the published site.
+        let mut renamed = target.clone();
+        renamed.name = "Renamed".into();
+        renamed.published_url = Some("https://reports.example.com/".into());
+        renamed.credential_id = Some(uuid::Uuid::new_v4().to_string());
+        assert_eq!(
+            deployment_fingerprint(&second, &suites, &renamed).unwrap(),
+            fingerprint
+        );
+        let mut preview = target.clone();
+        preview.environment = "preview".into();
+        let mut netlify = target.clone();
+        netlify.provider = DeploymentProvider::Netlify;
+        netlify.site_id = uuid::Uuid::new_v4().to_string();
+        for changed in [preview, netlify] {
+            assert_ne!(
+                deployment_fingerprint(&second, &suites, &changed).unwrap(),
+                fingerprint
+            );
+        }
+        // Site-wide text and any report image change the published content.
+        regenerate(&output, Some("Release candidate"));
+        let titled = staged(&output, &root.path().join("titled"));
+        assert_ne!(
+            deployment_fingerprint(&titled, &suites, &target).unwrap(),
+            fingerprint
+        );
+        fs::write(
+            output.join("one/bitmaps_reference/home.png"),
+            lodepng::encode32(&[1_u8, 2, 3, 255], 1, 1).unwrap(),
+        )
+        .unwrap();
+        regenerate(&output, None);
+        let approved = staged(&output, &root.path().join("approved"));
+        assert_ne!(
+            deployment_fingerprint(&approved, &suites, &target).unwrap(),
+            fingerprint
+        );
+        // The fingerprint only describes a complete staged selection. Content verification
+        // belongs to staging, which rejects tampered files before any fingerprint.
+        assert!(deployment_fingerprint(&approved, &["two".into()], &target).is_err());
+        fs::remove_file(approved.join("_snapshot/assets/app.js")).unwrap();
+        assert!(deployment_fingerprint(&approved, &suites, &target).is_err());
+    }
+
+    #[test]
+    fn lossless_estimates_save_a_tenth_of_the_png_bytes() {
+        assert_eq!(expected_lossless_saving(1000), 100);
+        assert_eq!(expected_lossless_saving(999), 99);
+        assert_eq!(expected_lossless_saving(0), 0);
+        // Large sites never overflow the arithmetic.
+        assert_eq!(expected_lossless_saving(u64::MAX), u64::MAX / 10);
+        assert_eq!(expected_reduction_saving(1000), 200);
+        assert_eq!(expected_reduction_saving(u64::MAX), u64::MAX / 5);
+    }
+
+    #[test]
+    fn manifest_summaries_keep_staged_and_kept_counts_apart() {
+        let counts = ManifestCounts {
+            staged_files: 150,
+            staged_bytes: 93_902_315,
+            unique: 130,
+            kept_files: 593,
+            kept_bytes: 2 * 1024 * 1024,
+        };
+        assert_eq!(
+            (counts.files(), counts.bytes()),
+            (743, 93_902_315 + 2 * 1024 * 1024)
+        );
+        assert_eq!(
+            counts.describe("digests", "digest"),
+            "743 files: 150 staged (89.55 MiB, 130 unique digests), 593 kept by digest (2.00 MiB)"
+        );
+        // Without kept files the summary reads as before.
+        let staged = ManifestCounts {
+            kept_files: 0,
+            kept_bytes: 0,
+            ..counts
+        };
+        assert_eq!(
+            staged.describe("assets", "hash"),
+            "150 files (89.55 MiB, 130 unique assets)"
+        );
+    }
+
+    #[test]
+    fn report_fingerprints_follow_confirmed_publications_and_destinations() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("targets.json");
+        let target = azure_target();
+        DeployTargets {
+            targets: vec![target.clone()],
+            selected: Some(target.id.clone()),
+            ..Default::default()
+        }
+        .save(&path)?;
+        let suites = vec!["alloy".to_string()];
+        let first = "a".repeat(64);
+        let inputs = "c".repeat(64);
+        let url = "https://reports.example.com/";
+        DeployTargets::record_deployed_report(
+            &path,
+            &target,
+            Some(url),
+            &suites,
+            Some(&first),
+            Some(&inputs),
+        )?;
+        let settings = DeployTargets::load(&path)?;
+        assert_eq!(
+            settings.unchanged_inputs(&target, &inputs),
+            Some((url.to_owned(), first.clone()))
+        );
+        assert!(settings.unchanged_inputs(&target, &first).is_none());
+        assert_eq!(settings.report_fingerprint(&target), Some(first.as_str()));
+        assert_eq!(
+            settings.unchanged_site_url(&target, &first).as_deref(),
+            Some(url)
+        );
+        assert!(
+            settings
+                .unchanged_site_url(&target, &"b".repeat(64))
+                .is_none()
+        );
+        // A destination edit that has not been saved yet no longer matches the record.
+        let mut moved = target.clone();
+        moved.environment = "preview".into();
+        assert!(settings.report_fingerprint(&moved).is_none());
+        assert!(settings.unchanged_site_url(&moved, &first).is_none());
+        assert!(settings.unchanged_inputs(&moved, &inputs).is_none());
+
+        // Unknown outcomes forget the content but keep Open Site membership.
+        DeployTargets::forget_report_fingerprint(&path, &target)?;
+        let forgotten = DeployTargets::load(&path)?;
+        assert!(forgotten.report_fingerprint(&target).is_none());
+        assert!(forgotten.unchanged_inputs(&target, &inputs).is_none());
+        assert_eq!(
+            forgotten.latest_report_url(&suites).as_deref(),
+            Some("https://reports.example.com/suites/alloy")
+        );
+        let bytes = fs::read(&path)?;
+        assert!(!String::from_utf8_lossy(&bytes).contains("siteFingerprint"));
+        assert!(!String::from_utf8_lossy(&bytes).contains("inputFingerprint"));
+        DeployTargets::forget_report_fingerprint(&path, &target)?;
+        let mut elsewhere = target.clone();
+        elsewhere.id = "missing".into();
+        elsewhere.environment = "other".into();
+        DeployTargets::forget_report_fingerprint(&path, &elsewhere)?;
+        assert_eq!(fs::read(&path)?, bytes);
+
+        // Legacy membership records have no content identity.
+        DeployTargets::record_report_publication(&path, &target, Some(url), &suites)?;
+        assert!(
+            DeployTargets::load(&path)?
+                .report_fingerprint(&target)
+                .is_none()
+        );
+        let legacy: DeployTargets = serde_json::from_value(serde_json::json!({
+            "targets": [{ "id": "qa", "name": "QA", "publishedUrl": url }],
+            "reportPublications": [{ "targetId": "qa", "suiteIds": ["alloy"] }]
+        }))?;
+        assert!(legacy.report_fingerprint(&target).is_none());
+
+        // Inputs are only recorded for unchanged content they are known to generate.
+        DeployTargets::record_deployed_report(
+            &path,
+            &target,
+            Some(url),
+            &suites,
+            Some(&first),
+            None,
+        )?;
+        DeployTargets::record_report_inputs(&path, &target.id, &"b".repeat(64), &inputs)?;
+        assert!(
+            DeployTargets::load(&path)?
+                .unchanged_inputs(&target, &inputs)
+                .is_none()
+        );
+        DeployTargets::record_report_inputs(&path, &target.id, &first, &inputs)?;
+        assert!(
+            DeployTargets::load(&path)?
+                .unchanged_inputs(&target, &inputs)
+                .is_some()
+        );
+        // Invalid identities are rejected without replacing the saved record.
+        let saved = fs::read(&path)?;
+        assert!(
+            DeployTargets::record_deployed_report(
+                &path,
+                &target,
+                Some(url),
+                &suites,
+                None,
+                Some(&inputs)
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&path)?, saved);
+        for invalid in [
+            "",
+            "A".repeat(64).as_str(),
+            "a".repeat(63).as_str(),
+            "g".repeat(64).as_str(),
+        ] {
+            assert!(
+                DeployTargets::record_deployed_report(
+                    &path,
+                    &target,
+                    Some(url),
+                    &suites,
+                    Some(invalid),
+                    None
+                )
+                .is_err()
+            );
+            assert!(
+                DeployTargets::record_deployed_report(
+                    &path,
+                    &target,
+                    Some(url),
+                    &suites,
+                    Some(&first),
+                    Some(invalid)
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&path)?, saved);
+        }
+        // Publishing a landing page to the same target replaces the report site entirely.
+        DeployTargets::record_published_url(&path, &target, url)?;
+        assert!(
+            DeployTargets::load(&path)?
+                .report_fingerprint(&target)
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_deployments_skip_only_matching_unforced_targets() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let output = root.path().join("output");
+        snapshot_fixture(&output);
+        let staging = staged(&output, &root.path().join("staged"));
+        let path = root.path().join("targets.json");
+        let target = azure_target();
+        DeployTargets {
+            targets: vec![target.clone()],
+            selected: Some(target.id.clone()),
+            ..Default::default()
+        }
+        .save(&path)?;
+        let job = DeploymentJob {
+            target: target.clone(),
+            suite_ids: vec!["one".into()],
+            catalog_ids: vec!["one".into()],
+            partial_confirmed: false,
+            force: false,
+            mode: crate::desktop::deployment::DeploymentMode::Replace,
+            remove_ids: Vec::new(),
+        };
+        // Nothing recorded yet, or no settings at all: publish.
+        let (fingerprint, unchanged) = unchanged_deployment(&staging, &job, Some(&path), None)?;
+        assert!(unchanged.is_none());
+        assert!(
+            unchanged_deployment(&staging, &job, None, None)?
+                .1
+                .is_none()
+        );
+        let url = "https://reports.example.com/";
+        let record = || {
+            DeployTargets::record_deployed_report(
+                &path,
+                &target,
+                Some(url),
+                &job.suite_ids,
+                Some(&fingerprint),
+                None,
+            )
+        };
+        record()?;
+        let recorded = fs::read(&path)?;
+        // A skip leaves the record untouched.
+        assert_eq!(
+            unchanged_deployment(&staging, &job, Some(&path), None)?,
+            (fingerprint.clone(), Some(url.to_owned()))
+        );
+        assert_eq!(fs::read(&path)?, recorded);
+
+        // Deploy anyway publishes and still reports the identity to record. Publishing
+        // forgets the old record first, so a crash during upload cannot leave a match.
+        let mut forced = job.clone();
+        forced.force = true;
+        assert_eq!(
+            unchanged_deployment(&staging, &forced, Some(&path), None)?,
+            (fingerprint.clone(), None)
+        );
+        let settings = DeployTargets::load(&path)?;
+        assert!(settings.report_fingerprint(&target).is_none());
+        assert_eq!(
+            settings.latest_report_url(&job.suite_ids).as_deref(),
+            Some("https://reports.example.com/suites/one")
+        );
+        assert!(
+            unchanged_deployment(&staging, &job, Some(&path), None)?
+                .1
+                .is_none()
+        );
+
+        // Requests prepared before a target edit or removal are refused before any upload,
+        // including a replayed Deploy anyway, and leave the record in place.
+        record()?;
+        let recorded = fs::read(&path)?;
+        let mut preview = forced.clone();
+        preview.target.environment = "preview".into();
+        let mut stale_credential = forced.clone();
+        stale_credential.target.credential_id = Some(uuid::Uuid::new_v4().to_string());
+        let mut removed = forced.clone();
+        removed.target.id = "removed".into();
+        for stale in [preview, stale_credential, removed] {
+            assert!(unchanged_deployment(&staging, &stale, Some(&path), None).is_err());
+            assert_eq!(fs::read(&path)?, recorded);
+        }
+        // Display names and saved URLs do not make a request stale.
+        let mut renamed = job.clone();
+        renamed.target.name = "Renamed".into();
+        renamed.target.published_url = None;
+        assert_eq!(
+            unchanged_deployment(&staging, &renamed, Some(&path), None)?
+                .1
+                .as_deref(),
+            Some(url)
+        );
+
+        // Unreadable settings fail before uploading instead of risking a stale record.
+        let corrupt = root.path().join("corrupt.json");
+        fs::write(&corrupt, b"{not json")?;
+        assert!(unchanged_deployment(&staging, &job, Some(&corrupt), None).is_err());
+        assert!(unchanged_deployment(&staging, &job, Some(root.path()), None).is_err());
+
+        // New report content publishes.
+        fs::write(
+            output.join("one/bitmaps_test/older/home.png"),
+            lodepng::encode32(&[9_u8, 8, 7, 255], 1, 1)?,
+        )?;
+        regenerate(&output, None);
+        let changed = staged(&output, &root.path().join("changed"));
+        let (next, unchanged) = unchanged_deployment(&changed, &job, Some(&path), None)?;
+        assert_ne!(next, fingerprint);
+        assert!(unchanged.is_none());
+        assert!(
+            DeployTargets::load(&path)?
+                .report_fingerprint(&target)
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_outcomes_forget_every_target_sharing_the_site() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("targets.json");
+        let site = uuid::Uuid::new_v4().to_string();
+        let netlify = |id: &str, site_id: &str| -> DeployTarget {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": id, "provider": "netlify", "siteId": site_id,
+                "credentialId": uuid::Uuid::new_v4().to_string()
+            }))
+            .unwrap()
+        };
+        let first = netlify("first", &site);
+        let second = netlify("second", &site);
+        let other = netlify("other", &uuid::Uuid::new_v4().to_string());
+        // Same saved URL with a different destination record, e.g. a renamed custom domain.
+        let mut aliased = netlify("aliased", &uuid::Uuid::new_v4().to_string());
+        aliased.provider = DeploymentProvider::AzureSwa;
+        aliased.site_id.clear();
+        aliased.environment = "alias".into();
+        DeployTargets {
+            targets: vec![
+                first.clone(),
+                second.clone(),
+                other.clone(),
+                aliased.clone(),
+            ],
+            selected: Some(first.id.clone()),
+            ..Default::default()
+        }
+        .save(&path)?;
+        let content = "a".repeat(64);
+        let inputs = "c".repeat(64);
+        let record = |target: &DeployTarget, url: &str| {
+            DeployTargets::record_deployed_report(
+                &path,
+                target,
+                Some(url),
+                std::slice::from_ref(&target.id),
+                Some(&content),
+                Some(&inputs),
+            )
+        };
+        record(&first, "https://shared.example.com/")?;
+        record(&other, "https://other.example.com/")?;
+        record(&aliased, "https://alias.example.com/")?;
+        // An interrupted upload to `second` may have replaced the site `first` published to.
+        DeployTargets::forget_report_fingerprint(&path, &second)?;
+        let settings = DeployTargets::load(&path)?;
+        assert!(settings.report_fingerprint(&first).is_none());
+        assert!(settings.unchanged_inputs(&first, &inputs).is_none());
+        assert_eq!(
+            settings.latest_report_url(&["first".into()]).as_deref(),
+            Some("https://shared.example.com/suites/first")
+        );
+        assert_eq!(settings.report_fingerprint(&other), Some(content.as_str()));
+        assert_eq!(
+            settings.report_fingerprint(&aliased),
+            Some(content.as_str())
+        );
+        // Targets whose saved URLs name the same site are forgotten together too.
+        let mut renamed = other.clone();
+        renamed.id = "renamed".into();
+        renamed.name = "renamed".into();
+        renamed.credential_id = Some(uuid::Uuid::new_v4().to_string());
+        let mut settings = DeployTargets::load(&path)?;
+        let mut alias_url = renamed.clone();
+        alias_url.site_id = uuid::Uuid::new_v4().to_string();
+        alias_url.published_url = Some("https://alias.example.com".into());
+        settings.targets.push(alias_url.clone());
+        settings.save(&path)?;
+        DeployTargets::forget_report_fingerprint(&path, &alias_url)?;
+        let settings = DeployTargets::load(&path)?;
+        assert!(settings.report_fingerprint(&aliased).is_none());
+        assert_eq!(settings.report_fingerprint(&other), Some(content.as_str()));
+        Ok(())
+    }
+
+    fn no_text() -> crate::cli::args::SnapshotArgs {
+        crate::cli::args::SnapshotArgs::default()
+    }
+
+    #[test]
+    fn input_fingerprints_follow_suite_files_text_selection_and_target() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let output = root.path().join("output");
+        snapshot_fixture(&output);
+        let workspace = crate::config::WorkspaceConfig::default();
+        let job = DeploymentJob {
+            target: azure_target(),
+            suite_ids: vec!["one".into()],
+            catalog_ids: vec!["one".into()],
+            partial_confirmed: false,
+            force: false,
+            mode: crate::desktop::deployment::DeploymentMode::Replace,
+            remove_ids: Vec::new(),
+        };
+        let inputs = |job: &DeploymentJob, args: &crate::cli::args::SnapshotArgs| {
+            deployment_input_fingerprint(&output, job, args, &workspace).unwrap()
+        };
+        let first = inputs(&job, &no_text());
+        assert!(valid_fingerprint(&first));
+
+        // Generating, reading, and locking reports leave the inputs unchanged.
+        regenerate(&output, None);
+        fs::write(output.join("one/.artifacts.lock"), b"")?;
+        fs::write(output.join("one/runs.json.tmp"), b"partial")?;
+        fs::create_dir_all(output.join("one/.compare-staging-1"))?;
+        fs::write(output.join("one/.compare-staging-1/home.png"), b"partial")?;
+        assert_eq!(inputs(&job, &no_text()), first);
+        // Names, URLs, and credentials of the target are not inputs.
+        let mut renamed = job.clone();
+        renamed.target.name = "Renamed".into();
+        renamed.target.published_url = Some("https://reports.example.com/".into());
+        assert_eq!(inputs(&renamed, &no_text()), first);
+
+        // Report text, suite selection, and site settings are inputs.
+        let titled = crate::cli::args::SnapshotArgs {
+            title: Some("Release candidate".into()),
+            ..no_text()
+        };
+        assert_ne!(inputs(&job, &titled), first);
+        let mut preview = job.clone();
+        preview.target.environment = "preview".into();
+        assert_ne!(inputs(&preview, &no_text()), first);
+        let mut both = job.clone();
+        both.suite_ids = vec!["one".into(), "two".into()];
+        fs::create_dir_all(output.join("two"))?;
+        assert_ne!(inputs(&both, &no_text()), first);
+        // A selected suite without output cannot be fingerprinted.
+        both.suite_ids = vec!["one".into(), "missing".into()];
+        assert!(deployment_input_fingerprint(&output, &both, &no_text(), &workspace).is_err());
+
+        // Approvals rewrite baselines, metadata edits rewrite suite.json, and runs add files.
+        let reference = output.join("one/bitmaps_reference/home.png");
+        let bytes = fs::read(&reference)?;
+        let mut changed = Vec::new();
+        for change in [
+            Box::new(|| fs::write(&reference, b"approved")) as Box<dyn Fn() -> std::io::Result<()>>,
+            Box::new(|| fs::write(output.join("one/suite.json"), br#"{"displayName":"Shop"}"#)),
+            Box::new(|| fs::write(output.join("one/bitmaps_test/older/extra.png"), b"new")),
+        ] {
+            change()?;
+            let next = inputs(&job, &no_text());
+            assert!(!changed.contains(&next));
+            assert_ne!(next, first);
+            changed.push(next);
+        }
+        // Restoring the same bytes later is still a change: modification times differ.
+        fs::write(&reference, bytes)?;
+        assert_ne!(inputs(&job, &no_text()), first);
+        Ok(())
+    }
+
+    #[test]
+    fn early_checks_skip_generation_only_for_recorded_inputs() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let output = root.path().join("output");
+        snapshot_fixture(&output);
+        let staging = staged(&output, &root.path().join("staged"));
+        let path = root.path().join("targets.json");
+        let target = azure_target();
+        DeployTargets {
+            targets: vec![target.clone()],
+            selected: Some(target.id.clone()),
+            ..Default::default()
+        }
+        .save(&path)?;
+        let job = DeploymentJob {
+            target: target.clone(),
+            suite_ids: vec!["one".into()],
+            catalog_ids: vec!["one".into()],
+            partial_confirmed: false,
+            force: false,
+            mode: crate::desktop::deployment::DeploymentMode::Replace,
+            remove_ids: Vec::new(),
+        };
+        let check = |job: &DeploymentJob| {
+            check_unchanged_inputs(&output, root.path(), job, &no_text(), Some(&path))
+        };
+        // Nothing recorded: generate and publish, remembering the inputs.
+        let (inputs, unchanged) = check(&job)?;
+        let inputs = inputs.unwrap();
+        assert!(unchanged.is_none());
+        let (fingerprint, _) = unchanged_deployment(&staging, &job, Some(&path), Some(&inputs))?;
+        let url = "https://reports.example.com/";
+        DeployTargets::record_deployed_report(
+            &path,
+            &target,
+            Some(url),
+            &job.suite_ids,
+            Some(&fingerprint),
+            Some(&inputs),
+        )?;
+        // The same inputs are recognized before any generation, without writing settings.
+        let recorded = fs::read(&path)?;
+        assert_eq!(
+            check(&job)?,
+            (
+                Some(inputs.clone()),
+                Some((url.to_owned(), fingerprint.clone()))
+            )
+        );
+        assert_eq!(fs::read(&path)?, recorded);
+        // Deploy anyway always generates and publishes.
+        let mut forced = job.clone();
+        forced.force = true;
+        assert!(check(&forced)?.1.is_none());
+        // Stale requests are refused at the early check too.
+        let mut stale = job.clone();
+        stale.target.environment = "preview".into();
+        assert!(check(&stale).is_err());
+        assert_eq!(fs::read(&path)?, recorded);
+
+        // New inputs that reproduce the published content (an identical rerun) skip the
+        // upload after generation and are remembered for the next early check.
+        let marker = output.join("one/bitmaps_test/older/notes.txt");
+        fs::write(&marker, b"unrelated")?;
+        let (changed_inputs, unchanged) = check(&job)?;
+        let changed_inputs = changed_inputs.unwrap();
+        assert_ne!(changed_inputs, inputs);
+        assert!(unchanged.is_none());
+        assert_eq!(
+            unchanged_deployment(&staging, &job, Some(&path), Some(&changed_inputs))?,
+            (fingerprint.clone(), Some(url.to_owned()))
+        );
+        assert_eq!(check(&job)?.1, Some((url.to_owned(), fingerprint.clone())));
+        // Without inputs the early check is disabled, never failed.
+        fs::remove_dir_all(output.join("one"))?;
+        assert_eq!(check(&job)?, (None, None));
+        Ok(())
+    }
+
+    #[test]
+    fn merged_staging_keeps_other_suites_by_summary_without_their_files() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let output = root.path().join("output");
+        snapshot_fixture(&output);
+        let kept = vec![
+            super::site_state::tests::summary("alpha"),
+            super::site_state::tests::summary("zeta"),
+        ];
+        let destination = root.path().join("merged");
+        let inventory = stage_site(&output, &["one".into()], &kept, &destination)?;
+        // Only generated suites are staged and inventoried.
+        assert_eq!(inventory.suites.keys().collect::<Vec<_>>(), ["one"]);
+        assert!(inventory.runs.contains_key("one"));
+        assert!(
+            !destination
+                .join("_snapshot/data/suites/alpha.json")
+                .exists()
+        );
+        assert!(!destination.join("_snapshot/images/alpha").exists());
+        // The merged manifest lists every suite in order, with kept summaries verbatim.
+        let summaries = crate::snapshot::suite_summaries(&destination)?;
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|summary| summary.id.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "one", "zeta"]
+        );
+        assert_eq!(summaries[0], kept[0]);
+        let status: serde_json::Value =
+            serde_json::from_slice(&fs::read(destination.join("_snapshot/status.json"))?)?;
+        assert_eq!(status["suites"], 3);
+        assert_eq!(status["total"], 5);
+        // A merged site fingerprints as the whole site, and partial verification passes.
+        let all = vec!["alpha".to_string(), "one".into(), "zeta".into()];
+        assert!(crate::snapshot::site_fingerprint(&destination, &all).is_ok());
+        assert!(crate::snapshot::site_fingerprint(&destination, &["one".into()]).is_err());
+        crate::snapshot::artifact_inventory(
+            &destination,
+            &["one".into()],
+            &["alpha".into(), "zeta".into()],
+        )?;
+
+        // Kept suites that collide with generated ones or carry foreign report paths fail,
+        // and leave no staging behind.
+        let mut foreign = super::site_state::tests::summary("beta");
+        foreign.report = "_snapshot/data/suites/alpha.json?v=AAAAAAAAAAAAAAAAAAAA".into();
+        for invalid in [
+            vec![super::site_state::tests::summary("one")],
+            vec![foreign],
+        ] {
+            let failed = root.path().join("failed");
+            assert!(stage_site(&output, &["one".into()], &invalid, &failed).is_err());
+            assert!(!failed.exists());
+        }
+        // Without kept suites, staging matches the original full-site staging.
+        let full = root.path().join("full");
+        stage_site(&output, &["one".into()], &[], &full)?;
+        assert_eq!(
+            crate::snapshot::suite_summaries(&full)?,
+            crate::snapshot::suite_summaries(&output)?
+        );
+        Ok(())
     }
 
     #[test]

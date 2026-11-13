@@ -1,6 +1,6 @@
 # Cloudflare Deployment
 
-Verified: 2026-09-30
+Verified: 2026-11-13
 
 - [CloudflareClient](../../src/desktop/deployment/cloudflare.rs) uses Workers Static
   Assets directly: MIME-aware manifest, missing-content raw/Base64 uploads,
@@ -19,11 +19,14 @@ Verified: 2026-09-30
 - Header/redirect files are API metadata, not public assets. The manifest excludes
   Azure configuration and `.gitignore`. Both Cloudflare and Netlify call the shared
   Azure access-policy guard before contacting their APIs.
-- Client limits: 25 MiB per file, 100,000 paths, 2 GiB raw content, 32 MiB manifest,
-  8 MiB responses, a shared 50 MiB raw upload budget, and a 55-minute deadline. The
-  provider enforces Free's 20,000-file allowance. Over-budget reports use the
-  [shared optimizer](../../src/desktop/deployment/optimization.rs) on validated
-  public assets only; excluded files and policies do not consume the budget.
+- Client limits: 25 MiB per file, 100,000 paths, 32 MiB manifest, 8 MiB responses,
+  a shared 50 MiB raw upload budget, and a 55-minute deadline. The provider enforces
+  Free's 20,000-file allowance. Cloudflare documents no total asset size limit and
+  accepted live deployments of 2.3 GB, 3.9 GB, and 10 GB (2026-11-13), so the former
+  2 GiB cap was lifted with the maintainers' agreement: `content_budget()` is `None`
+  outside tests and reports upload without image changes. The budgeted path stays for a future limit: over-budget
+  reports use the [shared optimizer](../../src/desktop/deployment/optimization.rs)
+  on validated public assets only; excluded files and policies do not consume it.
   Per-file limits are still checked before optimization. Rebuilt hashes describe
   optimized bytes, and the temporary copy survives uploads and public verification.
   PNG optimization is lossless first, with guarded palette reduction if needed;

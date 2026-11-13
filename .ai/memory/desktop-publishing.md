@@ -1,6 +1,6 @@
 # Desktop Publishing
 
-Verified: 2026-10-15
+Verified: 2026-11-13
 
 - [Landing apps](../../src/desktop/landing.rs) are global per-user definitions,
   automatically stored by UUID. The [editor](../../src/desktop/ui/landing.rs)
@@ -38,9 +38,41 @@ Verified: 2026-10-15
   provider isolation, unsafe links, failure preservation, and native copy controls.
 - Report publications also retain suite output IDs in completion order. Runs links
   resolve the newest site containing the requested suites, encode single-suite
-  paths, and reload asynchronously through artifact refresh. A subset redeployment
-  replaces the site's membership; legacy URLs do not imply membership. The
+  paths, and reload asynchronously through artifact refresh. Membership lists every
+  suite a deployment leaves on the site (kept suites included); legacy URLs do not
+  imply membership. The
   `published_report_sites_` and `runs_open_site_` regressions cover these contracts.
+- Unchanged deployments (issue #8, 2026-11-06): the fingerprint covers the
+  whole staged site (kept suites by summary). Optional `siteFingerprint` records
+  the staged content plus site-shaping target settings. The worker rereads settings and skips the
+  upload on a match; Activity offers Deploy anyway (`force`). Every upload first
+  drops the fingerprint (write-ahead, crash-safe) and keeps membership. Stale
+  requests whose target was edited or removed are refused. An early check on
+  `inputFingerprint` (suite file metadata, no generation) skips everything in
+  milliseconds; without it, a no-change deploy of a large workspace regenerates and
+  stages every selected report before comparing.
+- Incremental deployment (issue #8, 2026-11-06): Update keeps other suites using
+  the site-published `/_snapshot/deployment.json` (provider hashes per file), with a
+  local copy as fallback. Netlify `listSiteFiles` is unnecessary because the state is
+  atomic with each deploy. Cloudflare has no API to read a Worker's asset manifest,
+  so kept hashes must come from the state. The Deploy dialog shows counts plus a searchable review; the suite list shows per-suite
+  site status, an Outdated filter, and "Remove from site: X" (acting on the
+  selection when the clicked suite is selected). Preview reuse in
+  [snapshot](../../src/snapshot/preview_cache.rs) removes most local cost. On a
+  360-image synthetic workspace, previews took ~4.4 s versus ~0.5 s copying.
+- Per-suite skip (2026-11-09): selecting already-deployed suites used to regenerate,
+  validate, stage, and hash all of them, though only one was newer.
+  `Plan::keep_unchanged` now keeps a selected suite by hash when its local
+  `<target>.inputs.json` record (per-suite input fingerprint + digest of the site's
+  `SuiteState`) still matches. Run IDs alone would miss approvals, so the suite list
+  and dialog apply the same rule (`SuiteInputs::verify`) and use run IDs only
+  without a record. The per-suite fingerprint omits report text so the UI can
+  compute it. Updates only: Replace rebuilds the selection, which keeps
+  "replace the whole site" advice in kept-content errors truthful. Optimized
+  Cloudflare uploads rewrite the state for the optimized files rather than drop it.
+  Azure re-uploads kept/unchanged suites from hash-verified local copies (stashed,
+  restored on every exit). Cloudflare budget retries are dormant
+  ([why](deployment-cloudflare.md)); their invariants live in the targets skill.
 - The dialog's native link uses content-sized flex layout so Copy stays beside it;
   the toolkit's label wrapper centers text inside a stretched button. Deployment
   activity reuses the Log tab's read-only editor, fills available height, and keeps

@@ -422,6 +422,7 @@ impl SwaClient {
                 file_count: package.files,
                 original_bytes,
                 total_bytes: package.bytes,
+                state_dropped: false,
             };
             let mut request = json!({
                 "eventInfo": {"repoUrl": null, "isPullRequest": false, "isNamedEnvironment": !target.environment.is_empty(),

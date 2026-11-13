@@ -10,6 +10,8 @@ use serde::Deserialize;
 
 use crate::helpers::{ScenarioName, scenario_names};
 
+use super::helpers::get_asset_version;
+use super::preview_cache::{CachedImage, PreviewCache, url_version};
 use super::site::{
     Capture, CapturePreviews, Dimensions, ImageSize, ImageSizes, MAX_IMAGE_BYTES, MAX_REPORT_BYTES,
     SuiteReport, checked_file, read_bounded, store_asset, valid_segment, valid_suite_id,
@@ -40,6 +42,32 @@ pub(super) struct ImageAsset {
     preview: String,
     grids: BTreeMap<GridThumbnailMode, String>,
     size: ImageSize,
+    /// Preview cache key (`suite/role/name`) of the published paths above.
+    cache_key: String,
+}
+
+/// Preview cache index entries for every image of a successfully generated snapshot.
+pub(super) fn preview_cache_entries(
+    images: &BTreeMap<PathBuf, ImageAsset>,
+) -> BTreeMap<String, CachedImage> {
+    images
+        .values()
+        .filter_map(|asset| {
+            let grids = asset
+                .grids
+                .iter()
+                .map(|(mode, url)| Some((mode.suffix().to_owned(), url_version(url)?.to_owned())))
+                .collect::<Option<_>>()?;
+            Some((
+                asset.cache_key.clone(),
+                CachedImage {
+                    source: url_version(&asset.full)?.to_owned(),
+                    preview: url_version(&asset.preview)?.to_owned(),
+                    grids,
+                },
+            ))
+        })
+        .collect()
 }
 
 fn encode_preview(preview: image::DynamicImage) -> Result<Vec<u8>> {
@@ -438,13 +466,17 @@ type DecodedImage = (
     ImageSize,
 );
 
-fn decode_pending_image(pending: &PendingImage<'_>) -> Result<DecodedImage> {
+fn read_pending_source(pending: &PendingImage<'_>) -> Result<Vec<u8>> {
     let bytes = read_bounded(&pending.source, MAX_IMAGE_BYTES)?;
     ensure!(
         bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
         "Snapshot capture is not a PNG image: {}",
         pending.source.display()
     );
+    Ok(bytes)
+}
+
+fn decode_pending_image(pending: &PendingImage<'_>, bytes: Vec<u8>) -> Result<DecodedImage> {
     let (preview, grids, size) = (|| -> Result<_> {
         let decoded = image::ImageReader::with_format(Cursor::new(&bytes), image::ImageFormat::Png)
             .decode()
@@ -466,50 +498,133 @@ fn decode_pending_image(pending: &PendingImage<'_>) -> Result<DecodedImage> {
     Ok((bytes, preview, grids, size))
 }
 
+fn primary_grid_mode(pending: &PendingImage<'_>) -> Option<GridThumbnailMode> {
+    if pending.grid_modes.len() == 1 {
+        pending.grid_modes.first().copied()
+    } else if pending.role == "diff" && pending.grid_modes.contains(&GridThumbnailMode::DiffCrop) {
+        Some(GridThumbnailMode::DiffCrop)
+    } else if pending.grid_modes.contains(&GridThumbnailMode::TopCrop) {
+        Some(GridThumbnailMode::TopCrop)
+    } else {
+        pending.grid_modes.first().copied()
+    }
+}
+
+fn full_relative(pending: &PendingImage<'_>) -> String {
+    format!(
+        "_snapshot/images/{}/{}/{}",
+        pending.suite, pending.role, pending.name
+    )
+}
+
+fn preview_relative(pending: &PendingImage<'_>) -> String {
+    format!(
+        "_snapshot/images/{}/{}-preview/{}",
+        pending.suite, pending.role, pending.name
+    )
+}
+
+fn grid_relative(pending: &PendingImage<'_>, mode: GridThumbnailMode) -> String {
+    let PendingImage {
+        suite, role, name, ..
+    } = pending;
+    if Some(mode) == primary_grid_mode(pending) {
+        format!("_snapshot/images/{suite}/{role}-thumbnail/{name}")
+    } else {
+        format!(
+            "_snapshot/images/{suite}/{role}-{}-thumbnail/{name}",
+            mode.suffix()
+        )
+    }
+}
+
 fn store_pending_image(
     output: &Path,
     pending: &PendingImage<'_>,
     encoded: DecodedImage,
 ) -> Result<ImageAsset> {
     let (bytes, preview, grids, size) = encoded;
-    let PendingImage {
-        suite, role, name, ..
-    } = pending;
-    let primary_mode = if pending.grid_modes.len() == 1 {
-        pending.grid_modes.first().copied()
-    } else if *role == "diff" && pending.grid_modes.contains(&GridThumbnailMode::DiffCrop) {
-        Some(GridThumbnailMode::DiffCrop)
-    } else if pending.grid_modes.contains(&GridThumbnailMode::TopCrop) {
-        Some(GridThumbnailMode::TopCrop)
-    } else {
-        pending.grid_modes.first().copied()
-    };
     let mut stored_grids = BTreeMap::new();
     for (mode, grid_bytes) in grids {
-        let relative = if Some(mode) == primary_mode {
-            format!("_snapshot/images/{suite}/{role}-thumbnail/{name}")
-        } else {
-            format!(
-                "_snapshot/images/{suite}/{role}-{}-thumbnail/{name}",
-                mode.suffix()
-            )
-        };
-        stored_grids.insert(mode, store_asset(output, &relative, &grid_bytes)?);
+        stored_grids.insert(
+            mode,
+            store_asset(output, &grid_relative(pending, mode), &grid_bytes)?,
+        );
     }
     Ok(ImageAsset {
         size,
-        full: store_asset(
-            output,
-            &format!("_snapshot/images/{suite}/{role}/{name}"),
-            &bytes,
-        )?,
-        preview: store_asset(
-            output,
-            &format!("_snapshot/images/{suite}/{role}-preview/{name}"),
-            &preview,
-        )?,
+        full: store_asset(output, &full_relative(pending), &bytes)?,
+        preview: store_asset(output, &preview_relative(pending), &preview)?,
         grids: stored_grids,
+        cache_key: super::preview_cache::key(pending.suite, pending.role, &pending.name),
     })
+}
+
+/// Copies previews that a previous snapshot generated from byte-identical source bytes instead
+/// of decoding the capture again. Any mismatch or unreadable previous file is a cache miss.
+fn reuse_cached_image(
+    cache: &PreviewCache,
+    root: &Path,
+    output: &Path,
+    pending: &PendingImage<'_>,
+    bytes: &[u8],
+) -> Result<Option<ImageAsset>> {
+    let cache_key = super::preview_cache::key(pending.suite, pending.role, &pending.name);
+    let Some(entry) = cache.get(&cache_key) else {
+        return Ok(None);
+    };
+    // Grid thumbnails depend on the modes as well as the pixels: the same capture can switch
+    // from a top crop to an error overlay when only its report status changes.
+    let modes = pending
+        .grid_modes
+        .iter()
+        .map(|mode| mode.suffix())
+        .collect::<BTreeSet<_>>();
+    if entry.source != get_asset_version(bytes, 20)
+        || !entry.grids.keys().map(String::as_str).eq(modes)
+    {
+        return Ok(None);
+    }
+    // Previously published files are trusted only while their bytes still match the index.
+    let previous = |relative: &str, version: &str| -> Option<Vec<u8>> {
+        let path = checked_file(root, Path::new(relative), true).ok()??;
+        read_bounded(&path, MAX_IMAGE_BYTES)
+            .ok()
+            .filter(|bytes| get_asset_version(bytes, 20) == version)
+    };
+    let Some(preview) = previous(&preview_relative(pending), &entry.preview) else {
+        return Ok(None);
+    };
+    let mut grids = Vec::with_capacity(pending.grid_modes.len());
+    for &mode in &pending.grid_modes {
+        let relative = grid_relative(pending, mode);
+        let Some(grid) = entry
+            .grids
+            .get(mode.suffix())
+            .and_then(|version| previous(&relative, version))
+        else {
+            return Ok(None);
+        };
+        grids.push((mode, relative, grid));
+    }
+    // A header read suffices: these bytes decoded successfully when the previews were made.
+    let Ok((width, height)) =
+        image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png)
+            .into_dimensions()
+    else {
+        return Ok(None);
+    };
+    let mut stored_grids = BTreeMap::new();
+    for (mode, relative, grid) in grids {
+        stored_grids.insert(mode, store_asset(output, &relative, &grid)?);
+    }
+    Ok(Some(ImageAsset {
+        size: ImageSize { width, height },
+        full: store_asset(output, &full_relative(pending), bytes)?,
+        preview: store_asset(output, &preview_relative(pending), &preview)?,
+        grids: stored_grids,
+        cache_key,
+    }))
 }
 
 pub(super) fn load_suite(
@@ -518,6 +633,7 @@ pub(super) fn load_suite(
     id: &str,
     images: &mut BTreeMap<PathBuf, ImageAsset>,
     logs: &mut super::logs::LogCache,
+    cache: &PreviewCache,
 ) -> Result<Option<SuiteReport>> {
     ensure!(valid_suite_id(id), "Invalid snapshot suite ID");
     let suite_dir = root.join(id);
@@ -812,7 +928,7 @@ pub(super) fn load_suite(
     let total_images = pending_images.len();
     if total_images > 0 {
         super::site::snapshot_phase(&format!(
-            "Resizing and staging {total_images} capture preview {} for suite '{id}' ({} {})",
+            "Preparing {total_images} capture preview {} for suite '{id}' ({} {})",
             if total_images == 1 { "image" } else { "images" },
             prepared_tests.len(),
             if prepared_tests.len() == 1 {
@@ -824,9 +940,17 @@ pub(super) fn load_suite(
     }
     let diagnostic_context = crate::diagnostics::runtime::current();
     let completed = std::sync::atomic::AtomicUsize::new(0);
+    let reused = std::sync::atomic::AtomicUsize::new(0);
     let last_update = std::sync::Mutex::new(std::time::Instant::now());
     let process_pending = |pending: &PendingImage<'_>| -> Result<ImageAsset> {
-        let asset = store_pending_image(output, pending, decode_pending_image(pending)?)?;
+        let bytes = read_pending_source(pending)?;
+        let asset = match reuse_cached_image(cache, root, output, pending, &bytes)? {
+            Some(asset) => {
+                reused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                asset
+            }
+            None => store_pending_image(output, pending, decode_pending_image(pending, bytes)?)?,
+        };
         let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let should_log = done == 1
             || done == total_images
@@ -845,7 +969,7 @@ pub(super) fn load_suite(
             }
             crate::diagnostics::runtime::in_scope(diagnostic_context.clone(), || {
                 super::site::snapshot_phase(&format!(
-                    "Resized {done} of {total_images} capture preview images for suite '{id}' ({}/{})",
+                    "Prepared {done} of {total_images} capture preview images for suite '{id}' ({}/{})",
                     pending.role, pending.name
                 ));
             });
@@ -863,6 +987,14 @@ pub(super) fn load_suite(
             .map(process_pending)
             .collect::<Result<Vec<_>>>()?
     };
+    if total_images > 0 {
+        let reused = reused.into_inner();
+        super::site::snapshot_phase(&format!(
+            "Reused {reused} cached and resized {} capture preview {} for suite '{id}'",
+            total_images - reused,
+            if total_images == 1 { "image" } else { "images" },
+        ));
+    }
     for (pending, mut asset) in pending_images.into_iter().zip(stored_images) {
         if let Some(previous) = images.remove(&pending.source) {
             for (mode, url) in previous.grids {
@@ -1033,6 +1165,7 @@ mod tests {
             "suite",
             &mut BTreeMap::new(),
             &mut super::super::logs::LogCache::new(),
+            &PreviewCache::default(),
         )
     }
 
