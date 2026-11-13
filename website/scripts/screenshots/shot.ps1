@@ -228,7 +228,12 @@ switch ($Action) {
     Start-Sleep -Milliseconds 500
     Remove-Item $pidFile -ErrorAction SilentlyContinue
     if (Test-Path $snapshot) {
-      if (Test-Path (Join-Path $snapshot '.absent')) { Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue }
+      if (Test-Path (Join-Path $snapshot '.absent')) {
+        # No desktop folder existed before: remove the session's. Errors propagate, so a locked
+        # file keeps the snapshot and its marker for another stop instead of leaving demo data.
+        if (Test-Path $appDir) { Remove-Item $appDir -Recurse -Force }
+        if (Test-Path $appDir) { throw "Cannot remove the session's app data in $appDir; the snapshot stays in $snapshot. Run stop again." }
+      }
       else {
         # -Force lists hidden and system files too; without it they would be neither restored
         # nor removed, and deleting the snapshot below would lose them.
