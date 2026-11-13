@@ -29,6 +29,9 @@ pub(in crate::desktop::ui) enum SiteSource {
 #[derive(Default)]
 pub(super) struct SiteScan {
     generation: u64,
+    /// Counts local result changes (finished artifact scans), so comparisons started before
+    /// one can be told apart from those started after.
+    revision: u64,
     /// Read the site again from saved settings when the next artifact scan finishes.
     pub(super) reload_pending: bool,
     target: Option<DeployTarget>,
@@ -40,6 +43,69 @@ pub(super) struct SiteScan {
     /// Latest local runs that tests use instead of scanned artifacts.
     #[cfg(test)]
     local_runs: Option<BTreeMap<String, String>>,
+}
+
+/// When a site read or a comparison of local results with the site started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Started {
+    generation: u64,
+    revision: u64,
+}
+
+impl SiteScan {
+    fn started(&self) -> Started {
+        Started {
+            generation: self.generation,
+            revision: self.revision,
+        }
+    }
+
+    /// Local results changed; returns when the comparison they call for starts.
+    fn local_results_changed(&mut self) -> Started {
+        self.revision += 1;
+        self.started()
+    }
+
+    /// Shows a comparison started at `started`, unless a newer site read or local change
+    /// replaced it: comparisons run in the background and may finish out of order, and an
+    /// earlier one may describe results from before an approval or another output folder.
+    /// Returns whether what is shown changed.
+    fn finish_verification(&mut self, started: Started, verified: BTreeMap<String, bool>) -> bool {
+        if started != self.started() {
+            return false;
+        }
+        match &mut self.suites {
+            Some(suites) if suites.verified != verified => {
+                suites.verified = verified;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Shows a site read started at `started`, unless a newer read replaced it (`None`).
+    /// Returns whether local results changed while the site was read, so the comparison it
+    /// made must run again.
+    fn finish_read(
+        &mut self,
+        started: Started,
+        suites: Option<SiteSuites>,
+        state: Option<SiteState>,
+        source: SiteSource,
+    ) -> Option<bool> {
+        if self.generation != started.generation {
+            return None;
+        }
+        if suites.is_some() || !matches!(source, SiteSource::Unknown) {
+            self.suites = suites;
+            self.state = state;
+        }
+        if source == SiteSource::Site {
+            self.read_at = Some(chrono::Local::now().format("%H:%M").to_string());
+        }
+        self.source = source;
+        Some(self.revision != started.revision)
+    }
 }
 
 impl RunPanel {
@@ -127,11 +193,12 @@ impl RunPanel {
     /// Compares the shown site's suites with their recorded inputs again, after local results
     /// changed (a run, approval, or cleanup). Nothing is read from the network.
     pub(super) fn verify_site(&mut self, cx: &mut Context<Self>) {
+        // Counted even without a state to compare, so a site read in flight compares again.
+        let started = self.site.local_results_changed();
         let (Some(target), Some(state)) = (self.site.target.clone(), self.site.state.clone())
         else {
             return;
         };
-        let generation = self.site.generation;
         let settings = self.deployment_path.clone();
         let output = self.output_root().ok();
         let task = cx.background_executor().spawn(async move {
@@ -140,14 +207,7 @@ impl RunPanel {
         cx.spawn(async move |panel, cx| {
             let verified = task.await;
             let _ = panel.update(cx, |panel, cx| {
-                // A newer site read replaces this comparison with its own.
-                if panel.site.generation != generation {
-                    return;
-                }
-                if let Some(suites) = &mut panel.site.suites
-                    && suites.verified != verified
-                {
-                    suites.verified = verified;
+                if panel.site.finish_verification(started, verified) {
                     cx.emit(RunEvent::ArtifactsChanged);
                     cx.notify();
                 }
@@ -185,6 +245,7 @@ impl RunPanel {
         if network {
             self.site.source = SiteSource::Loading;
         }
+        let started = self.site.started();
         let settings = self.deployment_path.clone();
         let output = self.output_root().ok();
         let task = cx.background_executor().spawn(async move {
@@ -265,17 +326,15 @@ impl RunPanel {
         cx.spawn(async move |panel, cx| {
             let ((suites, state), source) = task.await;
             let _ = panel.update(cx, |panel, cx| {
-                if panel.site.generation != generation {
+                let Some(compare_again) = panel.site.finish_read(started, suites, state, source)
+                else {
                     return;
+                };
+                // Local results changed while the site was read (a run, approval, or another
+                // output folder): what it read stands, but its comparison is stale.
+                if compare_again {
+                    panel.verify_site(cx);
                 }
-                if suites.is_some() || !matches!(source, SiteSource::Unknown) {
-                    panel.site.suites = suites;
-                    panel.site.state = state;
-                }
-                if source == SiteSource::Site {
-                    panel.site.read_at = Some(chrono::Local::now().format("%H:%M").to_string());
-                }
-                panel.site.source = source;
                 cx.emit(RunEvent::ArtifactsChanged);
                 cx.notify();
             });
@@ -298,5 +357,59 @@ fn verify(
             site_state::load_inputs(settings, target_id).verify(state, output)
         }
         _ => BTreeMap::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not a glob import: the UI prelude's `test` attribute would shadow the built-in one.
+    use super::{SiteScan, SiteSource, SiteSuites};
+    use std::collections::BTreeMap;
+
+    fn verified(unchanged: bool) -> BTreeMap<String, bool> {
+        BTreeMap::from([("one".to_owned(), unchanged)])
+    }
+
+    #[test]
+    fn comparisons_started_before_a_local_change_never_replace_later_ones() {
+        let mut scan = SiteScan {
+            suites: Some(SiteSuites::from_ids(["one".to_owned()])),
+            ..SiteScan::default()
+        };
+        // Scans before and after an approval each start a comparison.
+        let before = scan.local_results_changed();
+        let after = scan.local_results_changed();
+        // The later one finishes first; the earlier, slower one must not replace it.
+        assert!(scan.finish_verification(after, verified(false)));
+        assert!(!scan.finish_verification(before, verified(true)));
+        assert_eq!(scan.suites.as_ref().unwrap().verified, verified(false));
+    }
+
+    #[test]
+    fn site_reads_compare_again_after_local_changes_while_reading() {
+        let suites = Some(SiteSuites::from_ids(["one".to_owned()]));
+        let mut scan = SiteScan::default();
+        let read = scan.started();
+        // Without local changes, the comparison the read made stands.
+        assert_eq!(
+            scan.finish_read(read, suites.clone(), None, SiteSource::Site),
+            Some(false)
+        );
+        let read = scan.started();
+        // A scan that finishes while the site is read changes local results after the read
+        // compared them: what it read is still shown, and compared again.
+        scan.local_results_changed();
+        assert_eq!(
+            scan.finish_read(read, suites.clone(), None, SiteSource::Site),
+            Some(true)
+        );
+        assert_eq!(scan.suites, suites);
+        // A newer read replaces an older one.
+        let older = scan.started();
+        scan.generation += 1;
+        assert_eq!(
+            scan.finish_read(older, None, None, SiteSource::Unknown),
+            None
+        );
     }
 }

@@ -739,7 +739,9 @@ pub struct PinchAction {
     #[schemars(example = "#map-canvas")]
     pub pinch: String,
     /// Two-finger scale factor from 0.1 to 10.0 (excluding 1.0). Values below 1.0 pinch fingers together (zoom out); values above 1.0 spread fingers apart (zoom in).
-    #[schemars(range(min = 0.1, max = 10.0), example = 2.0, example = 0.5)]
+    // `&` keeps clippy's `duplicated_attributes` (Rust 1.100+) from reading two float literal
+    // examples as one attribute repeated; the schema still lists both values.
+    #[schemars(range(min = 0.1, max = 10.0), example = 2.0, example = &0.5)]
     pub scale: f64,
     /// CSS-pixel center position inside the border box; default center.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -19,7 +19,6 @@ public static class DocShot {
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, IntPtr e);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
-  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
@@ -71,8 +70,8 @@ function Focus-Window($h) {
   [DocShot]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, 0x0003) | Out-Null
   for ($i = 0; $i -lt 10; $i++) {
     if ([DocShot]::GetForegroundWindow() -eq $h) { Start-Sleep -Milliseconds 200; return }
-    # A bare Alt tap lifts the foreground lock, as the smoke harness relies on AppActivate.
-    [DocShot]::keybd_event(0x12, 0, 0, [IntPtr]::Zero); [DocShot]::keybd_event(0x12, 0, 2, [IntPtr]::Zero)
+    # Only activation calls: a synthetic key (such as an Alt tap to lift the foreground lock)
+    # would reach whichever window has focus, possibly opening its menu.
     [DocShot]::SetForegroundWindow($h) | Out-Null
     # Windows only lets the foreground thread hand over focus; borrow its input queue.
     $fg = [DocShot]::GetWindowThreadProcessId([DocShot]::GetForegroundWindow(), [IntPtr]::Zero); $me = [DocShot]::GetCurrentThreadId()
@@ -83,7 +82,7 @@ function Focus-Window($h) {
     (New-Object -ComObject WScript.Shell).AppActivate((Get-Process regressify-desktop | Select-Object -First 1).Id) | Out-Null
     Start-Sleep -Milliseconds 200
   }
-  throw 'Desktop window is not in the foreground; refusing to send input.'
+  throw 'Desktop window is not in the foreground; refusing to send input. Click its title bar, then chain waitfocus with the input steps.'
 }
 
 switch ($Action) {
@@ -97,7 +96,7 @@ switch ($Action) {
     if (-not (Test-Path $snapshot)) {
       $partial = "$snapshot.partial"
       if (Test-Path $partial) { Remove-Item $partial -Recurse -Force }
-      if (Test-Path $appDir) { Copy-Item $appDir $partial -Recurse }
+      if (Test-Path $appDir) { Copy-Item $appDir $partial -Recurse -Force }
       else { New-Item -ItemType Directory $partial | Out-Null; New-Item (Join-Path $partial '.absent') | Out-Null }
       Rename-Item $partial (Split-Path -Leaf $snapshot)
     }
@@ -231,9 +230,13 @@ switch ($Action) {
     if (Test-Path $snapshot) {
       if (Test-Path (Join-Path $snapshot '.absent')) { Remove-Item $appDir -Recurse -Force -ErrorAction SilentlyContinue }
       else {
-        $before = @{}; Get-ChildItem $snapshot -Recurse -File | ForEach-Object { $before[$_.FullName.Substring($snapshot.Length)] = $_.FullName }
-        Get-ChildItem $appDir -Recurse -File | ForEach-Object {
-          $rel = $_.FullName.Substring((Resolve-Path $appDir).Path.Length)
+        # -Force lists hidden and system files too; without it they would be neither restored
+        # nor removed, and deleting the snapshot below would lose them.
+        $before = @{}; Get-ChildItem $snapshot -Recurse -File -Force | ForEach-Object { $before[$_.FullName.Substring($snapshot.Length)] = $_.FullName }
+        New-Item -ItemType Directory -Force $appDir | Out-Null
+        $appRoot = (Resolve-Path $appDir).Path
+        Get-ChildItem $appDir -Recurse -File -Force | ForEach-Object {
+          $rel = $_.FullName.Substring($appRoot.Length)
           if (-not $before.ContainsKey($rel)) { Remove-Item $_.FullName -Force; "removed new file $rel" }
         }
         foreach ($rel in $before.Keys) {
@@ -242,6 +245,11 @@ switch ($Action) {
             New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null; Copy-Item $before[$rel] $dest -Force; "restored $rel"
           }
         }
+        # The snapshot is the only copy of the originals: delete it only once the desktop
+        # folder matches it exactly, otherwise keep it so stop can be run again.
+        $after = @{}; Get-ChildItem $appDir -Recurse -File -Force | ForEach-Object { $after[$_.FullName.Substring($appRoot.Length)] = $_.FullName }
+        $differ = @($before.Keys | Where-Object { -not $after.ContainsKey($_) -or (Get-FileHash $after[$_]).Hash -ne (Get-FileHash $before[$_]).Hash }) + @($after.Keys | Where-Object { -not $before.ContainsKey($_) })
+        if ($differ.Count -gt 0) { throw "App data was not fully restored ($($differ.Count) files differ, such as $($differ[0])); the snapshot stays in $snapshot. Run stop again." }
       }
       Remove-Item $snapshot -Recurse -Force; 'app data restored'
     }
