@@ -637,6 +637,13 @@ impl ResultsPanel {
         self.refresh(root, window, cx);
     }
 
+    /// Drops run and saved-report pins so the next refresh selects the latest
+    /// default reports, which exclude partial and unfinished runs.
+    pub(super) fn follow_latest(&mut self) {
+        self.preferred_run = None;
+        self.preferred_reports = None;
+    }
+
     pub(super) fn show_saved_reports(
         &mut self,
         root: PathBuf,
@@ -3472,6 +3479,285 @@ mod pointer_tests {
         cx: &mut gpui_kit::TestAppContext,
     ) {
         check_comparison_completion(cx, false, crate::desktop::runner::RunOutcome::Completed).await;
+    }
+
+    #[cfg(feature = "gui-tests")]
+    #[gpui_kit::test]
+    async fn full_test_capture_completion_selects_latest_full_suite_report(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        check_capture_completion(cx, CaptureCompletion::test(Some("compared"))).await;
+    }
+
+    #[cfg(feature = "gui-tests")]
+    #[gpui_kit::test]
+    async fn partial_reference_capture_completion_keeps_latest_full_suite_report(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        check_capture_completion(
+            cx,
+            CaptureCompletion {
+                command: crate::desktop::runner::RunCommand::Reference,
+                full_suite: false,
+                ..CaptureCompletion::test(Some("previous"))
+            },
+        )
+        .await;
+    }
+
+    #[cfg(feature = "gui-tests")]
+    #[gpui_kit::test]
+    async fn failed_capture_completion_keeps_reviewed_report(cx: &mut gpui_kit::TestAppContext) {
+        check_capture_completion(
+            cx,
+            CaptureCompletion {
+                outcome: crate::desktop::runner::RunOutcome::Failed("Capture failed".into()),
+                ..CaptureCompletion::test(Some("previous"))
+            },
+        )
+        .await;
+    }
+
+    #[cfg(feature = "gui-tests")]
+    #[gpui_kit::test]
+    async fn cancelled_capture_completion_keeps_reviewed_report(cx: &mut gpui_kit::TestAppContext) {
+        check_capture_completion(
+            cx,
+            CaptureCompletion {
+                outcome: crate::desktop::runner::RunOutcome::Cancelled,
+                ..CaptureCompletion::test(Some("previous"))
+            },
+        )
+        .await;
+    }
+
+    #[cfg(feature = "gui-tests")]
+    #[gpui_kit::test]
+    async fn hidden_capture_completion_leaves_missing_comparison_ungenerated(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        check_capture_completion(
+            cx,
+            CaptureCompletion {
+                saved_report: false,
+                ..CaptureCompletion::test(None)
+            },
+        )
+        .await;
+    }
+
+    #[cfg(feature = "gui-tests")]
+    #[gpui_kit::test]
+    async fn visible_capture_completion_generates_missing_comparison(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        check_capture_completion(
+            cx,
+            CaptureCompletion {
+                results_visible: true,
+                saved_report: false,
+                ..CaptureCompletion::test(Some("compared"))
+            },
+        )
+        .await;
+    }
+
+    #[cfg(feature = "gui-tests")]
+    struct CaptureCompletion {
+        command: crate::desktop::runner::RunCommand,
+        full_suite: bool,
+        outcome: crate::desktop::runner::RunOutcome,
+        results_visible: bool,
+        // False leaves the finished run as a skipped-comparison capture.
+        saved_report: bool,
+        expected_run: Option<&'static str>,
+    }
+
+    #[cfg(feature = "gui-tests")]
+    impl CaptureCompletion {
+        fn test(expected_run: Option<&'static str>) -> Self {
+            Self {
+                command: crate::desktop::runner::RunCommand::Test,
+                full_suite: true,
+                outcome: crate::desktop::runner::RunOutcome::Completed,
+                results_visible: false,
+                saved_report: true,
+                expected_run,
+            }
+        }
+    }
+
+    #[cfg(feature = "gui-tests")]
+    async fn check_capture_completion(
+        cx: &mut gpui_kit::TestAppContext,
+        completion: CaptureCompletion,
+    ) {
+        use crate::desktop::runner::{RunOptions, RunOutcome, RunRequest};
+        use crate::progress::LiveProgress;
+        use crate::run_history::{RunLease, RunState};
+        use gpui_kit::AppContext;
+        use gpui_kit::test::TestAppContextExt;
+        use std::time::Duration;
+
+        let CaptureCompletion {
+            command,
+            full_suite,
+            outcome,
+            results_visible,
+            saved_report,
+            expected_run,
+        } = completion;
+        let use_requested_output = matches!(outcome, RunOutcome::Completed);
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = crate::desktop::ui::tests::editor(cx, directory.path());
+        let (results, runs, suites) = cx.update(|cx| {
+            let editor = view.read(cx);
+            (
+                editor.results.clone(),
+                editor.runs.clone(),
+                editor.session.suites.clone(),
+            )
+        });
+        let scenario_id = suites[0].scenarios[0].id.clone();
+        let root = directory.path().canonicalize().unwrap();
+        let requested_output = root.join("requested-output");
+        let old_output = root.join(".regressify");
+
+        let write_run = |output: &std::path::Path,
+                         run_id: &str,
+                         full: bool,
+                         failed: bool,
+                         with_report: bool| {
+            let suite_dir = output.join("ui-test");
+            let mut lease = RunLease::begin(&suite_dir, run_id, full).unwrap();
+            let run = lease.suite_dir().join("bitmaps_test").join(run_id);
+            if with_report {
+                std::fs::write(
+                    run.join("report.json"),
+                    serde_json::to_vec(&serde_json::json!({
+                        "id": "ui-test",
+                        "testSuite": "ui-test",
+                        "captureInventoryComplete": true,
+                        "tests": [{
+                            "status": if failed { "fail" } else { "pass" },
+                            "pair": {
+                                "scenarioId": scenario_id,
+                                "scenarioLabel": "Checkout",
+                                "fileName": format!("{scenario_id}_desktop__FINAL.png"),
+                            },
+                        }],
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            } else {
+                image::GrayImage::from_pixel(2, 2, image::Luma([80]))
+                    .save(run.join("home.png"))
+                    .unwrap();
+            }
+            lease.finish(RunState::Completed, with_report).unwrap();
+        };
+        write_run(&old_output, "previous", true, false, true);
+        write_run(&requested_output, "previous", true, false, true);
+        write_run(
+            &requested_output,
+            "compared",
+            full_suite,
+            true,
+            saved_report,
+        );
+        let compared_report = requested_output.join("ui-test/bitmaps_test/compared/report.json");
+
+        cx.update_window(handle.into(), |_, window, cx| {
+            results.update(cx, |panel, cx| {
+                panel.set_suites(suites);
+                panel.show_run(old_output.clone(), "previous".into(), window, cx);
+            });
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            let panel = results.read(cx);
+            !panel.loading && panel.selected_report().is_some()
+        })
+        .await;
+        let generation = cx.update(|cx| {
+            let panel = results.read(cx);
+            assert_eq!(panel.selected_report().unwrap().run_id, "previous");
+            panel.generation
+        });
+
+        cx.update(|cx| {
+            if results_visible {
+                view.update(cx, |this, cx| {
+                    this.main_tab = 2;
+                    cx.notify();
+                });
+            }
+            runs.update(cx, |panel, cx| {
+                panel.manager.request = Some(RunRequest {
+                    root,
+                    command,
+                    options: RunOptions {
+                        suites: vec!["ui-test".into()],
+                        run_id: "compared".into(),
+                        regressify_dir: "requested-output".into(),
+                        ..Default::default()
+                    },
+                });
+                panel.manager.outcome = Some(outcome);
+                panel.manager.progress = LiveProgress::default();
+                cx.emit(crate::desktop::ui::runs::RunEvent::Finished);
+            });
+        });
+        cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+            let panel = results.read(cx);
+            panel.generation > generation && !panel.loading
+        })
+        .await;
+
+        cx.update(|cx| {
+            let panel = results.read(cx);
+            assert_eq!(
+                panel.selected_report().map(|report| report.run_id.as_str()),
+                expected_run
+            );
+            assert_eq!(
+                panel.root.as_ref(),
+                Some(if use_requested_output {
+                    &requested_output
+                } else {
+                    &old_output
+                })
+            );
+        });
+        assert_eq!(
+            compared_report.is_file(),
+            saved_report || expected_run == Some("compared")
+        );
+
+        if expected_run.is_none() {
+            // Opening Results is explicit viewing, which generates the pending
+            // comparison for the latest default run left unpinned by completion.
+            let generation = cx.update(|cx| results.read(cx).generation);
+            cx.update_window(handle.into(), |_, window, cx| {
+                results.update(cx, |panel, cx| {
+                    panel.refresh(requested_output.clone(), window, cx)
+                });
+            })
+            .unwrap();
+            cx.wait_for(handle.into(), Duration::from_secs(5), |_, cx| {
+                let panel = results.read(cx);
+                panel.generation > generation && !panel.loading
+            })
+            .await;
+            cx.update(|cx| {
+                assert_eq!(
+                    results.read(cx).selected_report().unwrap().run_id,
+                    "compared"
+                );
+            });
+            assert!(compared_report.is_file());
+        }
     }
 
     #[cfg(feature = "gui-tests")]
