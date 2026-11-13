@@ -1,6 +1,6 @@
 # Release Pipelines
 
-Verified: 2026-10-29
+Verified: 2026-11-13
 
 - [GitHub](../../.github/workflows/tuyen-release.yml) publishes only automatic
   tags in `precise-alloy/regressify-rs`; Azure publishing is retired. Eight build
@@ -62,7 +62,8 @@ Verified: 2026-10-29
   master-scoped caches from [release-cache.yml](../../.github/workflows/release-cache.yml)
   (Mon/Fri schedule). Warm, each leg is bound by the final crate (macOS ~13.5 min),
   so cross-compiling macOS Intel on ARM would not help. The maintainer keeps full LTO,
-  `codegen-units = 1`, and `opt-level = "z"`.
+  `codegen-units = 1`, and `opt-level = 3` (not `"z"` since 2026-11-13: image work
+  in desktop deployments was too slow).
 - Cache runtime isolation (verified 2026-11-05): both workflows suffix their
   shared key with `static` for installer payloads and `native` otherwise.
   Step-local `RUSTFLAGS` do not enter the action's key. The regression test

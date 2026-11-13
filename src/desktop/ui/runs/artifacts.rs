@@ -1,5 +1,5 @@
 use super::*;
-use crate::desktop::deployment::DeployTargets;
+use crate::desktop::deployment::{DeployTarget, DeployTargets};
 use crate::desktop::results::{SavedRun, SuiteArtifacts};
 
 #[derive(Default)]
@@ -151,19 +151,7 @@ impl RunPanel {
                 panel.artifacts.loading = false;
                 match publications {
                     Ok(publications) => {
-                        // The target the site scan follows (the Deploy dialog may have chosen
-                        // one), else the saved selection; refreshed from its saved settings.
-                        let followed = panel
-                            .site_target()
-                            .map(|target| target.id.clone())
-                            .or_else(|| publications.selected.clone());
-                        let saved = followed.and_then(|id| {
-                            publications
-                                .targets
-                                .iter()
-                                .find(|target| target.id == id)
-                                .cloned()
-                        });
+                        let saved = followed_target(panel.site_target(), &publications);
                         let reload = std::mem::take(&mut panel.site.reload_pending);
                         if reload || saved.as_ref() != panel.site_target() {
                             panel.refresh_site(saved, reload, cx);
@@ -397,4 +385,18 @@ impl RunPanel {
             )
             .into_any_element()
     }
+}
+
+/// The target the site scan should show, refreshed from its saved settings: the one it follows
+/// (the Deploy dialog may have chosen it) while the loaded settings still hold it, else the saved
+/// selection. A target from another workspace, or one since deleted, falls back to the selection.
+pub(super) fn followed_target(
+    followed: Option<&DeployTarget>,
+    publications: &DeployTargets,
+) -> Option<DeployTarget> {
+    let find = |id: &str| publications.targets.iter().find(|target| target.id == id);
+    followed
+        .and_then(|target| find(&target.id))
+        .or_else(|| publications.selected.as_deref().and_then(find))
+        .cloned()
 }

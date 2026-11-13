@@ -1,6 +1,6 @@
 # Desktop Publishing
 
-Verified: 2026-11-09
+Verified: 2026-11-13
 
 - [Landing apps](../../src/desktop/landing.rs) are global per-user definitions,
   automatically stored by UUID. The [editor](../../src/desktop/ui/landing.rs)
@@ -70,8 +70,9 @@ Verified: 2026-11-09
   compute it. Updates only: Replace rebuilds the selection, which keeps
   "replace the whole site" advice in kept-content errors truthful. Optimized
   Cloudflare uploads rewrite the state for the optimized files rather than drop it.
-  Azure re-uploads kept/unchanged suites from hash-verified local copies, stashed
-  before generation (which prunes unselected suites) and restored on every exit.
+  Azure re-uploads kept/unchanged suites from hash-verified local copies (stashed,
+  restored on every exit). Cloudflare budget retries are dormant
+  ([why](deployment-cloudflare.md)); their invariants live in the targets skill.
 - The dialog's native link uses content-sized flex layout so Copy stays beside it;
   the toolkit's label wrapper centers text inside a stretched button. Deployment
   activity reuses the Log tab's read-only editor, fills available height, and keeps

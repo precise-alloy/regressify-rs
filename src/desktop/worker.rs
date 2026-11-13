@@ -166,93 +166,11 @@ fn run_request() -> Result<()> {
                         use super::deployment::incremental::Preparation;
                         let outcome = match context.prepare().await? {
                             Preparation::Done(outcome) => outcome,
-                            Preparation::Generate(mut prepared) => {
-                                // Reused suites' files are copied out before generation prunes
-                                // them from the report output.
-                                if !prepared.plan.local.is_empty() {
-                                    let stash = directory.join("local");
-                                    let checker = context.clone();
-                                    let scope = crate::diagnostics::runtime::current();
-                                    prepared = super::deployment::with_heartbeat(
-                                        "Checking local copies of kept suites",
-                                        tokio::task::spawn_blocking(move || {
-                                            crate::diagnostics::runtime::in_scope(scope, || {
-                                                checker
-                                                    .stash_local(&mut prepared, &stash)
-                                                    .map(|()| prepared)
-                                            })
-                                        }),
-                                    )
-                                    .await
-                                    .context("Local copy check failed")??;
-                                }
-                                let plan = &prepared.plan;
-                                let generated = async {
-                                    if plan.generate.is_empty() {
-                                        // Removals and unchanged selections generate no suite. The
-                                        // shared site files are built in scratch space so the local
-                                        // report keeps its suites.
-                                        let scratch = directory.join("generated");
-                                        std::fs::create_dir_all(&scratch)?;
-                                        let workspace =
-                                            crate::config::load_workspace_config(&context.root)?;
-                                        let args = context.args();
-                                        let target = scratch.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            crate::snapshot::generate_site(
-                                                &target,
-                                                &[],
-                                                &args,
-                                                &workspace,
-                                            )
-                                        })
-                                        .await
-                                        .context("Snapshot generation task failed")??;
-                                        anyhow::Ok(scratch)
-                                    } else {
-                                        let mut cli = cli;
-                                        // Kept suites may need regeneration too (Azure, legacy sites).
-                                        if let crate::cli::Command::Snapshot(args) =
-                                            &mut cli.command
-                                        {
-                                            args.test_suite = plan
-                                                .generate
-                                                .iter()
-                                                .map(|id| glob::Pattern::escape(id))
-                                                .collect();
-                                        }
-                                        use crate::diagnostics::{record::Stage, runtime};
-                                        super::deployment::with_heartbeat(
-                                            "Generating selected report snapshots",
-                                            runtime::stage(
-                                                Stage::SnapshotStaging,
-                                                [],
-                                                crate::application::execute(cli),
-                                            ),
-                                        )
-                                        .await
-                                        .context(
-                                            "Cannot generate report snapshots for deployment",
-                                        )?;
-                                        Ok(context.output.clone())
-                                    }
-                                }
-                                .await;
-                                // Generation may have pruned reused suites from the output.
-                                let generated = match generated {
-                                    Ok(generated) => generated,
-                                    Err(error) => {
-                                        context.restore_after_failure(&prepared);
-                                        return Err(error);
-                                    }
-                                };
+                            Preparation::Generate(prepared) => {
                                 context
-                                    .publish(
-                                        *prepared,
-                                        &generated,
-                                        &directory.join("report"),
-                                        &client,
-                                    )
+                                    .generate_and_publish(*prepared, &directory, &client, || {
+                                        request.run.cli()
+                                    })
                                     .await?
                             }
                         };

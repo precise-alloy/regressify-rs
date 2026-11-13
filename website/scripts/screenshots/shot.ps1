@@ -89,13 +89,22 @@ function Focus-Window($h) {
 switch ($Action) {
   'start' {
     if (Get-Process regressify-desktop -ErrorAction SilentlyContinue) { throw 'Another Regressify Desktop instance is running.' }
-    # Snapshot the whole per-user desktop folder (settings, landing apps, targets,
-    # run snapshots) so stop can restore it exactly, then start from clean settings.
+    # Snapshot the whole per-user desktop folder (settings, landing apps, targets, token
+    # catalogs, run snapshots) so stop can restore it exactly. stop treats the snapshot as the
+    # authority and deletes files it lacks, so a copy becomes the snapshot only once complete;
+    # an interrupted copy stays a discarded `.partial` folder. An existing snapshot is from a
+    # session that never stopped, and still holds the originals.
     if (-not (Test-Path $snapshot)) {
-      if (Test-Path $appDir) { Copy-Item $appDir $snapshot -Recurse } else { New-Item -ItemType Directory $snapshot | Out-Null; New-Item (Join-Path $snapshot '.absent') | Out-Null }
-      if (Test-Path $settings) { Remove-Item $settings }
+      $partial = "$snapshot.partial"
+      if (Test-Path $partial) { Remove-Item $partial -Recurse -Force }
+      if (Test-Path $appDir) { Copy-Item $appDir $partial -Recurse }
+      else { New-Item -ItemType Directory $partial | Out-Null; New-Item (Join-Path $partial '.absent') | Out-Null }
+      Rename-Item $partial (Split-Path -Leaf $snapshot)
     }
-    if ($Arg) { [IO.File]::WriteAllText($settings, $Arg) }
+    # Captures start from empty app data, so no personal landing apps, token catalogs, targets,
+    # or recent workspaces can appear in an image; stop restores everything from the snapshot.
+    if (Test-Path $appDir) { Get-ChildItem $appDir -Force | Remove-Item -Recurse -Force }
+    if ($Arg) { New-Item -ItemType Directory -Force (Split-Path $settings) | Out-Null; [IO.File]::WriteAllText($settings, $Arg) }
     New-Item -ItemType Directory -Force $root | Out-Null
     # Windows passes one command-line string; quoting keeps a workspace path with spaces as a
     # single argument, and Windows paths cannot contain quotes. No shell is involved.

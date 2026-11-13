@@ -690,6 +690,7 @@ impl RunPanel {
         self.started = None;
         self.executed_suites.clear();
         self.artifacts.clear();
+        self.reset_site();
         self.deployment_path = None;
         self.log
             .update(cx, |state, cx| state.set_value("", window, cx));
@@ -2999,6 +3000,161 @@ mod tests {
             });
         })
         .unwrap();
+    }
+
+    #[test]
+    fn site_scans_follow_targets_the_loaded_settings_still_hold() {
+        use crate::desktop::deployment::DeployTargets;
+        let target = |id: &str| {
+            let mut target = crate::desktop::deployment::netlify::tests::target();
+            target.id = id.into();
+            target.name = id.into();
+            target
+        };
+        let publications = DeployTargets {
+            targets: vec![target("chosen"), target("selected")],
+            selected: Some("selected".into()),
+            ..Default::default()
+        };
+        let followed = |current: Option<&str>| {
+            super::artifacts::followed_target(current.map(target).as_ref(), &publications)
+                .map(|target| target.id)
+        };
+        // The target the Deploy dialog chose stays followed while it exists.
+        assert_eq!(followed(Some("chosen")).as_deref(), Some("chosen"));
+        // One from another workspace, or deleted, falls back to the saved selection.
+        assert_eq!(followed(Some("elsewhere")).as_deref(), Some("selected"));
+        assert_eq!(followed(None).as_deref(), Some("selected"));
+        let none = DeployTargets::default();
+        assert!(super::artifacts::followed_target(Some(&target("chosen")), &none).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn closing_a_workspace_forgets_its_site(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = super::super::tests::editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.runs.update(cx, |panel, cx| {
+                    panel.set_site_for_test(
+                        Some(crate::desktop::deployment::netlify::tests::target()),
+                        Some(Default::default()),
+                        super::SiteSource::Site,
+                        Default::default(),
+                        cx,
+                    );
+                    panel.clear(window, cx);
+                    assert!(panel.site_target().is_none());
+                    assert!(panel.site_suites().is_none());
+                    assert_eq!(*panel.site_source(), super::SiteSource::Unknown);
+                });
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn sites_published_before_are_never_shown_as_empty(cx: &mut TestAppContext) {
+        use super::SiteSource;
+        use crate::desktop::deployment::{DeployTargets, DeploymentProvider, site_state};
+        let directory = tempfile::tempdir().unwrap();
+        let (_handle, view) = super::super::tests::editor(cx, directory.path());
+        let settings = directory.path().join("deployments/workspace.json");
+        // Answers every request with 404, as a site that serves no report (or a gateway
+        // hiding one) does.
+        let site = crate::test::browser_tests::Site::new(|request| {
+            let _ = request.respond(tiny_http::Response::empty(404));
+        })
+        .unwrap();
+        let mut private = crate::desktop::deployment::netlify::tests::target();
+        private.id = "private".into();
+        let mut public = private.clone();
+        public.id = "public".into();
+        public.name = "Public QA".into();
+        // Saved settings only accept HTTPS URLs; the site read uses the target it is given,
+        // which points at the local test server.
+        let saved_public = public.clone();
+        public.published_url = Some(format!("{}/reports/", site.origin));
+        DeployTargets {
+            targets: vec![private.clone(), saved_public.clone()],
+            selected: Some(private.id.clone()),
+            ..Default::default()
+        }
+        .save(&settings)
+        .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |this, cx| {
+                this.runs.update(cx, |panel, cx| {
+                    panel.set_deployment_storage_path(settings.clone(), cx)
+                })
+            })
+        });
+        let read = |cx: &mut TestAppContext, target: &crate::desktop::deployment::DeployTarget| {
+            cx.update(|cx| {
+                view.update(cx, |this, cx| {
+                    this.runs.update(cx, |panel, cx| {
+                        panel.refresh_site(Some(target.clone()), true, cx)
+                    })
+                })
+            });
+        };
+        let settle = async |cx: &mut TestAppContext| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                let loading = cx
+                    .update(|cx| *view.read(cx).runs.read(cx).site_source() == SiteSource::Loading);
+                if !loading {
+                    break;
+                }
+                cx.background_executor
+                    .timer(std::time::Duration::from_millis(10))
+                    .await;
+            }
+            cx.run_until_parked();
+            cx.update(|cx| {
+                let runs = view.read(cx).runs.read(cx);
+                (
+                    runs.site_source().clone(),
+                    runs.site_suites().map(|suites| suites.suites.len()),
+                )
+            })
+        };
+
+        // Never published: an unread private site is empty.
+        read(cx, &private);
+        assert_eq!(settle(cx).await, (SiteSource::Local, Some(0)));
+        // A private publication left only its marker: the suites are unknown, not absent.
+        site_state::mark_published(&settings, &private.id).unwrap();
+        read(cx, &private);
+        let (source, suites) = settle(cx).await;
+        assert!(matches!(source, SiteSource::Unavailable(_)), "{source:?}");
+        assert_eq!(suites, None);
+
+        // A public site that serves nothing and was never published here is empty.
+        read(cx, &public);
+        assert_eq!(settle(cx).await, (SiteSource::Site, Some(0)));
+        // Once published, an empty answer falls back to the state published from here.
+        DeployTargets::record_report_publication(
+            &settings,
+            &saved_public,
+            Some("https://qa-reports.netlify.app/"),
+            &["shop".into()],
+        )
+        .unwrap();
+        site_state::save_local(
+            &settings,
+            &public.id,
+            &site_state::tests::state(DeploymentProvider::Netlify, &["shop"]),
+        )
+        .unwrap();
+        read(cx, &public);
+        assert_eq!(settle(cx).await, (SiteSource::Local, Some(1)));
+        // Without a local copy either, the suites are unknown.
+        site_state::forget_local(&settings, &public.id).unwrap();
+        read(cx, &public);
+        let (source, suites) = settle(cx).await;
+        assert!(matches!(source, SiteSource::Unavailable(_)), "{source:?}");
+        assert_eq!(suites, None);
     }
 
     #[gpui_kit::test]

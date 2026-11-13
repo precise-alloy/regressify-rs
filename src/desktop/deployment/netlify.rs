@@ -742,12 +742,18 @@ impl Manifest {
                 super::site_state::valid_site_path(path) && super::is_lower_hex(&file.hash, 40),
                 "Invalid kept Netlify file '{path}'"
             );
-            ensure!(
-                self.files
-                    .insert(format!("/{path}"), file.hash.clone())
-                    .is_none(),
-                "A kept suite file collides with a staged file: {path}"
-            );
+            let key = format!("/{path}");
+            // Suites captured by one run share its capture-log chunks, so a regenerated suite
+            // can stage a chunk a kept suite also lists. Identical content is listed once;
+            // different content at one path cannot be published and fails.
+            if let Some(staged) = self.files.get(&key) {
+                ensure!(
+                    *staged == file.hash,
+                    "A kept suite file differs from the staged file at {path}"
+                );
+                continue;
+            }
+            self.files.insert(key, file.hash.clone());
             ensure!(
                 self.files.len() <= file_limit,
                 "Netlify deployment exceeds the {file_limit}-file limit"
@@ -1208,6 +1214,42 @@ pub(crate) mod tests {
                 .iter()
                 .any(|record| record.0 == "GET" && record.1.ends_with("/deploys/deploy-123"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn kept_files_shared_with_staged_files_are_listed_once() -> Result<()> {
+        // A capture-log chunk a regenerated suite stages and a kept suite also lists.
+        const HELLO: &str = "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d";
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("index.html"), "hello")?;
+        std::fs::create_dir_all(root.path().join("_snapshot/data/logs"))?;
+        std::fs::write(root.path().join("_snapshot/data/logs/run.json"), "hello")?;
+        let shared = |hash: &str| {
+            super::super::KeptFiles::from([(
+                "_snapshot/data/logs/run.json".to_owned(),
+                super::super::site_state::StateFile {
+                    size: 5,
+                    hash: hash.into(),
+                },
+            )])
+        };
+        let mut manifest = Manifest::create(root.path(), Instant::now() + Duration::from_secs(60))?;
+        manifest.keep(&shared(HELLO), MAX_FILES)?;
+        let counts = manifest.counts();
+        assert_eq!(
+            (counts.staged_files, counts.kept_files, counts.kept_bytes),
+            (2, 0, 0)
+        );
+        assert!(manifest.kept.is_empty());
+        // Different content at one path cannot be published.
+        let mut conflicting =
+            Manifest::create(root.path(), Instant::now() + Duration::from_secs(60))?;
+        let error = conflicting
+            .keep(&shared(&"1".repeat(40)), MAX_FILES)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("differs from the staged file"), "{error}");
         Ok(())
     }
 

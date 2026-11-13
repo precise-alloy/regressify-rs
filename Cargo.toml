@@ -111,4 +111,4 @@ panic = "abort"   # Terminate the process upon panic
 codegen-units = 1 # Allows LLVM to perform better optimization.
 lto = true        # Enables link-time-optimizations.
 strip = true      # Strip symbols from a binary
-opt-level = "z"   # Optimize for binary size, but also turn off loop vectorization.
+opt-level = 3     # Optimize for speed: image optimization and comparison are CPU-bound.

@@ -734,9 +734,9 @@ there, and the dialog's counts only use a site read for the dialog's own target.
 Updates cannot remove every suite
 from a site, and a site whose report data format differs from this Regressify must
 be replaced. Two people deploying to one site at the same moment are not detected;
-the later deployment wins. When Cloudflare must optimize images to fit its budget,
-the published state is rewritten to name the optimized files and their refreshed
-versions, so later updates keep exactly what the Worker received.
+the later deployment wins. Cloudflare sets no total size budget (see its limits
+below), so an update keeps the other suites by hash at any site size and uploads the
+generated suites without image changes.
 
 Each selected suite is also compared on its own. After a deployment, Regressify
 records, beside the target settings, each published suite's output file metadata
@@ -824,11 +824,10 @@ Deployment budgets are 250 MiB for Free and 500 MiB for Standard per environment
 not the ZIP size. An unrecognized tier is logged and conservatively uses the Free
 budget. Reports already within budget are uploaded without image changes.
 
-Oversized Azure and Cloudflare reports use the same image optimizer, only in a
-separate OS-temporary directory. Cloudflare uses a 2 GiB budget for selected public
-assets; excluded files and hosting policies do not count toward that budget.
+Oversized Azure reports are optimized in a separate OS-temporary directory.
 Local screenshots, references, report metadata, and files used by future
-comparisons are never overwritten. Lossless PNG recompression comes first. If
+comparisons are never overwritten. Lossless PNG recompression comes first, a few
+images at a time. If
 more savings are needed, perceptual palette reduction tries progressively lower
 quality floors for passed comparisons (99 down to 50), then failed Reference/Test
 images (99 down to 80). Larger images are tried first at each quality level;
@@ -843,8 +842,8 @@ The deployment log reports the budget, savings, reduced images, and skipped
 images. If the report cannot fit within these safeguards, deployment stops before
 upload with sizes and recovery steps. Choose fewer suites or a larger plan;
 Azure may also reject a fitting report if other environments exhaust total app
-storage. Optimization shares each provider's deployment deadline and does not
-affect Netlify.
+storage. Optimization shares the deployment deadline; Netlify and Cloudflare
+reports are uploaded without image changes.
 
 Netlify verifies site access, hashes the staged files, and creates an asynchronous
 file-digest deployment; it does not build or upload a ZIP. The manifest includes
@@ -901,13 +900,12 @@ Stop cancels local work, not a publication already accepted by Cloudflare.
 
 Cloudflare limits individual files to 25 MiB, including screenshots. Free accounts
 allow 20,000 files per Worker version; Paid accounts allow 100,000. The client
-checks the per-file limit, caps content at 2 GiB and 100,000 paths, and lets the
-manifest API enforce the account's file-count allowance. Reports above the total
-content budget use the shared image optimizer before any API request; asset hashes
-and sizes are rebuilt from the optimized copy, which stays available through
-upload and public verification. Reports already within budget are unchanged.
+checks the per-file limit and 100,000 paths, and lets the manifest API enforce the
+account's file-count allowance. Cloudflare documents no limit on a Worker's total
+asset size and accepted live deployments of up to 10 GB (2026-11-13), so reports
+are uploaded without image changes at any size.
 Manifests and API responses are bounded to 32 MiB and 8 MiB respectively. Individual
-files above 25 MiB still fail before optimization; they are never uploaded to R2.
+files above 25 MiB fail before any API request; they are never uploaded to R2.
 Deploy fewer suites or reduce capture sizes when needed. Azure access restrictions
 are rejected before any Cloudflare API request instead of silently publishing
 unprotected reports.

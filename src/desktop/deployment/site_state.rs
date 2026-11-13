@@ -55,6 +55,12 @@ pub struct SuiteState {
     pub run_id: String,
     /// Site-relative paths of the suite's JSON, images, and log chunks.
     pub files: BTreeMap<String, StateFile>,
+    /// Total bytes of `files` before a provider optimized them for its storage budget; absent
+    /// when the site serves them as generated. Regenerating the suite restores that size, so
+    /// over-budget updates rarely bring it back to optimize. Untrusted like the rest of the
+    /// state, it only steers that choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,6 +413,17 @@ pub fn was_published(settings: &Path, target_id: &str) -> Result<bool> {
     Ok(marker_path(settings, target_id)?.try_exists()?)
 }
 
+/// Whether this workspace recorded a report publication to the target: the marker (which
+/// also covers private Cloudflare Workers without a URL or membership) or a saved
+/// publication. A site published before that now reads as empty or unknown is not empty.
+pub fn published_before(settings: &Path, target_id: &str) -> Result<bool> {
+    Ok(was_published(settings, target_id)?
+        || super::DeployTargets::load(settings)?
+            .report_publications
+            .iter()
+            .any(|publication| publication.target_id == target_id))
+}
+
 /// Local inputs each suite on a site was generated from, so a selected suite whose inputs are
 /// unchanged is kept on the site instead of being regenerated, staged, and hashed again.
 ///
@@ -415,7 +432,7 @@ pub fn was_published(settings: &Path, target_id: &str) -> Result<bool> {
 /// applies only while the site still serves exactly that suite state, so a suite another
 /// workspace or a later deployment republished is regenerated. Records therefore need no
 /// write-ahead clearing: a stale one can only fail to match.
-#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SuiteInputs {
     pub format: u8,
@@ -596,15 +613,16 @@ fn remove_if_present(path: &Path, label: &str) -> Result<()> {
 }
 
 /// The suites a deployment generates locally, keeps on the site, and removes from it.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
     /// Generated from local results and uploaded.
     pub generate: Vec<String>,
     /// Kept on the site without local content: their summaries and files come from the state.
     pub kept: Vec<SuiteState>,
-    /// Kept on the site by uploading this workspace's copies of the files it serves, for
-    /// providers that accept only whole sites (Azure). The copies are verified against the
-    /// state's hashes before use (`ReportDeployment::stash_local`).
+    /// Kept on the site by uploading this workspace's copies of the files it serves: for
+    /// providers that accept only whole sites (Azure), and for kept suites a Cloudflare budget
+    /// retry brings back to optimize (`upload_kept_suites`). The copies are verified against
+    /// the state's hashes before use (`ReportDeployment::stash_local`).
     pub local: Vec<SuiteState>,
     /// On the site before, absent after.
     pub removed: Vec<String>,
@@ -643,6 +661,17 @@ impl Plan {
                 _ => self.generate.push(id),
             }
         }
+        self.local.sort_by(|a, b| a.summary.id.cmp(&b.summary.id));
+    }
+
+    /// Uploads the kept suites named in `ids` from local files instead, so a provider's
+    /// optimizer can work on them (`KeptSuitesOverBudget`).
+    pub fn upload_kept_suites(&mut self, ids: &BTreeSet<String>) {
+        let (chosen, kept) = std::mem::take(&mut self.kept)
+            .into_iter()
+            .partition::<Vec<_>, _>(|suite| ids.contains(&suite.summary.id));
+        self.kept = kept;
+        self.local.extend(chosen);
         self.local.sort_by(|a, b| a.summary.id.cmp(&b.summary.id));
     }
 
@@ -838,6 +867,7 @@ pub(crate) mod tests {
                     StateFile { size: 20, hash },
                 ),
             ]),
+            source_bytes: None,
         }
     }
 
@@ -867,6 +897,19 @@ pub(crate) mod tests {
     fn site_states_round_trip_and_reject_untrusted_content() {
         let valid = state(DeploymentProvider::Netlify, &["header", "shop"]);
         assert_eq!(SiteState::parse(&valid.to_bytes().unwrap()).unwrap(), valid);
+        // Sizes before optimization round-trip and are left out when absent, so states and
+        // suite digests written without them are unchanged.
+        assert!(
+            !String::from_utf8(valid.to_bytes().unwrap())
+                .unwrap()
+                .contains("sourceBytes")
+        );
+        let mut optimized = valid.clone();
+        optimized.suites.get_mut("shop").unwrap().source_bytes = Some(90);
+        assert_eq!(
+            SiteState::parse(&optimized.to_bytes().unwrap()).unwrap(),
+            optimized
+        );
         let netlify_hash = "a".repeat(40);
         type Mutation<'a> = Box<dyn Fn(&mut SiteState) + 'a>;
         let mutations: Vec<Mutation<'_>> = vec![
@@ -1221,6 +1264,43 @@ pub(crate) mod tests {
             &unchanged,
         );
         assert!(rebuilt.local.is_empty());
+    }
+
+    #[test]
+    fn budget_retries_upload_the_chosen_kept_suites_locally() {
+        let site = KnownSite::State(state(
+            DeploymentProvider::CloudflareWorkers,
+            &["a", "b", "c"],
+        ));
+        let local = ids(&["a", "b", "c"]).into_iter().collect::<BTreeSet<_>>();
+        let mut planned = plan(
+            DeploymentMode::Update,
+            DeploymentProvider::CloudflareWorkers,
+            &ids(&["b"]),
+            &[],
+            &site,
+            &local,
+        )
+        .unwrap();
+        assert_eq!(planned.kept.len(), 2);
+        planned.upload_kept_suites(&ids(&["c", "unknown"]).into_iter().collect());
+        assert_eq!(
+            planned
+                .kept
+                .iter()
+                .map(|suite| suite.summary.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a"]
+        );
+        assert_eq!(planned.generate, ids(&["b"]));
+        assert_eq!(
+            planned
+                .local
+                .iter()
+                .map(|suite| suite.summary.id.as_str())
+                .collect::<Vec<_>>(),
+            ["c"]
+        );
     }
 
     #[test]

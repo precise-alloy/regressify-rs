@@ -49,6 +49,15 @@ impl RunPanel {
         self.refresh_artifacts(cx);
     }
 
+    /// Forgets the site of a closed workspace. The new generation makes reads still in flight
+    /// for it drop their results instead of restoring its suites.
+    pub(super) fn reset_site(&mut self) {
+        self.site = SiteScan {
+            generation: self.site.generation + 1,
+            ..SiteScan::default()
+        };
+    }
+
     pub(in crate::desktop::ui) fn last_command(&self) -> Option<RunCommand> {
         self.manager.request.as_ref().map(|request| request.command)
     }
@@ -202,9 +211,24 @@ impl RunPanel {
                 ),
                 _ => None,
             };
+            // The rule deployments apply: a site this workspace published to is never assumed
+            // empty, since Replace would then remove its suites without confirmation. History
+            // that cannot be read counts as published.
+            let published_before = || {
+                settings.as_deref().is_some_and(|settings| {
+                    site_state::published_before(settings, &target.id).unwrap_or(true)
+                })
+            };
             // The local copy, when the site was not read (`reason` is `None`) or could not be.
             let fallback = |reason: Option<String>| match local() {
                 Ok(Some(state)) => (verified(state), SiteSource::Local),
+                Ok(None) if target.published_url.is_none() && published_before() => (
+                    (None, None),
+                    SiteSource::Unavailable(
+                        "it was published before, but which suites it serves is unknown here"
+                            .into(),
+                    ),
+                ),
                 // Never published here: nothing is on the site yet.
                 Ok(None) if target.published_url.is_none() => {
                     ((Some(SiteSuites::default()), None), SiteSource::Local)
@@ -226,6 +250,10 @@ impl RunPanel {
                     ),
                     SiteSource::Site,
                 ),
+                // An access gateway can hide a published report behind an empty page.
+                Some(Ok(RemoteState::Empty)) if published_before() => {
+                    fallback(Some("it serves no Regressify report".into()))
+                }
                 Some(Ok(RemoteState::Empty)) => {
                     ((Some(SiteSuites::default()), None), SiteSource::Site)
                 }

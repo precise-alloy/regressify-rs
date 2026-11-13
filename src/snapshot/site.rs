@@ -1761,8 +1761,13 @@ pub(crate) enum ImageRole {
     Protected,
 }
 
+/// Roles of the images of every suite in `output`'s manifest except `kept` ones, which an
+/// incremental deployment keeps on the site without local files.
 #[cfg(feature = "desktop")]
-pub(crate) fn image_roles(output: &Path) -> Result<Option<BTreeMap<PathBuf, ImageRole>>> {
+pub(crate) fn image_roles(
+    output: &Path,
+    kept: &BTreeSet<String>,
+) -> Result<Option<BTreeMap<PathBuf, ImageRole>>> {
     let root = output.canonicalize()?;
     let source = checked_file(&root, Path::new("index.html"), false)?
         .context("Snapshot entry page missing")?;
@@ -1773,6 +1778,9 @@ pub(crate) fn image_roles(output: &Path) -> Result<Option<BTreeMap<PathBuf, Imag
     let (_, manifest) = parse_manifest(&root, &html)?;
     let mut roles = BTreeMap::<PathBuf, ImageRole>::new();
     for summary in manifest.suites {
+        if kept.contains(&summary.id) {
+            continue;
+        }
         let report: SuiteReport =
             serde_json::from_slice(&read_versioned(&root, &summary.report, "data")?)?;
         for capture in report.tests {
@@ -1804,12 +1812,16 @@ pub(crate) fn image_roles(output: &Path) -> Result<Option<BTreeMap<PathBuf, Imag
 }
 
 /// Deployment compression changes bytes, so refresh every affected URL's cache version.
+/// `kept` suites, served by the site without local files, keep their summaries verbatim.
 #[cfg(feature = "desktop")]
-pub(crate) fn refresh_site_versions(output: &Path) -> Result<()> {
+pub(crate) fn refresh_site_versions(output: &Path, kept: &BTreeSet<String>) -> Result<()> {
     let root = output.canonicalize()?;
     let (_, mut manifest) = read_manifest(&root)?;
     let mut replacements = BTreeMap::<PathBuf, String>::new();
     for summary in &mut manifest.suites {
+        if kept.contains(&summary.id) {
+            continue;
+        }
         let mut report: SuiteReport =
             serde_json::from_slice(&read_versioned(&root, &summary.report, "data")?)?;
         for capture in &mut report.tests {
@@ -2631,7 +2643,7 @@ mod tests {
         fs::write(root.join(&first_path), b"second image").unwrap();
         fs::write(root.join(&second_path), b"third image").unwrap();
         fs::write(root.join(&preview_path), b"updated preview").unwrap();
-        refresh_site_versions(&root).unwrap();
+        refresh_site_versions(&root, &BTreeSet::new()).unwrap();
         artifact_paths(&root, &["one".into()]).unwrap();
         assert_ne!(fs::read(root.join("index.html")).unwrap(), old_index);
         let (_, updated) = read_manifest(&root).unwrap();
@@ -2666,7 +2678,7 @@ mod tests {
             preview_path
         );
         let index = fs::read(root.join("index.html")).unwrap();
-        refresh_site_versions(&root).unwrap();
+        refresh_site_versions(&root, &BTreeSet::new()).unwrap();
         assert_eq!(fs::read(root.join("index.html")).unwrap(), index);
         update_suite(&root, "one", Some("One"), None).unwrap();
         let case_renamed = artifact_paths(&root, &["One".into()]).unwrap();
@@ -2780,7 +2792,7 @@ mod tests {
             }],
         };
         publish_index(&root, &manifest).unwrap();
-        let roles = image_roles(&root).unwrap().unwrap();
+        let roles = image_roles(&root, &BTreeSet::new()).unwrap().unwrap();
         assert_eq!(
             roles[&versioned_path(&shared, "images").unwrap()],
             ImageRole::Protected

@@ -1081,6 +1081,26 @@ fn forget_site_records(path: &Path, target_id: &str) {
 /// provider's content identity from the site's published state.
 pub(crate) type KeptFiles = std::collections::BTreeMap<String, site_state::StateFile>;
 
+/// Files a deployment keeps on the site by hash, and how the images uploaded beside them may
+/// change to fit a storage budget.
+#[derive(Clone, Copy)]
+pub(crate) struct Keeping<'a> {
+    pub files: &'a KeptFiles,
+    /// The uploaded images may be reduced in quality, not only recompressed losslessly,
+    /// although files stay kept (Cloudflare only).
+    pub reduce_quality: bool,
+}
+
+impl<'a> Keeping<'a> {
+    /// Keeps `files`, recompressing the images beside them only losslessly.
+    pub(crate) fn files(files: &'a KeptFiles) -> Self {
+        Self {
+            files,
+            reduce_quality: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DeploymentStats {
     file_count: u64,
@@ -1136,6 +1156,57 @@ impl ManifestCounts {
     }
 }
 
+/// Share of PNG bytes lossless recompression is expected to save on report screenshots. About
+/// 10% was measured on the largest Chromium captures and more on smaller ones. It only ranks
+/// the kept suites a Cloudflare update brings back to optimize; the staged suites' savings are
+/// measured, and the optimizer stops as soon as the site fits.
+const EXPECTED_LOSSLESS_SAVING_PERCENT: u64 = 10;
+
+/// Bytes lossless recompression of `png_bytes` is expected to save.
+pub(crate) fn expected_lossless_saving(png_bytes: u64) -> u64 {
+    percent_of(png_bytes, EXPECTED_LOSSLESS_SAVING_PERCENT)
+}
+
+/// Share of a suite's original PNG bytes quality reduction down to the spreading floor (85)
+/// is roughly expected to save beyond lossless recompression, as measured on report
+/// screenshots (about a third together). It only decides how many kept suites a Cloudflare
+/// retry brings back to spread the reduction over; every attempt measures what is still
+/// missing.
+const EXPECTED_REDUCTION_SAVING_PERCENT: u64 = 20;
+
+/// Bytes quality reduction of `png_bytes` is roughly expected to save.
+pub(crate) fn expected_reduction_saving(png_bytes: u64) -> u64 {
+    percent_of(png_bytes, EXPECTED_REDUCTION_SAVING_PERCENT)
+}
+
+/// `percent` of `bytes`, rounded down, without overflowing.
+fn percent_of(bytes: u64, percent: u64) -> u64 {
+    (u128::from(bytes) * u128::from(percent) / 100) as u64
+}
+
+/// The site exceeds Cloudflare's storage budget by `remaining` bytes even after the staged
+/// suites were recompressed losslessly, and kept suites cannot be optimized without their
+/// files. `staged_png` counts the staged suites' PNG bytes before optimization. A report
+/// deployment then brings back kept suites and tries again
+/// (`ReportDeployment::generate_and_publish`).
+#[derive(Debug)]
+pub(crate) struct KeptSuitesOverBudget {
+    pub remaining: u64,
+    pub staged_png: u64,
+}
+
+impl std::fmt::Display for KeptSuitesOverBudget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "The site exceeds the Cloudflare content budget by {:.2} MiB, which the selected suites cannot be optimized to cover while other suites are kept; replace the whole site",
+            self.remaining as f64 / (1024.0 * 1024.0)
+        )
+    }
+}
+
+impl std::error::Error for KeptSuitesOverBudget {}
+
 /// A confirmed report publication.
 pub(crate) struct Published {
     pub url: Option<String>,
@@ -1164,19 +1235,19 @@ impl DeploymentClient {
 
     pub async fn deploy(&self, root: &Path, target: &DeployTarget) -> Result<Option<String>> {
         Ok(self
-            .deploy_keeping(root, target, &KeptFiles::new())
+            .deploy_keeping(root, target, Keeping::files(&KeptFiles::new()))
             .await?
             .url)
     }
 
-    /// Publishes `root` as the whole site, plus `kept` files the site already serves. Only
-    /// Netlify and Cloudflare address content by hash; Azure uploads complete packages, so its
-    /// deployments must stage every file.
+    /// Publishes `root` as the whole site, plus the files `keeping` names that the site already
+    /// serves. Only Netlify and Cloudflare address content by hash; Azure uploads complete
+    /// packages, so its deployments must stage every file.
     pub(crate) async fn deploy_keeping(
         &self,
         root: &Path,
         target: &DeployTarget,
-        kept: &KeptFiles,
+        keeping: Keeping<'_>,
     ) -> Result<Published> {
         target.validate()?;
         let started = std::time::Instant::now();
@@ -1184,7 +1255,7 @@ impl DeploymentClient {
         let result = match self {
             Self::Azure(client) => {
                 ensure!(
-                    kept.is_empty(),
+                    keeping.files.is_empty(),
                     "Azure Static Web Apps cannot keep files that are not uploaded"
                 );
                 client
@@ -1193,7 +1264,7 @@ impl DeploymentClient {
                     .map(Some)
             }
             Self::Netlify(client) => client
-                .deploy_with_stats(root, target, kept, &mut stats)
+                .deploy_with_stats(root, target, keeping.files, &mut stats)
                 .await
                 .map(Some),
             Self::Cloudflare(client) => {
@@ -1208,7 +1279,7 @@ impl DeploymentClient {
                             .cloudflare
                             .as_ref()
                             .context("Cloudflare target settings are missing")?,
-                        kept,
+                        keeping,
                         &mut stats,
                     )
                     .await
@@ -3204,6 +3275,17 @@ mod tests {
         assert!(deployment_fingerprint(&approved, &["two".into()], &target).is_err());
         fs::remove_file(approved.join("_snapshot/assets/app.js")).unwrap();
         assert!(deployment_fingerprint(&approved, &suites, &target).is_err());
+    }
+
+    #[test]
+    fn lossless_estimates_save_a_tenth_of_the_png_bytes() {
+        assert_eq!(expected_lossless_saving(1000), 100);
+        assert_eq!(expected_lossless_saving(999), 99);
+        assert_eq!(expected_lossless_saving(0), 0);
+        // Large sites never overflow the arithmetic.
+        assert_eq!(expected_lossless_saving(u64::MAX), u64::MAX / 10);
+        assert_eq!(expected_reduction_saving(1000), 200);
+        assert_eq!(expected_reduction_saving(u64::MAX), u64::MAX / 5);
     }
 
     #[test]

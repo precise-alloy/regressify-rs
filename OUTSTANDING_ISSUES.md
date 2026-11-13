@@ -48,6 +48,20 @@ are historical evidence, not open implementation tasks.
   results, which can publish newer runs than the site had. Azure updates re-upload
   kept suites from local copies verified against the site's hashes and regenerate
   only those whose copies are missing or differ (`whole_site_` tests cover it).
+- Open: Cloudflare sets no total content budget, so reports upload without image
+  changes at any size and updates keep other suites by hash
+  (`sites_above_two_gibibytes_deploy_without_a_content_budget`; evidence and the
+  maintainers' agreement are in
+  [shared memory](.ai/memory/deployment-cloudflare.md)). A future Cloudflare size
+  limit has no known refusal contract, so none is detected. The budgeted path stays
+  in source for it, exercised only by tests that set a budget
+  ([deployment targets skill](.github/skills/deployment-targets/SKILL.md)). Known
+  gaps there (code review, 2026-11-13): a shortfall above every kept suite's
+  expected lossless saving brings them all back, skipping the spread at 85
+  (`suites_to_optimize`); the first, early spreading batch records no
+  `BudgetRetry::last_spread`, so the next batch starts from one suite; the cache is
+  pruned only when opened, so one deployment can exceed 4 GiB; and no test drives
+  `generate_and_publish` through a refusal, regeneration, and publication.
 - Resolved in source: Cloudflare uploads that need image optimization publish a
   site state rewritten for the optimized files instead of none
   (`optimized_uploads_publish_` covers it). Replace rebuilds every selected suite,

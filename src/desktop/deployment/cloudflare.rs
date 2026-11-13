@@ -24,7 +24,6 @@ use super::optimization::{self, PreparedReport};
 
 const MAX_FILES: usize = 100_000;
 const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
-const MAX_CONTENT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_BUCKET_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -150,8 +149,14 @@ pub struct CloudflareClient {
     deadline: Duration,
     verify_interval: Duration,
     verify_attempts: usize,
+    /// Image optimization results this client's deployments share with each other and with
+    /// later deployments, so the same images are not recompressed or reduced again.
+    optimization_cache: std::sync::Arc<optimization::OptimizationCache>,
     #[cfg(test)]
     verification_url: Option<Url>,
+    /// A smaller storage budget, so tests can exceed it with small sites.
+    #[cfg(test)]
+    content_budget: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -245,9 +250,30 @@ impl CloudflareClient {
             deadline: Duration::from_secs(55 * 60),
             verify_interval: Duration::from_secs(2),
             verify_attempts: 30,
+            // Unit tests keep results in a temporary directory, not the user's cache.
+            optimization_cache: std::sync::Arc::new(if cfg!(test) {
+                optimization::OptimizationCache::default()
+            } else {
+                optimization::OptimizationCache::persistent()
+            }),
             #[cfg(test)]
             verification_url: None,
+            #[cfg(test)]
+            content_budget: None,
         })
+    }
+
+    /// The total size deployments must fit. Cloudflare documents no limit on a Worker's assets,
+    /// only per-file sizes and per-version file counts, and live deployments up to 10 GB were
+    /// accepted (2026-11-13), so there is none: sites upload unoptimized and updates keep their
+    /// other suites by hash at any size. The budgeted path, kept for a future limit, is
+    /// exercised by tests through `content_budget`.
+    fn content_budget(&self) -> Option<u64> {
+        #[cfg(test)]
+        if let Some(budget) = self.content_budget {
+            return Some(budget);
+        }
+        None
     }
 
     async fn request<Value: DeserializeOwned>(
@@ -346,25 +372,25 @@ impl CloudflareClient {
         self.deploy_with_stats(
             root,
             target,
-            &super::KeptFiles::new(),
+            super::Keeping::files(&super::KeptFiles::new()),
             &mut super::DeploymentStats::default(),
         )
         .await
     }
 
-    /// Publishes `root` plus `kept` assets the Worker already serves, which are listed in the
-    /// manifest by hash without being uploaded.
+    /// Publishes `root` plus the kept assets the Worker already serves, which are listed in
+    /// the manifest by hash without being uploaded.
     pub(super) async fn deploy_with_stats(
         &self,
         root: &Path,
         target: &CloudflareTarget,
-        kept: &super::KeptFiles,
+        keeping: super::Keeping<'_>,
         stats: &mut super::DeploymentStats,
     ) -> Result<Option<String>> {
         target.validate()?;
         let result = tokio::time::timeout(
             self.deadline,
-            self.deploy_inner(root, target, kept, stats),
+            self.deploy_inner(root, target, keeping, stats),
         )
             .await
             .map_err(|_| anyhow!("Cloudflare deployment exceeded its deadline; check the Worker's deployment history before retrying"))?;
@@ -381,7 +407,7 @@ impl CloudflareClient {
         &self,
         root: &Path,
         target: &CloudflareTarget,
-        kept: &super::KeptFiles,
+        keeping: super::Keeping<'_>,
         stats: &mut super::DeploymentStats,
     ) -> Result<Option<String>> {
         super::validate_static_configuration(root, super::DeploymentProvider::CloudflareWorkers)
@@ -402,7 +428,10 @@ impl CloudflareClient {
         let directory = root.to_path_buf();
         let exclude = target.exclude.clone();
         let html_handling = target.html_handling.clone();
-        let kept = kept.clone();
+        let kept = keeping.files.clone();
+        let reduce_quality = keeping.reduce_quality;
+        let budget = self.content_budget();
+        let optimization_cache = self.optimization_cache.clone();
         let diagnostic_context = crate::diagnostics::runtime::current();
         // Keep optimized files alive until asset uploads and public verification have finished.
         let (manifest, headers, redirects, prepared) = super::with_heartbeat(
@@ -412,9 +441,13 @@ impl CloudflareClient {
                     let (manifest, prepared) = Manifest::prepare(
                         &directory,
                         deadline,
-                        MAX_CONTENT_BYTES,
+                        budget,
                         &exclude,
-                        &kept,
+                        super::Keeping {
+                            files: &kept,
+                            reduce_quality,
+                        },
+                        Some(&optimization_cache),
                     )?;
                     let directory = directory.canonicalize()?;
                     let patterns = exclude
@@ -1182,8 +1215,13 @@ impl Manifest {
     /// update keeping them would serve missing files. The rewritten state also overwrites the
     /// copy in `staged_root`, deliberately: the deployment reads it back from there to record
     /// what the site serves. A state that cannot be rewritten is left out of the upload
-    /// instead, as a site without one: the next update rebuilds from local results.
-    fn rewrite_optimized_state(&mut self, staged_root: &Path) -> Result<()> {
+    /// instead, as a site without one: the next update rebuilds from local results. Entries of
+    /// `kept_suites`, whose files were not optimized, stay as they are.
+    fn rewrite_optimized_state(
+        &mut self,
+        staged_root: &Path,
+        kept_suites: &BTreeSet<String>,
+    ) -> Result<()> {
         let key = format!("/{}", super::site_state::STATE_PATH);
         let Some(old) = self.files.remove(&key) else {
             return Ok(());
@@ -1192,7 +1230,7 @@ impl Manifest {
             self.contents.remove(&old.hash);
         }
         self.bytes -= old.size;
-        let bytes = match optimized_state(&self.root, &self.files) {
+        let bytes = match optimized_state(&self.root, &self.files, kept_suites) {
             Ok(bytes) => bytes,
             Err(error) => {
                 super::phase(&format!(
@@ -1227,23 +1265,55 @@ impl Manifest {
         Ok(())
     }
 
-    fn prepare(
+    /// [`Self::prepare`] within `byte_limit`, recompressing beside kept assets losslessly and
+    /// caching nothing.
+    #[cfg(test)]
+    fn prepare_within(
         root: &Path,
         deadline: Instant,
         byte_limit: u64,
         excludes: &[String],
         kept: &super::KeptFiles,
     ) -> Result<(Self, PreparedReport)> {
-        let kept_bytes = kept
-            .values()
-            .try_fold(0_u64, |total, file| total.checked_add(file.size))
+        Self::prepare(
+            root,
+            deadline,
+            Some(byte_limit),
+            excludes,
+            super::Keeping::files(kept),
+            None,
+        )
+    }
+
+    /// Validates the staged assets and lists the kept ones. With a `byte_limit`, the staged
+    /// assets are optimized into what kept assets leave of it, reduced in quality beside kept
+    /// assets only as `keeping` allows, and `cache` reuses optimization results across
+    /// attempts. Without one, nothing is optimized.
+    fn prepare(
+        root: &Path,
+        deadline: Instant,
+        byte_limit: Option<u64>,
+        excludes: &[String],
+        keeping: super::Keeping,
+        cache: Option<&optimization::OptimizationCache>,
+    ) -> Result<(Self, PreparedReport)> {
+        let super::Keeping {
+            files: kept,
+            reduce_quality,
+        } = keeping;
+        // Kept files the staged site also holds (capture-log chunks shared with a regenerated
+        // suite) are uploaded from staging and count once; `keep` checks their content.
+        let kept_only = kept
+            .iter()
+            .filter(|(path, _)| !root.join(path.as_str()).is_file())
+            .collect::<Vec<_>>();
+        let kept_bytes = kept_only
+            .iter()
+            .try_fold(0_u64, |total, (_, file)| total.checked_add(file.size))
             .context("Kept Cloudflare asset size overflow")?;
         let file_limit = MAX_FILES
-            .checked_sub(kept.len())
+            .checked_sub(kept_only.len())
             .context("Cloudflare deployment exceeds its file limit")?;
-        let local_limit = byte_limit
-            .checked_sub(kept_bytes)
-            .context("Kept suites exceed the Cloudflare content limit; replace the whole site")?;
         // Validate and select assets before optimization; only the total-byte limit is deferred.
         let manifest = Self::create_bounded(
             root,
@@ -1253,18 +1323,83 @@ impl Manifest {
             MAX_FILE_BYTES,
             excludes,
         )?;
-        // Optimization rewrites every suite listed in the manifest, but kept suites have no
-        // local files to rewrite.
-        ensure!(
-            kept.is_empty() || manifest.bytes <= local_limit,
-            "The site exceeds the Cloudflare content budget, which kept suites cannot be optimized into; replace the whole site"
-        );
-        let prepared = optimization::prepare_files(
+        let Some(byte_limit) = byte_limit else {
+            let prepared = PreparedReport::unchanged(&manifest.root, manifest.bytes);
+            let mut manifest = manifest;
+            manifest.keep(kept, excludes)?;
+            super::phase(&format!(
+                "Cloudflare manifest ready: {}",
+                manifest.counts().describe("assets", "hash")
+            ));
+            return Ok((manifest, prepared));
+        };
+        let overflow = manifest
+            .bytes
+            .saturating_add(kept_bytes)
+            .saturating_sub(byte_limit);
+        let staged_png = manifest
+            .files
+            .iter()
+            .filter(|(path, _)| path.ends_with(".png"))
+            .fold(0_u64, |total, (_, asset)| total.saturating_add(asset.size));
+        let local_limit =
+            byte_limit
+                .checked_sub(kept_bytes)
+                .ok_or(super::KeptSuitesOverBudget {
+                    remaining: overflow,
+                    staged_png,
+                })?;
+        // Kept suites keep their files on the site, so only the staged suites are optimized,
+        // into the budget the kept ones leave. Every suite's files include its report data
+        // (`artifact_inventory` checks the path), which names the kept suites.
+        let kept_suites = kept_only
+            .iter()
+            .filter_map(|(path, _)| {
+                path.strip_prefix("_snapshot/data/suites/")?
+                    .strip_suffix(".json")
+            })
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        // Beside kept suites, the staged suites are only recompressed losslessly: squeezing
+        // the whole excess into them would be slow and degrade them alone. When that falls
+        // short, the report deployment brings back kept suites to optimize too, and allows
+        // quality reduction (`Keeping::reduce_quality`) only once none of them is expected to help, down
+        // to `SPREAD_QUALITY` while suites stay kept; a full deployment's floors apply once
+        // every suite is local.
+        let prepared = match optimization::prepare_files(
             &manifest.root,
             manifest.files.keys().map(|path| PathBuf::from(&path[1..])),
-            local_limit,
-            deadline,
-        )?;
+            optimization::Request {
+                limit: local_limit,
+                deadline,
+                kept: &kept_suites,
+                quality_floor: if kept_only.is_empty() {
+                    Some(optimization::LOWEST_QUALITY)
+                } else if reduce_quality {
+                    Some(optimization::SPREAD_QUALITY)
+                } else {
+                    None
+                },
+                cache,
+            },
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) if !kept_only.is_empty() => {
+                let Some(short) = error.downcast_ref::<optimization::DoesNotFit>() else {
+                    return Err(error);
+                };
+                super::phase(&format!(
+                    "The site exceeds the Cloudflare storage budget by {:.2} MiB after recompressing the staged suites losslessly",
+                    short.remaining as f64 / (1024.0 * 1024.0)
+                ));
+                return Err(super::KeptSuitesOverBudget {
+                    remaining: short.remaining,
+                    staged_png,
+                }
+                .into());
+            }
+            Err(error) => return Err(error),
+        };
         let mut manifest = if prepared.path() == manifest.root {
             manifest
         } else {
@@ -1277,7 +1412,7 @@ impl Manifest {
                 MAX_FILE_BYTES,
                 excludes,
             )?;
-            optimized.rewrite_optimized_state(root)?;
+            optimized.rewrite_optimized_state(root, &kept_suites)?;
             optimized
         };
         manifest.keep(kept, excludes)?;
@@ -1295,14 +1430,7 @@ impl Manifest {
 
     #[cfg(test)]
     fn create(root: &Path, deadline: Instant) -> Result<Self> {
-        Self::create_bounded(
-            root,
-            deadline,
-            MAX_FILES,
-            MAX_CONTENT_BYTES,
-            MAX_FILE_BYTES,
-            &[],
-        )
+        Self::create_bounded(root, deadline, MAX_FILES, u64::MAX, MAX_FILE_BYTES, &[])
     }
 
     fn create_bounded(
@@ -1492,17 +1620,22 @@ impl Manifest {
                     && file.size <= MAX_FILE_BYTES,
                 "Invalid kept Cloudflare asset '{path}'"
             );
-            ensure!(
-                self.files
-                    .insert(
-                        format!("/{path}"),
-                        Asset {
-                            hash: file.hash.clone(),
-                            size: file.size,
-                        },
-                    )
-                    .is_none(),
-                "A kept suite file collides with a staged file: {path}"
+            let key = format!("/{path}");
+            // A capture-log chunk shared with a regenerated suite is staged already: identical
+            // content is listed once, different content at one path fails.
+            if let Some(staged) = self.files.get(&key) {
+                ensure!(
+                    staged.hash == file.hash,
+                    "A kept suite file differs from the staged file at {path}"
+                );
+                continue;
+            }
+            self.files.insert(
+                key,
+                Asset {
+                    hash: file.hash.clone(),
+                    size: file.size,
+                },
             );
             self.bytes = self
                 .bytes
@@ -1633,9 +1766,13 @@ pub(super) fn excluded_path(patterns: &[glob::Pattern], path: &str) -> bool {
 }
 
 /// The site state in an optimized `root`, with each suite's summary from the refreshed
-/// manifest and each file's hash and size from the optimized `files`. Kept suites block
-/// optimization, so every suite in the state was generated in this upload.
-fn optimized_state(root: &Path, files: &BTreeMap<String, Asset>) -> Result<Vec<u8>> {
+/// manifest and each file's hash and size from the optimized `files`. `kept_suites` were not
+/// optimized and keep their entries.
+fn optimized_state(
+    root: &Path,
+    files: &BTreeMap<String, Asset>,
+    kept_suites: &BTreeSet<String>,
+) -> Result<Vec<u8>> {
     let mut state = super::site_state::SiteState::parse(
         &std::fs::read(root.join(super::site_state::STATE_PATH))
             .context("Cannot read the staged site state")?,
@@ -1644,11 +1781,21 @@ fn optimized_state(root: &Path, files: &BTreeMap<String, Asset>) -> Result<Vec<u
         .into_iter()
         .map(|summary| (summary.id.clone(), summary))
         .collect::<BTreeMap<_, _>>();
+    let total = |suite: &super::site_state::SuiteState| {
+        suite
+            .files
+            .values()
+            .fold(0_u64, |total, file| total.saturating_add(file.size))
+    };
     for (id, suite) in &mut state.suites {
+        if kept_suites.contains(id) {
+            continue;
+        }
         suite.summary = summaries
             .get(id)
             .cloned()
             .with_context(|| format!("The optimized site has no suite '{id}'"))?;
+        let source = total(suite);
         for (path, file) in &mut suite.files {
             let asset = files
                 .get(&format!("/{path}"))
@@ -1656,6 +1803,8 @@ fn optimized_state(root: &Path, files: &BTreeMap<String, Asset>) -> Result<Vec<u
             file.hash = asset.hash.clone();
             file.size = asset.size;
         }
+        // Regenerating the suite restores its staged size, which later updates account for.
+        suite.source_bytes = (total(suite) < source).then_some(source);
     }
     state.to_bytes()
 }
@@ -2421,7 +2570,7 @@ mod tests {
                 .deploy_with_stats(
                     root.path(),
                     &target(),
-                    &super::super::KeptFiles::new(),
+                    super::super::Keeping::files(&super::super::KeptFiles::new()),
                     &mut stats,
                 )
                 .await?,
@@ -3061,7 +3210,7 @@ mod tests {
             root.path(),
             deadline(),
             MAX_FILES,
-            MAX_CONTENT_BYTES,
+            u64::MAX,
             MAX_FILE_BYTES,
             &["private".into(), "*.map".into(), "_worker.js".into()],
         )?;
@@ -3074,7 +3223,7 @@ mod tests {
                 root.path(),
                 deadline(),
                 MAX_FILES,
-                MAX_CONTENT_BYTES,
+                u64::MAX,
                 MAX_FILE_BYTES,
                 &["_worker.js".into()]
             )
@@ -3150,8 +3299,152 @@ mod tests {
         assert!(!excluded_path(&patterns, "_snapshot/images/logs/a.png"));
     }
 
+    #[tokio::test]
+    async fn sites_above_two_gibibytes_deploy_without_a_content_budget() -> Result<()> {
+        // Cloudflare documents no total asset size limit, so a large site keeps its suites by
+        // hash instead of being refused or optimized.
+        const KEPT: u64 = 100;
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("index.html"), "report")?;
+        let kept = (0..KEPT)
+            .map(|index| {
+                (
+                    format!("_snapshot/images/kept/test/{index}.png"),
+                    super::super::site_state::StateFile {
+                        size: MAX_FILE_BYTES,
+                        hash: format!("{index:032x}"),
+                    },
+                )
+            })
+            .collect::<super::super::KeptFiles>();
+        let site = crate::test::browser_tests::Site::new(move |mut request| {
+            let path = request.url().to_owned();
+            let method = request.method().as_str().to_owned();
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body).unwrap();
+            let value = if path.ends_with("/settings") {
+                json!({})
+            } else if path.ends_with("/workers/subdomain") {
+                json!({"subdomain":"account"})
+            } else if path.ends_with("/subdomain") {
+                json!({"enabled":true})
+            } else if path.ends_with("/assets-upload-session") {
+                let manifest: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(
+                    manifest["manifest"].as_object().unwrap().len() as u64,
+                    KEPT + 1
+                );
+                json!({"jwt":"completion-token","buckets":[]})
+            } else if method == "PUT" {
+                json!({"id":"report-worker","has_assets":true})
+            } else {
+                let _ = request.respond(
+                    tiny_http::Response::from_string("report").with_header(
+                        tiny_http::Header::from_bytes("Content-Type", "text/html; charset=utf-8")
+                            .unwrap(),
+                    ),
+                );
+                return;
+            };
+            let _ = request.respond(tiny_http::Response::from_string(
+                json!({"success":true,"result":value}).to_string(),
+            ));
+        })?;
+        let mut stats = super::super::DeploymentStats::default();
+        client(&site.origin)
+            .deploy_with_stats(
+                root.path(),
+                &target(),
+                super::super::Keeping::files(&kept),
+                &mut stats,
+            )
+            .await?;
+        let total = 6 + KEPT * MAX_FILE_BYTES;
+        assert!(total > 2 * 1024 * 1024 * 1024);
+        assert_eq!(stats.total_bytes, total);
+        // Nothing was optimized.
+        assert_eq!(stats.original_bytes, total);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn budget_refusals_with_kept_assets_reach_the_deployment_typed() -> Result<()> {
+        let site = crate::test::browser_tests::Site::new(|request| {
+            let _ = request.respond(tiny_http::Response::empty(404));
+        })?;
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("index.html"), "report")?;
+        let kept = super::super::KeptFiles::from([(
+            "_snapshot/images/kept/test/a.png".to_owned(),
+            super::super::site_state::StateFile {
+                size: 10,
+                hash: "0123456789abcdef0123456789abcdef".into(),
+            },
+        )]);
+        let mut client = client(&site.origin);
+        // 6 staged bytes plus 10 kept bytes exceed a 10-byte budget.
+        client.content_budget = Some(10);
+        let error = client
+            .deploy_with_stats(
+                root.path(),
+                &target(),
+                super::super::Keeping::files(&kept),
+                &mut super::super::DeploymentStats::default(),
+            )
+            .await
+            .err()
+            .context("an over-budget site with kept assets must be refused")?;
+        let refusal = error
+            .downcast_ref::<super::super::KeptSuitesOverBudget>()
+            .with_context(|| format!("{error:#}"))?;
+        // Six bytes over, and nothing staged the optimizer could recompress.
+        assert_eq!((refusal.remaining, refusal.staged_png), (6, 0));
+        Ok(())
+    }
+
     #[test]
-    fn kept_assets_are_validated_budgeted_and_block_optimization() -> Result<()> {
+    fn kept_assets_shared_with_staged_files_count_once() -> Result<()> {
+        let root = optimization::tests::report_fixture()?;
+        let original = Manifest::create(root.path(), deadline())?;
+        let index = &original.files["/index.html"];
+        let shared = |hash: &str| {
+            super::super::KeptFiles::from([(
+                "index.html".to_owned(),
+                super::super::site_state::StateFile {
+                    size: index.size,
+                    hash: hash.into(),
+                },
+            )])
+        };
+        // The shared file is staged already, so it neither shrinks the local budget (which
+        // would force optimization a kept suite cannot take) nor counts twice.
+        let (manifest, prepared) = Manifest::prepare_within(
+            root.path(),
+            deadline(),
+            original.bytes,
+            &[],
+            &shared(&index.hash),
+        )?;
+        assert_eq!(prepared.path(), root.path().canonicalize()?);
+        assert_eq!(manifest.bytes, original.bytes);
+        assert_eq!(manifest.files.len(), original.files.len());
+        assert_eq!(manifest.counts().kept_files, 0);
+        let error = Manifest::prepare_within(
+            root.path(),
+            deadline(),
+            original.bytes,
+            &[],
+            &shared(&"0".repeat(32)),
+        )
+        .err()
+        .context("conflicting shared content must fail")?
+        .to_string();
+        assert!(error.contains("differs from the staged file"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn kept_assets_are_validated_and_leave_the_rest_of_the_budget() -> Result<()> {
         let kept = |path: &str, hash: &str, size: u64| {
             super::super::KeptFiles::from([(
                 path.to_owned(),
@@ -3168,7 +3461,7 @@ mod tests {
         let original = Manifest::create(root.path(), deadline())?;
         // Kept assets join the manifest and its byte count without local content.
         let limit = original.bytes * 2;
-        let (manifest, _) = Manifest::prepare(
+        let (manifest, _) = Manifest::prepare_within(
             root.path(),
             deadline(),
             limit,
@@ -3196,7 +3489,7 @@ mod tests {
         assert_eq!(stats.total_bytes, original.bytes + 9);
         // Untrusted kept entries: invalid hashes, excluded or unsafe paths, collisions.
         // Exclusions added after a publication call for a replacement, said plainly.
-        let error = Manifest::prepare(
+        let error = Manifest::prepare_within(
             root.path(),
             deadline(),
             limit,
@@ -3221,7 +3514,7 @@ mod tests {
             ("index.html", good, vec![]),
         ] {
             assert!(
-                Manifest::prepare(
+                Manifest::prepare_within(
                     root.path(),
                     deadline(),
                     limit,
@@ -3232,20 +3525,36 @@ mod tests {
                 "{path}"
             );
         }
-        // Kept suites cannot be optimized, so an over-budget site must be replaced.
-        let error = Manifest::prepare(
+        // Over the budget, the staged files are optimized into what kept assets leave.
+        let (optimized, prepared) = Manifest::prepare_within(
             root.path(),
             deadline(),
             original.bytes,
             &[],
             &kept("_snapshot/images/kept/test/a.png", good, 9),
+        )?;
+        assert_ne!(prepared.path(), root.path());
+        assert!(optimized.bytes <= original.bytes);
+        assert_eq!(optimized.counts().kept_files, 1);
+        // Staged files that cannot fit even optimized are refused as kept suites over the
+        // budget, which report deployments retry with every suite local.
+        let error = Manifest::prepare_within(
+            root.path(),
+            deadline(),
+            9 + 1,
+            &[],
+            &kept("_snapshot/images/kept/test/a.png", good, 9),
         )
         .err()
-        .context("over-budget kept deployment must fail")?
-        .to_string();
-        assert!(error.contains("replace the whole site"), "{error}");
+        .context("unfittable staged files beside kept assets must fail")?;
+        assert!(
+            error
+                .downcast_ref::<super::super::KeptSuitesOverBudget>()
+                .is_some(),
+            "{error:#}"
+        );
         // A staged state that cannot describe the optimized files is left out of the upload.
-        let (optimized, prepared) = Manifest::prepare(
+        let (optimized, prepared) = Manifest::prepare_within(
             root.path(),
             deadline(),
             original.bytes * 85 / 100,
@@ -3280,7 +3589,7 @@ mod tests {
         std::fs::write(root.path().join("debug.map"), "x".repeat(limit as usize))?;
         std::fs::create_dir(root.path().join("_worker.js"))?;
         let excludes = ["*.map".into(), "_worker.js".into()];
-        let (manifest, prepared) = Manifest::prepare(
+        let (manifest, prepared) = Manifest::prepare_within(
             root.path(),
             deadline(),
             limit,
@@ -3325,10 +3634,9 @@ mod tests {
 
     #[test]
     fn preparation_preserves_fitting_reports_and_rejects_unfittable_content() -> Result<()> {
-        assert_eq!(MAX_CONTENT_BYTES, 2 * 1024 * 1024 * 1024);
         let root = tempfile::tempdir()?;
         std::fs::write(root.path().join("index.html"), "report")?;
-        let (manifest, prepared) = Manifest::prepare(
+        let (manifest, prepared) = Manifest::prepare_within(
             root.path(),
             deadline(),
             6,
@@ -3338,7 +3646,7 @@ mod tests {
         assert_eq!(manifest.bytes, 6);
         assert_eq!(prepared.path(), root.path().canonicalize()?);
         assert!(
-            Manifest::prepare(
+            Manifest::prepare_within(
                 root.path(),
                 deadline(),
                 5,
@@ -3348,7 +3656,7 @@ mod tests {
             .is_err()
         );
         assert!(
-            Manifest::prepare(
+            Manifest::prepare_within(
                 root.path(),
                 Instant::now(),
                 6,
@@ -3360,7 +3668,7 @@ mod tests {
         assert_eq!(std::fs::read(root.path().join("index.html"))?, b"report");
         std::fs::write(root.path().join(".assetsignore"), "*")?;
         assert!(
-            Manifest::prepare(
+            Manifest::prepare_within(
                 root.path(),
                 deadline(),
                 6,
@@ -3424,6 +3732,7 @@ mod tests {
                     summary,
                     run_id: inventory.runs["one"].clone(),
                     files,
+                    source_bytes: None,
                 },
             )]),
         };
@@ -3447,7 +3756,7 @@ mod tests {
             .map(|(_, asset)| asset.size)
             .sum();
         let limit = original.bytes - image_bytes * 15 / 100;
-        let (manifest, prepared) = Manifest::prepare(
+        let (manifest, prepared) = Manifest::prepare_within(
             &root,
             deadline(),
             limit,
@@ -3490,7 +3799,7 @@ mod tests {
             },
         );
         std::fs::write(root.join(STATE_PATH), broken.to_bytes()?)?;
-        let (manifest, _prepared) = Manifest::prepare(
+        let (manifest, _prepared) = Manifest::prepare_within(
             &root,
             deadline(),
             limit,
@@ -3498,6 +3807,113 @@ mod tests {
             &super::super::KeptFiles::new(),
         )?;
         assert!(!manifest.files.contains_key(&format!("/{STATE_PATH}")));
+        Ok(())
+    }
+
+    #[test]
+    fn staged_suites_are_optimized_into_the_budget_kept_suites_leave() -> Result<()> {
+        use super::super::site_state::{STATE_PATH, SiteState, StateFile};
+        let (_source, _staging, root) = staged_snapshot_with_state()?;
+        // Suite "two" stays on the site from an earlier deployment: the staged index and state
+        // list it, but none of its files are local.
+        let mut two = crate::snapshot::suite_summaries(&root)?.remove(0);
+        let version = two.report.split_once("?v=").context("versioned report")?.1;
+        two.id = "two".into();
+        two.report = format!("_snapshot/data/suites/two.json?v={version}");
+        crate::snapshot::publish_merged_index(&root, &root, vec![two.clone()])?;
+        let kept = super::super::KeptFiles::from([
+            (
+                "_snapshot/data/suites/two.json".to_owned(),
+                StateFile {
+                    size: 100,
+                    hash: "1".repeat(32),
+                },
+            ),
+            (
+                "_snapshot/images/two/test/a.png".to_owned(),
+                StateFile {
+                    size: 4096,
+                    hash: "2".repeat(32),
+                },
+            ),
+        ]);
+        let mut staged = SiteState::parse(&std::fs::read(root.join(STATE_PATH))?)?;
+        let mut kept_state = staged.suites["one"].clone();
+        kept_state.summary = two.clone();
+        kept_state.files = kept.clone();
+        staged.suites.insert("two".into(), kept_state.clone());
+        std::fs::write(root.join(STATE_PATH), staged.to_bytes()?)?;
+        let original = Manifest::create(&root, deadline())?;
+        let image_bytes: u64 = original
+            .files
+            .iter()
+            .filter(|(path, _)| path.ends_with(".png"))
+            .map(|(_, asset)| asset.size)
+            .sum();
+        // An excess lossless recompression cannot save is refused with what remains of it, so
+        // the deployment can bring back kept suites; the staged images are never reduced.
+        let overflow = image_bytes * 90 / 100;
+        let refused = original.bytes + 4196 - overflow;
+        let error = Manifest::prepare_within(&root, deadline(), refused, &[], &kept)
+            .err()
+            .context("a large overflow beside kept suites must be refused")?;
+        let refusal = error
+            .downcast_ref::<super::super::KeptSuitesOverBudget>()
+            .context("typed refusal")?;
+        assert!(refusal.remaining > 0 && refusal.remaining < overflow);
+        assert_eq!(refusal.staged_png, image_bytes);
+        // Allowed to reduce quality, the staged suite comes closer to what the kept one leaves.
+        let shortfall = |reduce_quality| -> Result<u64> {
+            let error = Manifest::prepare(
+                &root,
+                deadline(),
+                Some(4196 + 1),
+                &[],
+                super::super::Keeping {
+                    files: &kept,
+                    reduce_quality,
+                },
+                None,
+            )
+            .err()
+            .context("one byte beside the kept suite cannot fit")?;
+            Ok(error
+                .downcast_ref::<super::super::KeptSuitesOverBudget>()
+                .context("typed refusal")?
+                .remaining)
+        };
+        assert!(shortfall(true)? < shortfall(false)?);
+        // One byte over: recompressing the staged suite fits it into what the kept one leaves.
+        let limit = original.bytes + 4196 - 1;
+        let (manifest, prepared) = Manifest::prepare_within(&root, deadline(), limit, &[], &kept)?;
+        assert_ne!(prepared.path(), root.as_path());
+        assert!(manifest.bytes <= limit);
+        assert_eq!(manifest.counts().kept_files, 2);
+        assert_eq!(
+            manifest.files["/_snapshot/images/two/test/a.png"].hash,
+            "2".repeat(32)
+        );
+        // The kept suite stays listed, and its state entry describes what the site serves.
+        let summaries = crate::snapshot::suite_summaries(prepared.path())?;
+        assert_eq!(summaries.iter().find(|suite| suite.id == "two"), Some(&two));
+        let uploaded = SiteState::parse(&std::fs::read(prepared.path().join(STATE_PATH))?)?;
+        assert_eq!(uploaded.suites["two"], kept_state);
+        // The optimized suite remembers its staged size for later updates.
+        assert_eq!(
+            uploaded.suites["one"].source_bytes,
+            Some(
+                staged.suites["one"]
+                    .files
+                    .values()
+                    .map(|file| file.size)
+                    .sum()
+            )
+        );
+        for (path, file) in &uploaded.suites["one"].files {
+            let asset = &manifest.files[&format!("/{path}")];
+            assert_eq!((&file.hash, file.size), (&asset.hash, asset.size), "{path}");
+        }
+        assert_ne!(uploaded.suites["one"].files, staged.suites["one"].files);
         Ok(())
     }
 
@@ -3535,7 +3951,7 @@ mod tests {
             .map(|(_, asset)| asset.size)
             .sum();
         let limit = original.bytes - image_bytes * 15 / 100;
-        let (manifest, prepared) = Manifest::prepare(
+        let (manifest, prepared) = Manifest::prepare_within(
             &root,
             deadline(),
             limit,

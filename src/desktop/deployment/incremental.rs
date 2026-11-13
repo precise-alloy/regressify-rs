@@ -54,8 +54,12 @@ pub(crate) enum Preparation {
     Generate(Box<Prepared>),
 }
 
+#[derive(Clone)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct Prepared {
     pub plan: Plan,
+    /// What earlier attempts' storage budget refusals decided (`retry_with_kept_suites`).
+    pub budget: BudgetRetry,
     /// The site's own fingerprint, when it could be read.
     pub remote: Option<String>,
     pub inputs: Option<String>,
@@ -67,6 +71,25 @@ pub(crate) struct Prepared {
     pub served: Option<SiteState>,
     /// Verified copies of `plan.local` suites' files, set by `stash_local`.
     pub stash: Option<PathBuf>,
+}
+
+/// How a deployment retries after its provider refused it for the storage budget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BudgetRetry {
+    /// The provider may reduce image quality in the suites it uploads although other suites
+    /// stay kept: set once no kept suite is expected to save anything if brought back.
+    pub reduce_quality: bool,
+    /// The last retry that spread quality reduction over more kept suites, so the next one
+    /// sizes its batch by what they actually saved.
+    pub last_spread: Option<Spread>,
+}
+
+/// A retry that brought back `suites` kept suites to reduce in quality when the site was
+/// `remaining` bytes over its budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Spread {
+    pub remaining: u64,
+    pub suites: usize,
 }
 
 impl ReportDeployment {
@@ -191,6 +214,7 @@ impl ReportDeployment {
         ));
         Ok(Preparation::Generate(Box::new(Prepared {
             plan,
+            budget: BudgetRetry::default(),
             remote: remote_fingerprint,
             inputs,
             suite_inputs,
@@ -291,12 +315,34 @@ impl ReportDeployment {
         let Some(staged) = staged else {
             return Ok(());
         };
-        // The entry page and manifest go last, so they never name files that are not there.
-        for path in [
+        let last = [
             "_snapshot/status.json",
             "_snapshot/data/manifest.json",
             "index.html",
-        ] {
+        ];
+        // The staged site's bundled frontend and hosting files come first: the restored entry
+        // page names their current versions, which an older output may lack, for example when
+        // only shared files were generated (in scratch space) because every suite was reused.
+        for entry in walkdir::WalkDir::new(staged).follow_links(false) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = site_path(entry.path().strip_prefix(staged)?);
+            let suite_file = [
+                "_snapshot/images/",
+                "_snapshot/data/suites/",
+                "_snapshot/data/logs/",
+            ]
+            .iter()
+            .any(|prefix| path.starts_with(prefix));
+            if suite_file || path == site_state::STATE_PATH || last.contains(&path.as_str()) {
+                continue;
+            }
+            restore_file(&self.output, entry.path(), &path, false)?;
+        }
+        // The entry page and manifest go last, so they never name files that are not there.
+        for path in last {
             if staged.join(path).is_file() {
                 restore_file(&self.output, &staged.join(path), path, true)?;
             }
@@ -308,6 +354,167 @@ impl ReportDeployment {
         crate::snapshot::artifact_inventory(&self.output, &suites, &[])
             .context("The restored local report is incomplete")?;
         Ok(())
+    }
+
+    /// Generates what `prepared` plans, then stages and publishes it.
+    ///
+    /// Beside kept suites, Cloudflare only recompresses the generated suites losslessly, into
+    /// the storage budget the kept ones leave. Each time that falls short
+    /// ([`super::KeptSuitesOverBudget`]), the deployment runs again with more kept suites,
+    /// those expected to save what is still missing, uploaded from local files. Once no kept
+    /// suite is expected to help losslessly, the uploaded suites may be reduced in quality, no
+    /// lower than `SPREAD_QUALITY` while suites stay kept, and each further refusal spreads the
+    /// reduction over more kept suites; the full floors apply only once every suite is local.
+    /// `snapshot` builds the snapshot command for each generation.
+    pub async fn generate_and_publish(
+        &self,
+        prepared: Prepared,
+        directory: &Path,
+        client: &DeploymentClient,
+        mut snapshot: impl FnMut() -> Result<crate::cli::Cli>,
+    ) -> Result<Outcome> {
+        let mut next = prepared;
+        // Every retry brings back at least one more kept suite or, once, allows quality
+        // reduction, so the attempts end with the whole site local at the latest, which the
+        // budget never refuses for kept suites.
+        let mut attempt = 0_usize;
+        loop {
+            let retry = next.clone();
+            let suffix = match attempt {
+                0 => String::new(),
+                attempt => format!("-retry{attempt}"),
+            };
+            let error = match self
+                .generate_and_publish_once(next, directory, &suffix, client, snapshot()?)
+                .await
+            {
+                Err(error) => error,
+                outcome => return outcome,
+            };
+            let before = retry
+                .plan
+                .local
+                .iter()
+                .map(|suite| suite.summary.id.clone())
+                .collect::<BTreeSet<_>>();
+            let reduced = retry.budget.reduce_quality;
+            let Some(retry) = retry_with_kept_suites(retry, &error) else {
+                return Err(error);
+            };
+            let added = retry
+                .plan
+                .local
+                .iter()
+                .map(|suite| suite.summary.id.as_str())
+                .filter(|id| !before.contains(*id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            phase(
+                &if retry.budget.reduce_quality && !reduced && added.is_empty() {
+                    format!(
+                        "No kept suite is expected to save more losslessly; allowing quality reduction in the uploaded suites ({} kept unchanged)",
+                        retry.plan.kept.len()
+                    )
+                } else if retry.budget.reduce_quality && !reduced {
+                    format!(
+                        "No kept suite is expected to save more losslessly; allowing quality reduction in the uploaded suites and the kept suites expected to save the most ({} kept unchanged): {added}",
+                        retry.plan.kept.len()
+                    )
+                } else if reduced {
+                    format!(
+                        "Spreading quality reduction over more kept suites ({} kept unchanged): {added}",
+                        retry.plan.kept.len()
+                    )
+                } else {
+                    format!(
+                        "Optimizing more kept suites, expected to save what is still missing ({} kept unchanged): {added}",
+                        retry.plan.kept.len()
+                    )
+                },
+            );
+            next = retry;
+            attempt += 1;
+        }
+    }
+
+    /// One attempt: stash reused suites, generate, then publish, in folders named with `suffix`.
+    async fn generate_and_publish_once(
+        &self,
+        mut prepared: Prepared,
+        directory: &Path,
+        suffix: &str,
+        client: &DeploymentClient,
+        mut cli: crate::cli::Cli,
+    ) -> Result<Outcome> {
+        // Reused suites' files are copied out before generation prunes them from the output.
+        if !prepared.plan.local.is_empty() {
+            let stash = directory.join(format!("local{suffix}"));
+            let checker = self.clone();
+            let scope = crate::diagnostics::runtime::current();
+            prepared = super::with_heartbeat(
+                "Checking local copies of kept suites",
+                tokio::task::spawn_blocking(move || {
+                    crate::diagnostics::runtime::in_scope(scope, || {
+                        checker
+                            .stash_local(&mut prepared, &stash)
+                            .map(|()| prepared)
+                    })
+                }),
+            )
+            .await
+            .context("Local copy check failed")??;
+        }
+        let generated = async {
+            if prepared.plan.generate.is_empty() {
+                // Removals and unchanged selections generate no suite. The shared site files
+                // are built in scratch space so the local report keeps its suites.
+                let scratch = directory.join(format!("generated{suffix}"));
+                std::fs::create_dir_all(&scratch)?;
+                let workspace = crate::config::load_workspace_config(&self.root)?;
+                let args = self.args();
+                let target = scratch.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::snapshot::generate_site(&target, &[], &args, &workspace)
+                })
+                .await
+                .context("Snapshot generation task failed")??;
+                anyhow::Ok(scratch)
+            } else {
+                // Kept suites may need regeneration too (Azure, legacy sites, a budget retry).
+                if let crate::cli::Command::Snapshot(args) = &mut cli.command {
+                    args.test_suite = prepared
+                        .plan
+                        .generate
+                        .iter()
+                        .map(|id| glob::Pattern::escape(id))
+                        .collect();
+                }
+                use crate::diagnostics::{record::Stage, runtime};
+                super::with_heartbeat(
+                    "Generating selected report snapshots",
+                    runtime::stage(Stage::SnapshotStaging, [], crate::application::execute(cli)),
+                )
+                .await
+                .context("Cannot generate report snapshots for deployment")?;
+                Ok(self.output.clone())
+            }
+        }
+        .await;
+        // Generation may have pruned reused suites from the output.
+        let generated = match generated {
+            Ok(generated) => generated,
+            Err(error) => {
+                self.restore_after_failure(&prepared);
+                return Err(error);
+            }
+        };
+        self.publish(
+            prepared,
+            &generated,
+            &directory.join(format!("report{suffix}")),
+            client,
+        )
+        .await
     }
 
     /// Restores reused suites after a failure before staging (generation, for example).
@@ -420,12 +627,7 @@ impl ReportDeployment {
         let Some(path) = &self.settings else {
             return Ok(false);
         };
-        // Private Cloudflare publications record no URL or membership, only the marker.
-        Ok(site_state::was_published(path, &self.job.target.id)?
-            || super::DeployTargets::load(path)?
-                .report_publications
-                .iter()
-                .any(|publication| publication.target_id == self.job.target.id))
+        site_state::published_before(path, &self.job.target.id)
     }
 
     /// Suites with local results that could be generated.
@@ -492,6 +694,7 @@ impl ReportDeployment {
     ) -> Result<Outcome> {
         let Prepared {
             plan,
+            budget,
             remote,
             inputs,
             suite_inputs,
@@ -604,7 +807,14 @@ impl ReportDeployment {
                 .context("Cannot clear the local site state before removing suites")?;
         }
         let published = client
-            .deploy_keeping(staging, &self.job.target, &kept_files)
+            .deploy_keeping(
+                staging,
+                &self.job.target,
+                super::Keeping {
+                    files: &kept_files,
+                    reduce_quality: budget.reduce_quality,
+                },
+            )
             .await?;
         if let Some(path) = &self.settings {
             if let Err(error) = site_state::mark_published(path, &self.job.target.id) {
@@ -647,6 +857,169 @@ impl ReportDeployment {
             suites: Some(suites),
         })
     }
+}
+
+/// The next plan after `error`, when it is Cloudflare's budget refusing a site with kept
+/// suites. Each step goes further, so repeated refusals end with every suite local, where only
+/// what a full deployment would refuse is reported:
+/// 1. the kept suites `suites_to_optimize` picks for what is still missing also come from local
+///    files, whose copies are checked afresh;
+/// 2. once none is expected to help losslessly, the uploaded suites may be reduced in quality
+///    (`BudgetRetry::reduce_quality`), no lower than `SPREAD_QUALITY` while suites stay kept,
+///    together with kept suites (`suites_to_reduce`) for what reducing the uploaded ones alone
+///    is not expected to save;
+/// 3. then each refusal brings back more kept suites, those expected to save the most first and
+///    as many as the previous spread's measured savings call for (`spread_count`), spreading
+///    the reduction so every image stays closer to its original quality, as the optimizer does
+///    over a whole site.
+fn retry_with_kept_suites(mut prepared: Prepared, error: &anyhow::Error) -> Option<Prepared> {
+    let refusal = error.downcast_ref::<super::KeptSuitesOverBudget>()?;
+    if prepared.plan.kept.is_empty() {
+        return None;
+    }
+    let chosen = if prepared.budget.reduce_quality {
+        let count = spread_count(prepared.budget.last_spread, refusal.remaining);
+        let chosen = suites_to_reduce(&prepared.plan.kept, refusal.remaining, count);
+        prepared.budget.last_spread = Some(Spread {
+            remaining: refusal.remaining,
+            suites: chosen.len(),
+        });
+        chosen
+    } else {
+        let chosen = suites_to_optimize(&prepared.plan.kept, refusal.remaining);
+        if chosen.is_empty() {
+            prepared.budget.reduce_quality = true;
+            // An attempt that could only squeeze the uploaded suites would be discarded anyway
+            // when they are not expected to cover the shortfall alone. `remaining` already
+            // follows their lossless recompression.
+            let uploaded = super::expected_reduction_saving(refusal.staged_png);
+            if uploaded >= refusal.remaining {
+                return Some(prepared);
+            }
+            suites_to_reduce(&prepared.plan.kept, refusal.remaining - uploaded, 1)
+        } else {
+            chosen
+        }
+    };
+    prepared.plan.upload_kept_suites(&chosen);
+    prepared.stash = None;
+    Some(prepared)
+}
+
+/// What regenerating `suite` adds back (its `source_bytes` beyond what the site serves), and
+/// its original PNG bytes, assuming the savings were in its images.
+fn regrowth_and_original_png(suite: &SuiteState) -> (u64, u64) {
+    let sum = |png: bool| {
+        suite
+            .files
+            .iter()
+            .filter(|(path, _)| !png || path.ends_with(".png"))
+            .fold(0_u64, |total, (_, file)| total.saturating_add(file.size))
+    };
+    let regrowth = suite
+        .source_bytes
+        .map_or(0, |source| source.saturating_sub(sum(false)));
+    (regrowth, sum(true).saturating_add(regrowth))
+}
+
+/// What bringing back `suite` is expected to save once regenerated and recompressed
+/// losslessly, and with `reduce` also reduced in quality, net of what regeneration adds back
+/// to a suite a deployment optimized before; and its original PNG bytes.
+fn expected_saving(suite: &SuiteState, reduce: bool) -> (u64, u64) {
+    let (regrowth, original) = regrowth_and_original_png(suite);
+    let mut saving = super::expected_lossless_saving(original);
+    if reduce {
+        saving = saving.saturating_add(super::expected_reduction_saving(original));
+    }
+    (saving.saturating_sub(regrowth), original)
+}
+
+/// The suites of `ranked`, best first with their expected savings, needed to save
+/// `remaining`; all of those expected to save anything when together they are not enough.
+fn enough_to_save<'a>(
+    ranked: impl IntoIterator<Item = (u64, &'a String)>,
+    remaining: u64,
+) -> BTreeSet<String> {
+    let mut saved = 0_u64;
+    let mut chosen = BTreeSet::new();
+    for (saving, id) in ranked {
+        if saving == 0 || saved >= remaining {
+            break;
+        }
+        saved = saved.saturating_add(saving);
+        chosen.insert(id.clone());
+    }
+    chosen
+}
+
+/// The kept suites expected to save the most once regenerated and reduced in quality, net of
+/// what regeneration adds back, enough for `remaining`; all of those when together they are not
+/// enough. A suite reduced by an earlier deployment regains about what reducing it again saves,
+/// so it comes last, and the reduction spreads to suites not reduced yet. When no suite is
+/// expected to save anything, the largest one comes back alone, so retries always progress.
+fn suites_to_reduce(kept: &[SuiteState], remaining: u64, at_least: usize) -> BTreeSet<String> {
+    let mut suites = kept
+        .iter()
+        .map(|suite| {
+            // Regenerated, the suite is recompressed and then reduced in quality.
+            let (saving, original) = expected_saving(suite, true);
+            (saving, original, &suite.summary.id)
+        })
+        .collect::<Vec<_>>();
+    suites.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(b.2))
+    });
+    let mut chosen = enough_to_save(
+        suites.iter().map(|(saving, _, id)| (*saving, *id)),
+        remaining,
+    );
+    // Estimates miss what earlier deployments left unreduced, so measured savings may ask for
+    // more suites; with none expected to save anything, the largest come first.
+    for (_, _, id) in &suites {
+        if chosen.len() >= at_least.max(1) {
+            break;
+        }
+        chosen.insert((*id).clone());
+    }
+    chosen
+}
+
+/// How many kept suites the next spreading retry brings back: enough, at the rate the last
+/// ones saved per suite, for `remaining` plus a quarter for suites saving less; twice as many
+/// as last time when they saved nothing; one without a previous spread to measure.
+fn spread_count(last_spread: Option<Spread>, remaining: u64) -> usize {
+    let Some(Spread {
+        remaining: before,
+        suites: added,
+    }) = last_spread
+    else {
+        return 1;
+    };
+    let gain = before.saturating_sub(remaining);
+    if gain == 0 {
+        return added.saturating_mul(2).max(1);
+    }
+    let per_suite = (gain / added.max(1) as u64).max(1);
+    let needed = remaining.saturating_add(remaining / 4);
+    usize::try_from(needed.div_ceil(per_suite))
+        .unwrap_or(usize::MAX)
+        .max(1)
+}
+
+/// The kept suites expected to save at least `remaining` bytes once regenerated and
+/// recompressed losslessly, those saving the most first; all that are expected to save
+/// anything when together they are not enough. A suite saves a share of its original PNG
+/// bytes, less what regeneration adds back to one a deployment optimized before
+/// (`source_bytes`), so those rarely qualify: bringing them back only adds bytes and work.
+fn suites_to_optimize(kept: &[SuiteState], remaining: u64) -> BTreeSet<String> {
+    let mut savings = kept
+        .iter()
+        .map(|suite| (expected_saving(suite, false).0, &suite.summary.id))
+        .collect::<Vec<_>>();
+    savings.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    enough_to_save(savings, remaining)
 }
 
 /// Adds the stashed copies of reused suites to a staged site. Generated suites win where both
@@ -798,6 +1171,7 @@ fn build_state(
                     .cloned()
                     .with_context(|| format!("Staged suite '{id}' has no run"))?,
                 files: entries.into_iter().flatten().collect(),
+                source_bytes: None,
             },
         );
     }
@@ -1078,12 +1452,7 @@ mod tests {
                         .publish(
                             Prepared {
                                 plan,
-                                remote: None,
-                                inputs: None,
-                                suite_inputs: BTreeMap::new(),
-                                records: SuiteInputs::default(),
-                                served: None,
-                                stash: None,
+                                ..Prepared::default()
                             },
                             &generated,
                             &staging,
@@ -1367,14 +1736,12 @@ mod tests {
         let prepared = |plan, remote, served| Prepared {
             plan,
             remote,
-            inputs: None,
             suite_inputs: BTreeMap::from([
                 ("one".to_owned(), "in-one".to_owned()),
                 ("two".to_owned(), "in-two".to_owned()),
             ]),
-            records: SuiteInputs::default(),
             served,
-            stash: None,
+            ..Prepared::default()
         };
         let first_plan = plan(&context)?;
         generate(&output, &first_plan.generate);
@@ -1435,12 +1802,7 @@ mod tests {
         let context = deployment(&output, DeploymentMode::Update, &["one", "two"], &[]);
         let prepared = |plan| Prepared {
             plan,
-            remote: None,
-            inputs: None,
-            suite_inputs: BTreeMap::new(),
-            records: SuiteInputs::default(),
-            served: None,
-            stash: None,
+            ..Prepared::default()
         };
         let both = ["one".to_owned(), "two".to_owned()];
         generate(&output, &both);
@@ -1520,6 +1882,297 @@ mod tests {
         Ok(())
     }
 
+    /// `id`'s published suite with `png` bytes in each PNG file, `other` in every other file,
+    /// and `source_bytes`.
+    fn sized_suite(
+        published: &SiteState,
+        id: &str,
+        png: u64,
+        other: u64,
+        source_bytes: Option<u64>,
+    ) -> SuiteState {
+        let mut suite = published.suites[id].clone();
+        for (path, file) in &mut suite.files {
+            file.size = if path.ends_with(".png") { png } else { other };
+        }
+        suite.source_bytes = source_bytes;
+        suite
+    }
+
+    fn budget_refusal(remaining: u64, staged_png: u64) -> anyhow::Error {
+        super::super::KeptSuitesOverBudget {
+            remaining,
+            staged_png,
+        }
+        .into()
+    }
+
+    #[test]
+    fn budget_retries_bring_back_the_kept_suites_expected_to_save_the_most() {
+        let published = site_state::tests::state(
+            DeploymentProvider::CloudflareWorkers,
+            &["big", "mid", "small"],
+        );
+        // PNG bytes each suite serves, and its size before an earlier optimization.
+        let kept = [
+            ("big", 1000, Some(1250)),
+            ("mid", 600, None),
+            ("small", 100, None),
+        ]
+        .into_iter()
+        .map(|(id, png, source_bytes)| sized_suite(&published, id, png, 50, source_bytes))
+        .collect::<Vec<_>>();
+        let chosen = |remaining| {
+            suites_to_optimize(&kept, remaining)
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        // "big" regains 200 bytes once regenerated, more than a tenth of its 1200 PNG bytes
+        // saves, so only the unoptimized suites qualify: "mid" saves 60, "small" 10.
+        assert_eq!(chosen(50), ["mid"]);
+        assert_eq!(chosen(65), ["mid", "small"]);
+        // Beyond what they are expected to save, all of them come back, never "big".
+        assert_eq!(chosen(71), ["mid", "small"]);
+        // Only optimized suites left: none is expected to help.
+        assert!(suites_to_optimize(&kept[..1], 10).is_empty());
+    }
+
+    #[test]
+    fn only_cloudflare_budget_refusals_with_kept_suites_retry_with_local_files() {
+        let published =
+            site_state::tests::state(DeploymentProvider::CloudflareWorkers, &["a", "b", "c"]);
+        let prepared = |kept: Vec<SuiteState>| Prepared {
+            plan: Plan {
+                generate: vec!["d".to_owned()],
+                kept,
+                ..Plan::default()
+            },
+            stash: Some(PathBuf::from("stale-stash")),
+            ..Prepared::default()
+        };
+        let refusal = |remaining| {
+            budget_refusal(remaining, 0).context("Cannot prepare local Cloudflare deployment files")
+        };
+        let kept = published.suites.values().cloned().collect::<Vec<_>>();
+        // The typed refusal survives the context deployments add on the way up. Each suite
+        // serves 20 PNG bytes, expected to save 2: one covers 2 bytes.
+        let retry = retry_with_kept_suites(prepared(kept.clone()), &refusal(2)).unwrap();
+        assert_eq!(retry.plan.local, kept[..1]);
+        assert_eq!(retry.plan.kept, kept[1..]);
+        assert_eq!(retry.plan.generate, ["d"]);
+        // The retry checks local copies afresh.
+        assert!(retry.stash.is_none());
+        // A refusal of that retry brings back more suites for what is still missing.
+        let more = retry_with_kept_suites(retry, &refusal(2)).unwrap();
+        assert_eq!(more.plan.local, kept[..2]);
+        assert_eq!(more.plan.kept, kept[2..]);
+        // Other failures are reported as they are.
+        assert!(retry_with_kept_suites(more.clone(), &anyhow::anyhow!("offline")).is_none());
+        // Beyond what the rest is expected to save, all of it comes back; then nothing is left
+        // to bring back and the refusal is reported.
+        let full = retry_with_kept_suites(more, &refusal(100)).unwrap();
+        assert!(full.plan.kept.is_empty());
+        assert_eq!(full.plan.local, kept);
+        assert!(!full.budget.reduce_quality);
+        assert!(retry_with_kept_suites(full, &refusal(1)).is_none());
+    }
+
+    #[test]
+    fn budget_retries_reduce_quality_before_bringing_back_optimized_suites() {
+        let published = site_state::tests::state(
+            DeploymentProvider::CloudflareWorkers,
+            &["optimized", "plain"],
+        );
+        let mut optimized = published.suites["optimized"].clone();
+        // Regenerating it would add far more than recompressing it saves.
+        optimized.source_bytes = Some(1000);
+        let plain = published.suites["plain"].clone();
+        let prepared = Prepared {
+            plan: Plan {
+                generate: vec!["new".to_owned()],
+                kept: vec![optimized.clone(), plain.clone()],
+                ..Plan::default()
+            },
+            ..Prepared::default()
+        };
+        // The uploaded suites alone are expected to cover the shortfall by quality reduction.
+        let refusal = budget_refusal(50, 1000);
+        // The suite expected to save something comes back first, although not enough.
+        let first = retry_with_kept_suites(prepared, &refusal).unwrap();
+        assert_eq!(first.plan.local, [plain]);
+        assert_eq!(first.plan.kept, [optimized.clone()]);
+        assert!(!first.budget.reduce_quality);
+        // Then the uploaded suites may be reduced in quality, keeping the optimized suite.
+        let reduced = retry_with_kept_suites(first, &refusal).unwrap();
+        assert!(reduced.budget.reduce_quality);
+        assert_eq!(reduced.plan.kept, [optimized]);
+        // Then the reduction spreads to the optimized suite as well.
+        let spread = retry_with_kept_suites(reduced, &refusal).unwrap();
+        assert!(spread.plan.kept.is_empty());
+        assert!(spread.budget.reduce_quality);
+        // With every suite local, only a full deployment's own refusal remains.
+        assert!(retry_with_kept_suites(spread, &refusal).is_none());
+    }
+
+    #[test]
+    fn spreading_retries_size_their_batch_by_measured_savings() {
+        let spread = |remaining, suites| Some(Spread { remaining, suites });
+        // Without a previous spread, one suite; the measurement then sizes the next batch.
+        assert_eq!(spread_count(None, 1000), 1);
+        // One suite saved 20 of 264 bytes: 244 still missing, plus a quarter, at 20 each.
+        assert_eq!(spread_count(spread(264, 1), 244), 16);
+        // Three suites saved 30: 10 each.
+        assert_eq!(spread_count(spread(100, 3), 70), 9);
+        // Nothing saved: twice as many as last time.
+        assert_eq!(spread_count(spread(100, 3), 100), 6);
+        assert_eq!(spread_count(spread(100, 3), 120), 6);
+        // A tiny shortfall still brings back one.
+        assert_eq!(spread_count(spread(100, 1), 1), 1);
+
+        let published =
+            site_state::tests::state(DeploymentProvider::CloudflareWorkers, &["a", "b", "c", "d"]);
+        // All reduced before: none is expected to save anything, so the largest come first.
+        let kept = [("a", 400), ("b", 300), ("c", 200), ("d", 100)]
+            .into_iter()
+            .map(|(id, png)| sized_suite(&published, id, png, 0, Some(png * 2)))
+            .collect::<Vec<_>>();
+        let prepared = Prepared {
+            plan: Plan {
+                generate: vec!["new".to_owned()],
+                kept: kept.clone(),
+                ..Plan::default()
+            },
+            budget: BudgetRetry {
+                reduce_quality: true,
+                last_spread: None,
+            },
+            ..Prepared::default()
+        };
+        let first = retry_with_kept_suites(prepared, &budget_refusal(100, 0)).unwrap();
+        assert_eq!(first.plan.local, kept[..1]);
+        assert_eq!(first.budget.last_spread, spread(100, 1));
+        // That suite saved 20, so the 80 still missing (plus a quarter) take the other three.
+        let second = retry_with_kept_suites(first, &budget_refusal(80, 0)).unwrap();
+        assert_eq!(second.plan.local, kept);
+        assert_eq!(second.budget.last_spread, spread(80, 3));
+    }
+
+    #[test]
+    fn suites_reduced_before_are_brought_back_last() {
+        let published = site_state::tests::state(
+            DeploymentProvider::CloudflareWorkers,
+            &["reduced", "plain", "small"],
+        );
+        // PNG bytes each suite serves and its size before an earlier optimization: "reduced"
+        // lost 40% to quality reduction, the others 10% losslessly.
+        let suite =
+            |id: &str, png: u64, source: u64| sized_suite(&published, id, png, 0, Some(source));
+        let kept = vec![
+            suite("reduced", 600, 1000),
+            suite("plain", 450, 500),
+            suite("small", 90, 100),
+        ];
+        let chosen = |kept: &[SuiteState], remaining| {
+            suites_to_reduce(kept, remaining, 1)
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        // "reduced" regains 400 bytes, more than reducing its 1000 again saves, so the largest
+        // suite comes last: "plain" saves 100 net, "small" 20.
+        assert_eq!(chosen(&kept, 50), ["plain"]);
+        assert_eq!(chosen(&kept, 110), ["plain", "small"]);
+        assert_eq!(chosen(&kept, 1000), ["plain", "small"]);
+        // With only such suites left, the largest comes back alone.
+        let reduced = vec![suite("reduced", 600, 1000), suite("small", 60, 100)];
+        assert_eq!(chosen(&reduced, 1000), ["reduced"]);
+    }
+
+    #[test]
+    fn quality_reductions_spread_over_the_largest_kept_suites_first() {
+        let published = site_state::tests::state(
+            DeploymentProvider::CloudflareWorkers,
+            &["large", "medium", "small"],
+        );
+        // PNG bytes each suite serves, all optimized before (20% smaller than generated).
+        let kept = [("large", 800), ("medium", 400), ("small", 80)]
+            .into_iter()
+            .map(|(id, png)| sized_suite(&published, id, png, 0, Some(png * 5 / 4)))
+            .collect::<Vec<_>>();
+        let chosen = |remaining| {
+            suites_to_reduce(&kept, remaining, 1)
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        // "large" regains 200 bytes and is expected to save 100 + 200 of its 1000 PNG bytes
+        // (lossless, then quality): 100 net.
+        assert_eq!(chosen(1), ["large"]);
+        assert_eq!(chosen(100), ["large"]);
+        // "medium" adds 50 net; beyond both, "small" joins too.
+        assert_eq!(chosen(101), ["large", "medium"]);
+        assert_eq!(chosen(1000), ["large", "medium", "small"]);
+        // A retry in the reduction step brings back only what it needs.
+        let prepared = Prepared {
+            plan: Plan {
+                generate: vec!["new".to_owned()],
+                kept: kept.clone(),
+                ..Plan::default()
+            },
+            budget: BudgetRetry {
+                reduce_quality: true,
+                last_spread: None,
+            },
+            ..Prepared::default()
+        };
+        let retry = retry_with_kept_suites(prepared.clone(), &budget_refusal(50, 0)).unwrap();
+        assert_eq!(retry.plan.local, kept[..1]);
+        assert_eq!(retry.plan.kept, kept[1..]);
+        // Entering the reduction step, the largest suites come back at once for what the
+        // uploaded suites are not expected to save themselves: 200 of 1000 PNG bytes here.
+        let lossless = Prepared {
+            budget: BudgetRetry::default(),
+            ..prepared
+        };
+        let alone = retry_with_kept_suites(lossless.clone(), &budget_refusal(200, 1000)).unwrap();
+        assert!(alone.budget.reduce_quality);
+        assert!(alone.plan.local.is_empty());
+        let spread = retry_with_kept_suites(lossless, &budget_refusal(250, 1000)).unwrap();
+        assert!(spread.budget.reduce_quality);
+        assert_eq!(spread.plan.local, kept[..1]);
+    }
+
+    #[test]
+    fn repeated_budget_refusals_always_end_with_every_suite_local() {
+        let ids = (0..12)
+            .map(|index| format!("s{index:02}"))
+            .collect::<Vec<_>>();
+        let published = site_state::tests::state(
+            DeploymentProvider::CloudflareWorkers,
+            &ids.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let mut next = Prepared {
+            plan: Plan {
+                generate: vec!["new".to_owned()],
+                kept: published.suites.values().cloned().collect(),
+                ..Plan::default()
+            },
+            ..Prepared::default()
+        };
+        let refusal = budget_refusal(1, 0);
+        let mut attempts = 0;
+        while let Some(retry) = retry_with_kept_suites(next.clone(), &refusal) {
+            // Every retry brings back at least one kept suite or allows quality reduction.
+            assert!(
+                retry.plan.kept.len() < next.plan.kept.len()
+                    || retry.budget.reduce_quality && !next.budget.reduce_quality
+            );
+            next = retry;
+            attempts += 1;
+        }
+        assert!(next.plan.kept.is_empty());
+        assert_eq!(next.plan.local.len(), ids.len());
+        assert!(attempts <= ids.len());
+    }
+
     #[tokio::test]
     async fn reused_suites_return_to_the_local_report_whatever_the_outcome() -> Result<()> {
         let root = tempfile::tempdir()?;
@@ -1530,12 +2183,7 @@ mod tests {
         let context = deployment(&output, DeploymentMode::Update, &["one", "two"], &[]);
         let prepared = |plan| Prepared {
             plan,
-            remote: None,
-            inputs: None,
-            suite_inputs: BTreeMap::new(),
-            records: SuiteInputs::default(),
-            served: None,
-            stash: None,
+            ..Prepared::default()
         };
         let both = ["one".to_owned(), "two".to_owned()];
         generate(&output, &both);
@@ -1612,6 +2260,50 @@ mod tests {
         context.restore_after_failure(&generation);
         for path in two.files.keys() {
             assert!(output.join(path).is_file(), "{path}");
+        }
+
+        // Every suite reused: only shared files are generated, in scratch space. The output's
+        // stale or missing bundled frontend files are replaced along with its entry page.
+        let first_state = SiteState::parse(&std::fs::read(first.join(site_state::STATE_PATH))?)?;
+        let assets = std::fs::read_dir(output.join("_snapshot/assets"))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let stale = assets.first().context("frontend assets")?.clone();
+        let missing = assets.get(1).context("a second frontend asset")?.clone();
+        std::fs::write(&stale, b"stale")?;
+        std::fs::remove_file(&missing)?;
+        let mut all_reused = prepared(Plan {
+            local: first_state.suites.values().cloned().collect(),
+            ..Plan::default()
+        });
+        context.stash_local(&mut all_reused, &root.path().join("stash-4"))?;
+        assert_eq!(all_reused.plan.local.len(), 2);
+        let scratch = root.path().join("scratch");
+        std::fs::create_dir_all(&scratch)?;
+        generate(&scratch, &[]);
+        let offline = DeploymentClient::Netlify(
+            crate::desktop::deployment::netlify::tests::client("http://127.0.0.1:1"),
+        );
+        assert!(
+            context
+                .publish(
+                    all_reused,
+                    &scratch,
+                    &root.path().join("staging-4"),
+                    &offline
+                )
+                .await
+                .is_err()
+        );
+        crate::snapshot::artifact_inventory(&output, &both, &[])?;
+        for asset in [&stale, &missing] {
+            let relative = asset.strip_prefix(&output)?;
+            assert_eq!(
+                std::fs::read(asset)?,
+                std::fs::read(scratch.join(relative))?,
+                "{}",
+                relative.display()
+            );
         }
         Ok(())
     }
