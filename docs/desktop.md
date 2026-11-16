@@ -733,8 +733,11 @@ does not need it. A site this workspace published to
 (including private Cloudflare Workers without a URL) that now serves no report, or
 whose suites are unknown, is never treated as empty: Replace requires confirmation
 there, and the dialog's counts only use a site read for the dialog's own target.
-Updates cannot remove every suite
-from a site, and a site whose report data format differs from this Regressify must
+Deploy waits until the site has been read, even when a saved state is shown
+meanwhile. Updates cannot remove every suite
+from a site, nor keep a suite beside a selected one whose ID differs only in letter
+case (a suite renamed from `shop` to `Shop`): remove the old suite in the same update
+or replace the site. A site whose report data format differs from this Regressify must
 be replaced. Two people deploying to one site at the same moment are not detected;
 the later deployment wins. Cloudflare sets no total size budget (see its limits
 below), so an update keeps the other suites by hash at any site size and uploads the
