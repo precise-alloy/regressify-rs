@@ -521,12 +521,28 @@ impl RunSnapshot {
                 (RunOutcome::Completed, Some(deployment))
                     if deployment.unchanged && deployment.suites.is_none() => {}
                 (RunOutcome::Completed, Some(deployment)) => {
+                    // A membership too large for the progress event is not sent
+                    // (`progress::deployed_suites`); the worker saved the published state.
+                    let published = deployment
+                        .suites
+                        .is_none()
+                        .then(|| {
+                            super::deployment::site_state::load_local(deployment_path, &job.target.id)
+                                .ok()
+                                .flatten()
+                        })
+                        .flatten()
+                        .map(|state| state.suites.into_keys().collect::<Vec<_>>());
                     super::deployment::DeployTargets::record_deployed_report(
                         deployment_path,
                         &job.target,
                         deployment.url.as_deref(),
                         // Updates keep other suites on the site; links follow its membership.
-                        deployment.suites.as_deref().unwrap_or(&job.suite_ids),
+                        deployment
+                            .suites
+                            .as_deref()
+                            .or(published.as_deref())
+                            .unwrap_or(&job.suite_ids),
                         deployment.fingerprint.as_deref(),
                         deployment.input_fingerprint.as_deref(),
                     )
@@ -1942,6 +1958,18 @@ pub(crate) mod tests {
             Some((url.to_owned(), deployed.clone()))
         );
         assert!(settings.latest_report_url(&["reports".into()]).is_some());
+
+        // A site whose membership does not fit a progress event sends none
+        // (`progress::deployed_suites`): links follow the state the worker saved locally.
+        reset()?;
+        let site_state = super::super::deployment::site_state::tests::state(
+            crate::desktop::deployment::DeploymentProvider::Netlify,
+            &["reports", "kept"],
+        );
+        super::super::deployment::site_state::save_local(&path, &target.id, &site_state)?;
+        let settings = save(RunOutcome::Completed, false, None)?;
+        assert!(settings.latest_report_url(&["kept".into()]).is_some());
+        super::super::deployment::site_state::forget_local(&path, &target.id)?;
 
         // Failed or stopped uploads may have changed the site: forget content, keep links.
         for outcome in [

@@ -260,10 +260,23 @@ impl OptimizationCache {
     }
 }
 
-/// A stored result when it is a PNG of the source's `dimensions`, marked as recently used.
+/// A stored result when it decodes completely as a PNG of the source's `dimensions`, marked as
+/// recently used. Results are written atomically, but the folder is outside this process's
+/// control (disk errors, other tools), and a header check alone would accept a truncated file
+/// that optimization then publishes as a smaller, broken image. Decoding costs a fraction of
+/// recompressing, so a reuse still saves most of the time.
 fn stored(path: &Path, dimensions: Option<(u32, u32)>) -> Option<Vec<u8>> {
     let bytes = fs::read(path).ok()?;
-    if dimensions.is_none() || png_dimensions(&bytes) != dimensions {
+    let dimensions = dimensions?;
+    if png_dimensions(&bytes) != Some(dimensions) {
+        return None;
+    }
+    let image = lodepng::decode32(&bytes).ok()?;
+    if (
+        u32::try_from(image.width).ok()?,
+        u32::try_from(image.height).ok()?,
+    ) != dimensions
+    {
         return None;
     }
     touch(path);
@@ -1250,10 +1263,12 @@ pub(super) mod tests {
             lodepng::encode32(&vec![rgb::RGBA8::new(1, 2, 3, 255); 256 * 128], 256, 128)?;
         fs::write(&stored[0], &substitute)?;
         assert_eq!(cache.recompress(&source, &options)?, substitute);
-        // Anything but a PNG of the source's dimensions is recomputed and replaced.
+        // Anything but a complete PNG of the source's dimensions is recomputed and replaced,
+        // including a truncated one whose header still matches.
         for invalid in [
             b"stored result".to_vec(),
             lodepng::encode32(&[rgb::RGBA8::default()], 1, 1)?,
+            first[..first.len() / 2].to_vec(),
         ] {
             fs::write(&stored[0], &invalid)?;
             assert_eq!(cache.recompress(&source, &options)?, first);

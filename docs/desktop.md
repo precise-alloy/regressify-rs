@@ -727,7 +727,9 @@ them again. Sites published before site
 states existed are read from their report manifest and also regenerate kept suites
 from local results. When the site cannot be read (network failure, private site,
 or an access gateway), the last state published from this workspace is used with a
-warning; without one, only Replace is possible. A site this workspace published to
+warning; without one, only Replace is possible. If that saved state is damaged or
+was written by another Regressify version, Update stops and asks for Replace, which
+does not need it. A site this workspace published to
 (including private Cloudflare Workers without a URL) that now serves no report, or
 whose suites are unknown, is never treated as empty: Replace requires confirmation
 there, and the dialog's counts only use a site read for the dialog's own target.

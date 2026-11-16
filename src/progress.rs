@@ -140,6 +140,16 @@ pub enum Event {
     },
 }
 
+/// The suites a `Deployed` event can carry: `None` when the list would take more than half
+/// the event size limit, leaving room for its other fields. Suite IDs have no length limit, so
+/// a large site's membership may not fit one event, and an oversized event would fail the run
+/// after publication; the desktop app then reads it from the local copy of the published state.
+pub fn deployed_suites(suites: Option<Vec<String>>) -> Option<Vec<String>> {
+    let suites = suites?;
+    let bytes = serde_json::to_vec(&suites).map_or(usize::MAX, |bytes| bytes.len());
+    (bytes <= MAX_EVENT_BYTES / 2).then_some(suites)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
@@ -840,6 +850,18 @@ fn bounded_log_message(mut message: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deployed_events_carry_only_memberships_that_fit() {
+        let few = vec!["checkout".to_owned(); 3];
+        assert_eq!(super::deployed_suites(Some(few.clone())), Some(few));
+        assert_eq!(super::deployed_suites(None), None);
+        // Thousands of long suite IDs fit a site state, but not one progress event.
+        let many = (0..5000)
+            .map(|index| format!("{index:05}{}", "x".repeat(240)))
+            .collect::<Vec<_>>();
+        assert_eq!(super::deployed_suites(Some(many)), None);
+    }
+
     #[test]
     fn deployed_site_results_are_preserved_and_unsafe_urls_are_rejected() {
         let mut live = LiveProgress::default();

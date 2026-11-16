@@ -570,9 +570,28 @@ impl ReportDeployment {
 
     /// What the site serves: its own state first, the local copy when it cannot be read.
     fn known_site(&self, remote: Option<RemoteState>) -> Result<(KnownSite, SiteContent)> {
+        match self.read_known_site(remote) {
+            // Replace needs no state: an unusable local copy (corrupt, or written by another
+            // Regressify version) only means no local record can vouch for the site, so it is
+            // replaced and published. Updates keep failing: kept suites need a trusted state.
+            Err(error)
+                if self.job.mode == DeploymentMode::Replace
+                    && error.downcast_ref::<UnusableLocalState>().is_some() =>
+            {
+                eprintln!(
+                    "Warning: Ignoring the unusable local copy of the site state; replacing the site: {error:#}"
+                );
+                Ok((KnownSite::Empty, SiteContent::Differs))
+            }
+            known => known,
+        }
+    }
+
+    fn read_known_site(&self, remote: Option<RemoteState>) -> Result<(KnownSite, SiteContent)> {
         let local = || -> Result<Option<SiteState>> {
             match &self.settings {
-                Some(path) => site_state::load_local(path, &self.job.target.id),
+                Some(path) => site_state::load_local(path, &self.job.target.id)
+                    .map_err(|error| error.context(UnusableLocalState)),
                 None => Ok(None),
             }
         };
@@ -890,6 +909,18 @@ impl ReportDeployment {
             unchanged: false,
             suites: Some(suites),
         })
+    }
+}
+
+/// The local copy of the published site state cannot be read or parsed.
+#[derive(Debug)]
+struct UnusableLocalState;
+
+impl std::fmt::Display for UnusableLocalState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "The local copy of the site state is unusable; replace the whole site, which does not need it",
+        )
     }
 }
 
@@ -1475,6 +1506,31 @@ mod tests {
         assert!(private.known_site(None).is_err());
         site_state::forget_target(&settings, "private")?;
         assert!(!private.published_before()?);
+
+        // An unusable local copy (corrupt, or written by another version) blocks updates with
+        // advice to replace, while Replace, which needs no state, publishes without trusting it.
+        let local = site_state::local_path(&settings, "netlify")?;
+        std::fs::create_dir_all(local.parent().unwrap())?;
+        std::fs::write(&local, b"{ not a site state")?;
+        let error = context
+            .known_site(Some(RemoteState::Unreachable("offline".into())))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("replace the whole site"),
+            "{error:#}"
+        );
+        for remote in [
+            None,
+            Some(RemoteState::Unreachable("offline".into())),
+            Some(RemoteState::Empty),
+        ] {
+            let (site, content) = replace.known_site(remote)?;
+            assert_eq!(
+                (label(&site), content),
+                ("empty".into(), SiteContent::Differs)
+            );
+        }
+        site_state::forget_local(&settings, "netlify")?;
 
         // An upload keeps the local copy: the suites it lists are on the site either way.
         site_state::save_local(&settings, "netlify", &published)?;

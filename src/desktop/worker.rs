@@ -180,7 +180,7 @@ fn run_request() -> Result<()> {
                             fingerprint: outcome.fingerprint,
                             input_fingerprint: outcome.inputs,
                             unchanged: outcome.unchanged,
-                            suites: outcome.suites,
+                            suites: crate::progress::deployed_suites(outcome.suites),
                         });
                     } else {
                         crate::application::execute_with(cli, engine_options(&request.run)).await?;
