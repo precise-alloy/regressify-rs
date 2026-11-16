@@ -84,7 +84,29 @@ impl PreviewCache {
         self.images.get(key)
     }
 
-    /// Replaces the index with exactly the images of the generation that was just published.
+    /// Entries of suites outside `generated` whose results remain in `root`. An update
+    /// generates only changed suites and prunes the others' published files, which a whole-site
+    /// provider (Azure) puts back after publishing; their entries stay for the next generation.
+    /// Every reuse checks the published files again, so a stale entry can only miss.
+    pub(super) fn others(
+        &self,
+        root: &Path,
+        generated: &[String],
+    ) -> BTreeMap<String, CachedImage> {
+        self.images
+            .iter()
+            .filter(|(key, _)| {
+                key.split_once('/').is_some_and(|(suite, _)| {
+                    super::site::valid_suite_id(suite)
+                        && !generated.iter().any(|id| id == suite)
+                        && root.join(suite).is_dir()
+                })
+            })
+            .map(|(key, image)| (key.clone(), image.clone()))
+            .collect()
+    }
+
+    /// Replaces the index with `images`: the generation just published and `others`.
     pub(super) fn save(root: &Path, images: BTreeMap<String, CachedImage>) -> Result<()> {
         let bytes = serde_json::to_vec(&CacheFile {
             format: FORMAT,
@@ -253,6 +275,25 @@ mod tests {
     }
 
     #[test]
+    fn generations_of_other_suites_keep_entries_while_results_remain() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fixture(&root, None);
+        generate(&root);
+        let entries = index(&root).images;
+        assert!(!entries.is_empty());
+        // An update generates only changed suites (none here); a whole-site provider puts the
+        // others' files back after publishing, so their entries stay for the next generation.
+        generate_suites(&root, &[]);
+        assert!(!root.join("_snapshot/images/suite").exists());
+        assert_eq!(index(&root).images, entries);
+        // Entries of a suite whose results are gone are dropped.
+        fs::remove_dir_all(root.join("suite")).unwrap();
+        generate_suites(&root, &[]);
+        assert!(index(&root).images.is_empty());
+    }
+
+    #[test]
     fn cached_generation_matches_a_fresh_one_and_stays_out_of_the_published_site() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -371,16 +412,5 @@ mod tests {
         let marker = plant_preview(&root, "reference");
         generate(&root);
         assert_eq!(preview(&root, "reference"), marker);
-    }
-
-    #[test]
-    fn deselected_suites_leave_the_index_with_their_pruned_previews() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        fixture(&root, None);
-        generate(&root);
-        generate_suites(&root, &[]);
-        assert!(index(&root).images.is_empty());
-        assert!(!root.join("_snapshot/images/suite").exists());
     }
 }

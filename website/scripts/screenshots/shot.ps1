@@ -237,23 +237,29 @@ switch ($Action) {
       else {
         # -Force lists hidden and system files too; without it they would be neither restored
         # nor removed, and deleting the snapshot below would lose them.
-        $before = @{}; Get-ChildItem $snapshot -Recurse -File -Force | ForEach-Object { $before[$_.FullName.Substring($snapshot.Length)] = $_.FullName }
+        # Keys are relative to each root's full name as Get-Item reports it, the form children
+        # carry: Get-ChildItem expands 8.3 short names and relative paths (Resolve-Path keeps
+        # them), and slicing by another form misaligns every key, so real files look new.
+        $snapRoot = (Get-Item -LiteralPath $snapshot -Force).FullName
+        $before = @{}; Get-ChildItem -LiteralPath $snapRoot -Recurse -File -Force | ForEach-Object { $before[$_.FullName.Substring($snapRoot.Length)] = $_.FullName }
         New-Item -ItemType Directory -Force $appDir | Out-Null
-        $appRoot = (Resolve-Path $appDir).Path
-        Get-ChildItem $appDir -Recurse -File -Force | ForEach-Object {
-          $rel = $_.FullName.Substring($appRoot.Length)
-          if (-not $before.ContainsKey($rel)) { Remove-Item $_.FullName -Force; "removed new file $rel" }
-        }
+        $appRoot = (Get-Item -LiteralPath $appDir -Force).FullName
+        # Restore before removing extras, so an interrupted stop has removed nothing it did not
+        # put back first.
         foreach ($rel in $before.Keys) {
-          $dest = Join-Path $appDir $rel
-          if (-not (Test-Path $dest) -or (Get-FileHash $dest).Hash -ne (Get-FileHash $before[$rel]).Hash) {
-            New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null; Copy-Item $before[$rel] $dest -Force; "restored $rel"
+          $dest = Join-Path $appRoot $rel
+          if (-not (Test-Path -LiteralPath $dest) -or (Get-FileHash -LiteralPath $dest).Hash -ne (Get-FileHash -LiteralPath $before[$rel]).Hash) {
+            New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null; Copy-Item -LiteralPath $before[$rel] $dest -Force; "restored $rel"
           }
+        }
+        Get-ChildItem -LiteralPath $appRoot -Recurse -File -Force | ForEach-Object {
+          $rel = $_.FullName.Substring($appRoot.Length)
+          if (-not $before.ContainsKey($rel)) { Remove-Item -LiteralPath $_.FullName -Force; "removed new file $rel" }
         }
         # The snapshot is the only copy of the originals: delete it only once the desktop
         # folder matches it exactly, otherwise keep it so stop can be run again.
-        $after = @{}; Get-ChildItem $appDir -Recurse -File -Force | ForEach-Object { $after[$_.FullName.Substring($appRoot.Length)] = $_.FullName }
-        $differ = @($before.Keys | Where-Object { -not $after.ContainsKey($_) -or (Get-FileHash $after[$_]).Hash -ne (Get-FileHash $before[$_]).Hash }) + @($after.Keys | Where-Object { -not $before.ContainsKey($_) })
+        $after = @{}; Get-ChildItem -LiteralPath $appRoot -Recurse -File -Force | ForEach-Object { $after[$_.FullName.Substring($appRoot.Length)] = $_.FullName }
+        $differ = @($before.Keys | Where-Object { -not $after.ContainsKey($_) -or (Get-FileHash -LiteralPath $after[$_]).Hash -ne (Get-FileHash -LiteralPath $before[$_]).Hash }) + @($after.Keys | Where-Object { -not $before.ContainsKey($_) })
         if ($differ.Count -gt 0) { throw "App data was not fully restored ($($differ.Count) files differ, such as $($differ[0])); the snapshot stays in $snapshot. Run stop again." }
       }
       Remove-Item $snapshot -Recurse -Force; 'app data restored'

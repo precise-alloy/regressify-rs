@@ -511,9 +511,9 @@ fn render_report_plan(
                 }),
             ),
     );
-    // Without knowing the site, a partial replacement may remove anything.
-    let unknown_partial = unknown_site && state.suite_ids.len() != state.catalog_ids.len();
-    if !update_mode && (!plan.remove.is_empty() || unknown_partial) {
+    // Without knowing the site, a replacement may remove anything, even with every workspace
+    // suite selected: the site may serve suites this workspace no longer has, or another's.
+    if !update_mode && (!plan.remove.is_empty() || unknown_site) {
         let warning = if plan.remove.is_empty() {
             format!("Replaces everything on {target_name}; the suites it serves are unknown")
         } else {
@@ -1599,6 +1599,11 @@ impl Workbench {
                     .iter()
                     .any(|target| target.id == action.id)
             {
+                if state.settings.selected.as_deref() != Some(&action.id) {
+                    // Removals and group views were chosen for the previous target's site.
+                    state.remove_ids.clear();
+                    state.review_group = None;
+                }
                 state.settings.selected = Some(action.id.clone());
                 state.status.clear();
                 state.confirmed = false;
@@ -1643,13 +1648,10 @@ impl Workbench {
         )
     }
 
-    /// Whether replacing needs confirmation: it removes suites, or the site is unknown and the
-    /// selection is not the whole workspace, so it may remove anything.
+    /// Whether replacing needs confirmation: it removes suites, or the site is unknown, so it
+    /// may remove anything, including suites no longer in this workspace.
     fn replace_needs_confirmation(&self, cx: &App) -> bool {
-        let state = self.deployment.read(cx);
-        !self.report_preview(cx).remove.is_empty()
-            || (self.deploy_site_suites(cx).is_none()
-                && state.suite_ids.len() != state.catalog_ids.len())
+        !self.report_preview(cx).remove.is_empty() || self.deploy_site_suites(cx).is_none()
     }
 
     /// Why the report plan cannot start yet, if it cannot.
@@ -1663,10 +1665,15 @@ impl Workbench {
         let known = self.deploy_site_suites(cx).is_some();
         let loading = *runs.site_source() == runs::SiteSource::Loading;
         match state.mode {
-            _ if !known && loading => Some("Reading the site..."),
+            // Even over a copy of the last published state: replacing against it could remove
+            // suites published since without asking.
+            _ if loading => Some("Reading the site..."),
             DeploymentMode::Update if !known => {
                 Some("The site's suites are unknown, so only replacing it is possible")
             }
+            DeploymentMode::Update if !plan.case_conflicts.is_empty() => Some(
+                "A suite on the site differs from a selected one only in letter case; remove it in this update or replace the site",
+            ),
             DeploymentMode::Update if state.suite_ids.is_empty() && plan.remove.is_empty() => {
                 Some("Select suites to deploy or remove")
             }
@@ -1985,6 +1992,8 @@ impl Workbench {
         let mut settings = state.settings.clone();
         let tokens_path = state.tokens_path.clone();
         let deployment_path = path.clone();
+        // A saved edit can point the target at another site, and removing one selects another.
+        let retargets = !matches!(change, TargetChange::Select);
         self.busy = true;
         self.sync_modal(cx);
         self.deployment.update(cx, |state, cx| {
@@ -2026,6 +2035,12 @@ impl Workbench {
                             state.editing = false;
                             state.removing = false;
                             state.status.clear();
+                            if retargets {
+                                // What was queued or confirmed described the previous site.
+                                state.remove_ids.clear();
+                                state.confirmed = false;
+                                state.review_group = None;
+                            }
                         }
                         Err(error) => state.status = format!("{error:#}"),
                     }
@@ -2775,6 +2790,77 @@ mod tests {
         }
     }
 
+    /// Queues a suite removal and confirms a replacement, as the dialog does for one target.
+    fn queue_removal_and_confirm(
+        view: &gpui_kit::Entity<super::super::Workbench>,
+        cx: &mut gpui_kit::App,
+    ) {
+        view.update(cx, |this, cx| {
+            this.deployment.update(cx, |state, _| {
+                state.remove_ids = vec!["orphan".into()];
+                state.confirmed = true;
+                state.review_group = Some(super::ReviewGroup::Remove);
+            });
+        });
+    }
+
+    /// Nothing queued for one target carries over to another.
+    fn assert_nothing_queued(view: &gpui_kit::Entity<super::super::Workbench>, cx: &gpui_kit::App) {
+        let state = view.read(cx).deployment.read(cx);
+        assert!(state.remove_ids.is_empty());
+        assert!(!state.confirmed);
+        assert!(state.review_group.is_none());
+    }
+
+    #[gpui_kit::test]
+    fn choosing_another_target_withdraws_queued_removals_and_confirmation(cx: &mut TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let (handle, view) = super::super::tests::editor(cx, root.path());
+        let target = |id: &str| DeployTarget {
+            id: id.into(),
+            name: id.into(),
+            published_url: None,
+            credential_id: None,
+            named_token_id: None,
+            environment: String::new(),
+            provider: Default::default(),
+            site_id: String::new(),
+            cloudflare: None,
+        };
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.deployment.update(cx, |state, _| {
+                    state.settings = DeployTargets {
+                        selected: Some("staging".into()),
+                        targets: vec![target("staging"), target("production")],
+                        ..Default::default()
+                    };
+                });
+            });
+            queue_removal_and_confirm(&view, cx);
+            view.update(cx, |this, cx| {
+                this.choose_deploy_target(
+                    &super::ChooseDeployTarget {
+                        id: "production".into(),
+                    },
+                    window,
+                    cx,
+                );
+            });
+            assert_eq!(
+                view.read(cx)
+                    .deployment
+                    .read(cx)
+                    .settings
+                    .selected
+                    .as_deref(),
+                Some("production")
+            );
+            assert_nothing_queued(&view, cx);
+        })
+        .unwrap();
+    }
+
     #[gpui_kit::test]
     async fn deployment_targets_use_masked_input_and_secure_storage(cx: &mut TestAppContext) {
         let root = tempfile::tempdir().unwrap();
@@ -2811,6 +2897,7 @@ mod tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("deploy-target-edit", cx);
             window.render_frame(cx);
+            queue_removal_and_confirm(&view, cx);
             assert!(
                 view.read(cx)
                     .deployment
@@ -2832,6 +2919,8 @@ mod tests {
         })
         .await;
         cx.update_window(handle.into(), |_, window, cx| {
+            // A saved edit can point the target at another site.
+            assert_nothing_queued(&view, cx);
             let state = view.read(cx).deployment.read(cx);
             let settings = DeployTargets::load(state.path.as_ref().unwrap()).unwrap();
             assert_eq!(
@@ -2851,6 +2940,7 @@ mod tests {
             window.render_frame(cx);
             window.click("deploy-target-remove", cx);
             window.render_frame(cx);
+            queue_removal_and_confirm(&view, cx);
             window.click("deploy-remove-confirm", cx);
         })
         .unwrap();
@@ -2860,6 +2950,8 @@ mod tests {
         })
         .await;
         cx.update_window(handle.into(), |_, window, cx| {
+            // Removing a target selects another one, if any.
+            assert_nothing_queued(&view, cx);
             let state = view.read(cx).deployment.read(cx);
             assert!(
                 DeployTargets::load(state.path.as_ref().unwrap())
@@ -3736,6 +3828,60 @@ mod tests {
                 window.find("deploy-site-state").label(),
                 Some("Reading the suites this site serves...")
             );
+            // A read in progress blocks deploying even over the last state published from here:
+            // replacing against that copy could remove suites published since.
+            view.update(cx, |this, cx| {
+                this.runs.update(cx, |panel, cx| {
+                    panel.set_site_for_test(
+                        Some(target.clone()),
+                        Some(SiteSuites {
+                            suites: std::collections::BTreeMap::from([(
+                                "ui-test".into(),
+                                Some("new".into()),
+                            )]),
+                            ..SiteSuites::default()
+                        }),
+                        runs::SiteSource::Loading,
+                        local.clone(),
+                        cx,
+                    );
+                });
+                this.deployment.update(cx, |state, cx| {
+                    state.mode = DeploymentMode::Replace;
+                    cx.notify();
+                });
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                view.read(cx).report_blocker(cx),
+                Some("Reading the site...")
+            );
+            // An unknown site needs confirmation even with every workspace suite selected: it
+            // may serve suites this workspace no longer has, or another workspace's.
+            view.update(cx, |this, cx| {
+                this.runs.update(cx, |panel, cx| {
+                    panel.set_site_for_test(
+                        Some(target.clone()),
+                        None,
+                        runs::SiteSource::Unavailable("offline".into()),
+                        local.clone(),
+                        cx,
+                    );
+                });
+                this.deployment.update(cx, |state, cx| {
+                    state.confirmed = false;
+                    cx.notify();
+                });
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("deploy-replace-warning").label(),
+                Some("Replaces everything on QA; the suites it serves are unknown")
+            );
+            assert!(view.read(cx).report_blocker(cx).is_some());
+            window.click("deploy-confirm-replace", cx);
+            window.render_frame(cx);
+            assert!(view.read(cx).report_blocker(cx).is_none());
             // An unreadable site leaves Replace, which must confirm a partial selection.
             view.update(cx, |this, cx| {
                 this.runs.update(cx, |panel, cx| {

@@ -15,7 +15,7 @@ use rayon::prelude::*;
 
 use super::{
     DeployTarget, DeploymentClient, DeploymentJob, DeploymentMode, DeploymentProvider, KeptFiles,
-    phase,
+    SiteContent, phase,
     site_state::{
         self, KnownSite, Plan, RemoteState, SiteState, StateFile, SuiteInputs, SuiteState,
     },
@@ -60,8 +60,8 @@ pub(crate) struct Prepared {
     pub plan: Plan,
     /// What earlier attempts' storage budget refusals decided (`retry_with_kept_suites`).
     pub budget: BudgetRetry,
-    /// The site's own fingerprint, when it could be read.
-    pub remote: Option<String>,
+    /// What the site's own state says about the content it serves.
+    pub remote: SiteContent,
     pub inputs: Option<String>,
     /// Pre-generation input fingerprint of each generated suite, recorded after publishing.
     pub suite_inputs: BTreeMap<String, String>,
@@ -123,9 +123,9 @@ impl ReportDeployment {
             }
             None => None,
         };
-        let (site, remote_fingerprint) = self.known_site(remote)?;
+        let (site, remote_content) = self.known_site(remote)?;
         let context = self.clone();
-        let fingerprint = remote_fingerprint.clone();
+        let content = remote_content.clone();
         // Every provider records suite inputs so the suite list can tell what changed; only
         // providers that keep files by hash also skip unchanged suites (`Plan::keep_unchanged`).
         let per_suite = self.settings.is_some();
@@ -140,7 +140,7 @@ impl ReportDeployment {
                         &context.job,
                         &context.args(),
                         context.settings.as_deref(),
-                        fingerprint.as_deref(),
+                        &content,
                     )?;
                     let suite_inputs = if unchanged.is_none() && per_suite {
                         context.suite_inputs()
@@ -215,7 +215,7 @@ impl ReportDeployment {
         Ok(Preparation::Generate(Box::new(Prepared {
             plan,
             budget: BudgetRetry::default(),
-            remote: remote_fingerprint,
+            remote: remote_content,
             inputs,
             suite_inputs,
             records,
@@ -569,23 +569,40 @@ impl ReportDeployment {
     }
 
     /// What the site serves: its own state first, the local copy when it cannot be read.
-    fn known_site(&self, remote: Option<RemoteState>) -> Result<(KnownSite, Option<String>)> {
+    fn known_site(&self, remote: Option<RemoteState>) -> Result<(KnownSite, SiteContent)> {
         let local = || -> Result<Option<SiteState>> {
             match &self.settings {
                 Some(path) => site_state::load_local(path, &self.job.target.id),
                 None => Ok(None),
             }
         };
-        let unreadable = |reason: String| -> Result<(KnownSite, Option<String>)> {
+        // Only states this workspace published are copied locally (publishing without one
+        // forgets the copy), so with a copy, a site that answers without that state no longer
+        // serves what was published there: the local record must not report it up to date.
+        let answered = |site: KnownSite| -> Result<(KnownSite, SiteContent)> {
+            let content = if local()?.is_some() {
+                SiteContent::Differs
+            } else {
+                SiteContent::Unknown
+            };
+            Ok((site, content))
+        };
+        // `answered`: the site replied, without a usable state, rather than being unreachable.
+        let unreadable = |reason: String, answered: bool| -> Result<(KnownSite, SiteContent)> {
             if let Some(state) = local()? {
                 eprintln!(
                     "Warning: Using the last state this workspace published, because the site could not be read: {reason}"
                 );
-                return Ok((KnownSite::State(state), None));
+                let content = if answered {
+                    SiteContent::Differs
+                } else {
+                    SiteContent::Unknown
+                };
+                return Ok((KnownSite::State(state), content));
             }
             if self.job.mode == DeploymentMode::Replace {
                 eprintln!("Warning: The site could not be read; replacing it anyway: {reason}");
-                return Ok((KnownSite::Empty, None));
+                return Ok((KnownSite::Empty, SiteContent::Unknown));
             }
             bail!(
                 "Cannot read which suites this site serves ({reason}); retry when it is reachable, or replace the whole site"
@@ -594,30 +611,30 @@ impl ReportDeployment {
         match remote {
             Some(RemoteState::Found(state)) => {
                 let fingerprint = state.fingerprint.clone();
-                Ok((KnownSite::State(state), Some(fingerprint)))
+                Ok((KnownSite::State(state), SiteContent::Reports(fingerprint)))
             }
-            Some(RemoteState::Legacy(suites)) => Ok((KnownSite::Legacy(suites), None)),
+            Some(RemoteState::Legacy(suites)) => answered(KnownSite::Legacy(suites)),
             // A site this workspace published to that now serves no report was replaced by
             // something else, or hides it; keeping suites blindly could drop them.
             Some(RemoteState::Empty)
                 if self.job.mode == DeploymentMode::Update && self.published_before()? =>
             {
-                unreadable("it serves no Regressify report".into())
+                unreadable("it serves no Regressify report".into(), true)
             }
-            Some(RemoteState::Empty) => Ok((KnownSite::Empty, None)),
-            Some(RemoteState::Unreachable(reason)) => unreadable(reason),
+            Some(RemoteState::Empty) => answered(KnownSite::Empty),
+            Some(RemoteState::Unreachable(reason)) => unreadable(reason, false),
             Some(RemoteState::Invalid(reason)) => {
-                unreadable(format!("its published state is invalid: {reason}"))
+                unreadable(format!("its published state is invalid: {reason}"), true)
             }
             // Never published, or published privately without a URL to read.
             None => match local()? {
-                Some(state) => Ok((KnownSite::State(state), None)),
+                Some(state) => Ok((KnownSite::State(state), SiteContent::Unknown)),
                 None if self.job.mode == DeploymentMode::Update && self.published_before()? => {
                     bail!(
                         "This site was published before, but which suites it serves is unknown here; replace the whole site"
                     )
                 }
-                None => Ok((KnownSite::Empty, None)),
+                None => Ok((KnownSite::Empty, SiteContent::Unknown)),
             },
         }
     }
@@ -775,7 +792,7 @@ impl ReportDeployment {
             &self.job,
             self.settings.as_deref(),
             &fingerprint,
-            remote.as_deref(),
+            &remote,
             inputs.as_deref(),
         )?;
         if let Some(url) = unchanged_url {
@@ -785,12 +802,29 @@ impl ReportDeployment {
             if let Some(served) = &served {
                 self.record_suite_inputs(&records, served, &suite_inputs);
             }
+            // Confirmed by the site's own state, the skip leaves the same records an upload
+            // would: local records can lag the site (an upload that landed unconfirmed, or the
+            // same content published elsewhere), and stale ones mislead links, offline statuses,
+            // and later early checks. A skip on local records alone has nothing new to record.
+            let confirmed = match (&remote, &served, &self.settings) {
+                (SiteContent::Reports(_), Some(served), Some(path)) => {
+                    if let Err(error) = site_state::mark_published(path, &self.job.target.id)
+                        .and_then(|()| site_state::save_local(path, &self.job.target.id, served))
+                    {
+                        eprintln!(
+                            "Warning: Cannot update the local copy of the published site state: {error:#}"
+                        );
+                    }
+                    Some(suites)
+                }
+                _ => None,
+            };
             return Ok(Outcome {
                 url: Some(url),
                 fingerprint: Some(fingerprint),
                 inputs,
                 unchanged: true,
-                suites: None,
+                suites: confirmed,
             });
         }
         let kept_files = plan
@@ -1347,10 +1381,19 @@ mod tests {
         let (site, remote) = context.known_site(Some(RemoteState::Found(published.clone())))?;
         assert_eq!(
             (label(&site), remote),
-            ("state:1".into(), Some(published.fingerprint.clone()))
+            (
+                "state:1".into(),
+                SiteContent::Reports(published.fingerprint.clone())
+            )
         );
+        // Without a state this workspace published there, other answers vouch for nothing:
+        // the site may hide the report (an access gateway) or never had a state (Cloudflare
+        // targets that exclude it).
         let (site, remote) = context.known_site(Some(RemoteState::Legacy(Vec::new())))?;
-        assert_eq!((label(&site), remote), ("legacy".into(), None));
+        assert_eq!(
+            (label(&site), remote),
+            ("legacy".into(), SiteContent::Unknown)
+        );
         let (site, _) = context.known_site(Some(RemoteState::Empty))?;
         assert_eq!(label(&site), "empty");
 
@@ -1371,7 +1414,25 @@ mod tests {
         site_state::save_local(&settings, "netlify", &published)?;
         let (site, remote) =
             context.known_site(Some(RemoteState::Unreachable("offline".into())))?;
-        assert_eq!((label(&site), remote), ("state:1".into(), None));
+        assert_eq!(
+            (label(&site), remote),
+            ("state:1".into(), SiteContent::Unknown)
+        );
+        // A site that answers but no longer serves the state published there (wiped, replaced,
+        // rolled back, or corrupt) must be published again, never reported up to date.
+        for (answer, expected) in [
+            (RemoteState::Legacy(Vec::new()), "legacy"),
+            (RemoteState::Empty, "empty"),
+            (RemoteState::Invalid("bad".into()), "state:1"),
+        ] {
+            let (site, remote) = context.known_site(Some(answer))?;
+            assert_eq!(
+                (label(&site), remote),
+                (expected.into(), SiteContent::Differs)
+            );
+        }
+        let (_, remote) = replace.known_site(Some(RemoteState::Empty))?;
+        assert_eq!(remote, SiteContent::Differs);
         // Without a URL to read (never published, or private), the local copy decides too.
         let (site, _) = context.known_site(None)?;
         assert_eq!(label(&site), "state:1");
@@ -1422,7 +1483,7 @@ mod tests {
                 &context.job,
                 Some(&settings),
                 &"c".repeat(64),
-                None,
+                &SiteContent::Unknown,
                 None
             )?
             .is_none()
@@ -1747,7 +1808,7 @@ mod tests {
         generate(&output, &first_plan.generate);
         let first = context
             .publish(
-                prepared(first_plan, None, None),
+                prepared(first_plan, SiteContent::Unknown, None),
                 &output,
                 &root.path().join("first"),
                 &client,
@@ -1765,17 +1826,34 @@ mod tests {
         saved.targets = vec![target.clone()];
         saved.save(&settings)?;
         context.job.target = target.clone();
+        // As after an upload that landed but was not confirmed: nothing recorded locally.
+        site_state::forget_target(&settings, &target.id)?;
         let again = plan(&context)?;
         generate(&output, &again.generate);
         let outcome = context
             .publish(
-                prepared(again, first.fingerprint.clone(), Some(served.clone())),
+                prepared(
+                    again,
+                    SiteContent::Reports(first.fingerprint.clone().unwrap()),
+                    Some(served.clone()),
+                ),
                 &output,
                 &root.path().join("again"),
                 &client,
             )
             .await?;
         assert!(outcome.unchanged);
+        // Verified against the site's own state, the skip records what the site serves: the
+        // local copy, the publication marker, and the suites links should follow.
+        assert_eq!(
+            outcome.suites.as_deref(),
+            Some(&["one".to_owned(), "two".to_owned()][..])
+        );
+        assert_eq!(
+            site_state::load_local(&settings, &target.id)?,
+            Some(served.clone())
+        );
+        assert!(site_state::published_before(&settings, &target.id)?);
         let records = site_state::load_inputs(&settings, &target.id);
         for id in ["one", "two"] {
             assert_eq!(

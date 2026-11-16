@@ -1416,11 +1416,12 @@ impl Manifest {
             optimized
         };
         manifest.keep(kept, excludes)?;
-        ensure!(
-            manifest.bytes <= byte_limit,
-            "Cloudflare deployment exceeds its {} MiB client content limit",
-            byte_limit as f64 / (1024.0 * 1024.0)
-        );
+        within_budget(
+            manifest.bytes,
+            byte_limit,
+            !kept_only.is_empty(),
+            staged_png,
+        )?;
         super::phase(&format!(
             "Cloudflare manifest ready: {}",
             manifest.counts().describe("assets", "hash")
@@ -1768,6 +1769,26 @@ pub(super) fn excluded_path(patterns: &[glob::Pattern], path: &str) -> bool {
 /// The site state in an optimized `root`, with each suite's summary from the refreshed
 /// manifest and each file's hash and size from the optimized `files`. `kept_suites` were not
 /// optimized and keep their entries.
+/// Refuses `bytes` above `byte_limit`. Rewriting the state for optimized files can grow it past
+/// what the optimizer fitted (`sourceBytes`); beside `kept` assets, the refusal is typed so a
+/// report deployment brings back kept suites to optimize instead of failing.
+fn within_budget(bytes: u64, byte_limit: u64, kept: bool, staged_png: u64) -> Result<()> {
+    if bytes <= byte_limit {
+        return Ok(());
+    }
+    if kept {
+        return Err(super::KeptSuitesOverBudget {
+            remaining: bytes - byte_limit,
+            staged_png,
+        }
+        .into());
+    }
+    bail!(
+        "Cloudflare deployment exceeds its {} MiB client content limit",
+        byte_limit as f64 / (1024.0 * 1024.0)
+    )
+}
+
 fn optimized_state(
     root: &Path,
     files: &BTreeMap<String, Asset>,
@@ -3365,6 +3386,24 @@ mod tests {
         // Nothing was optimized.
         assert_eq!(stats.original_bytes, total);
         Ok(())
+    }
+
+    #[test]
+    fn state_rewrites_past_the_budget_beside_kept_assets_are_typed_refusals() {
+        assert!(within_budget(10, 10, true, 5).is_ok());
+        // Rewriting the state for optimized files can grow it past what the optimizer fitted.
+        let error = within_budget(12, 10, true, 5).unwrap_err();
+        let refusal = error
+            .downcast_ref::<super::super::KeptSuitesOverBudget>()
+            .expect("a typed refusal beside kept assets");
+        assert_eq!((refusal.remaining, refusal.staged_png), (2, 5));
+        // Without kept assets nothing could be brought back: a plain refusal.
+        let error = within_budget(12, 10, false, 5).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<super::super::KeptSuitesOverBudget>()
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -70,6 +70,9 @@ pub(crate) struct Preview {
     pub remove: Vec<String>,
     /// On the site but no longer in the workspace.
     pub orphans: Vec<String>,
+    /// Kept suites that differ from a selected one only in letter case, which an update cannot
+    /// keep beside it (`site_state::case_conflict`).
+    pub case_conflicts: Vec<String>,
 }
 
 impl Preview {
@@ -128,6 +131,12 @@ pub(crate) fn preview(
             preview.orphans.push(id.clone());
         }
     }
+    preview.case_conflicts = preview
+        .kept
+        .iter()
+        .filter(|id| super::site_state::case_conflict(&[(*id).clone()], selected).is_some())
+        .cloned()
+        .collect();
     preview
 }
 
@@ -137,6 +146,27 @@ mod tests {
 
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn previews_flag_kept_suites_renamed_in_letter_case_only() {
+        let site = SiteSuites {
+            suites: BTreeMap::from([("shop".into(), Some("run-1".into()))]),
+            ..SiteSuites::default()
+        };
+        let local = BTreeMap::from([("Shop".to_owned(), "run-2".to_owned())]);
+        let preview = |remove: &[&str]| {
+            super::preview(
+                DeploymentMode::Update,
+                &ids(&["Shop"]),
+                &ids(remove),
+                Some(&site),
+                &local,
+                &ids(&["Shop"]),
+            )
+        };
+        assert_eq!(preview(&[]).case_conflicts, ["shop"]);
+        assert!(preview(&["shop"]).case_conflicts.is_empty());
     }
 
     #[test]

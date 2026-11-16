@@ -741,6 +741,19 @@ impl KnownSite {
     }
 }
 
+/// The first of `kept` that equals one of `selected` ignoring ASCII case, with that selected
+/// ID. Site states and report indexes require suite IDs unique regardless of case, so a suite
+/// renamed in letter case only cannot stay beside its new name; finding out before generation
+/// spares a deployment that would fail late with a vaguer error.
+pub(crate) fn case_conflict(kept: &[String], selected: &[String]) -> Option<(String, String)> {
+    kept.iter().find_map(|kept| {
+        selected
+            .iter()
+            .find(|selected| *selected != kept && selected.eq_ignore_ascii_case(kept))
+            .map(|selected| (kept.clone(), selected.clone()))
+    })
+}
+
 /// Decides which suites to generate, keep, and remove.
 ///
 /// `local` lists suites with local results. Kept suites need no local content on Netlify and
@@ -792,6 +805,11 @@ pub fn plan(
                 .filter(|id| !selected_set.contains(id) && !remove_set.contains(id))
                 .cloned()
                 .collect::<Vec<_>>();
+            if let Some((kept, selected)) = case_conflict(&kept_ids, selected) {
+                bail!(
+                    "'{kept}' on the site differs from the selected suite '{selected}' only in letter case; remove '{kept}' in this update or replace the whole site"
+                );
+            }
             plan.removed = on_site
                 .iter()
                 .filter(|id| remove_set.contains(id))
@@ -1007,6 +1025,34 @@ pub(crate) mod tests {
             site,
             local,
         )
+    }
+
+    #[test]
+    fn case_only_renames_are_refused_before_generation_unless_the_old_suite_goes() {
+        let site = KnownSite::State(state(DeploymentProvider::Netlify, &["shop"]));
+        let plan = |mode, remove: &[&str]| {
+            super::plan(
+                mode,
+                DeploymentProvider::Netlify,
+                &["Shop".to_owned()],
+                &remove.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+                &site,
+                &BTreeSet::new(),
+            )
+        };
+        // Site and report indexes need IDs unique regardless of case, so "shop" cannot stay
+        // beside "Shop"; staging would fail after generation with a vaguer error.
+        let error = plan(DeploymentMode::Update, &[]).unwrap_err().to_string();
+        assert!(error.contains("only in letter case"), "{error}");
+        // Removing the old suite in the same update, or replacing the site, is fine.
+        assert_eq!(
+            plan(DeploymentMode::Update, &["shop"]).unwrap().removed,
+            ["shop"]
+        );
+        assert_eq!(
+            plan(DeploymentMode::Replace, &[]).unwrap().removed,
+            ["shop"]
+        );
     }
 
     #[test]

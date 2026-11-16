@@ -80,12 +80,18 @@ are historical evidence, not open implementation tasks.
   Deploy dialog compare suites by recorded inputs, so approvals without a new run
   show as changed (`verification_matches_`, `recorded_inputs_decide_`,
   `suite_statuses_follow_recorded_inputs`). No live provider deployment was run.
-- Open: deselecting a suite still prunes its published previews, so selecting
-  it again regenerates it in full. Alternating suite sets across targets that
-  share an output gets no reuse for the suites that alternate.
+- Open: generating fewer suites still prunes the others' published previews, so
+  generating them again regenerates them in full. This happens when deselecting a
+  suite, alternating suite sets across targets that share an output, and on every
+  Netlify or Cloudflare update for the suites it keeps. The preview index keeps
+  their entries while their results remain (`generations_of_other_suites_keep_`),
+  which only helps once the files are back, as Azure updates put them.
 - Open: publication records are local to the workspace. A site changed from
-  another workspace or machine can be reported as up to date; Deploy anyway is
-  the recovery. Azure still uploads the full package whenever anything changed.
+  another workspace or machine can be reported as up to date when its state cannot
+  be read (no URL, unreachable, or never published with one from here); Deploy
+  anyway is the recovery. A readable site that no longer serves the state published
+  there is published again (`SiteContent::Differs`), and a skip its own state
+  confirms updates the local records. Azure still uploads the full package whenever anything changed.
 - Open: deployment settings reject unknown fields, so an older desktop build
   cannot load settings that already contain `siteFingerprint`.
 

@@ -65,6 +65,9 @@ pub struct SwaClient {
     poll_interval: Duration,
     deadline: Duration,
     block_bytes: usize,
+    /// Optimization results reused across deployments: every Azure update optimizes its whole
+    /// package again, including suites reused unchanged.
+    optimization_cache: std::sync::Arc<optimization::OptimizationCache>,
 }
 
 fn token_endpoint(token: &str) -> Result<(Url, u32)> {
@@ -142,6 +145,12 @@ impl SwaClient {
             poll_interval: Duration::from_secs(5),
             deadline: Duration::from_secs(30 * 60),
             block_bytes: BLOCK_BYTES,
+            // Unit tests never touch the desktop cache directory.
+            optimization_cache: std::sync::Arc::new(if cfg!(test) {
+                optimization::OptimizationCache::default()
+            } else {
+                optimization::OptimizationCache::persistent()
+            }),
         })
     }
 
@@ -411,8 +420,9 @@ impl SwaClient {
             phase("Packaging selected reports");
             let directory = root.to_path_buf();
             let diagnostic_context = crate::diagnostics::runtime::current();
+            let cache = self.optimization_cache.clone();
             let (package, original_bytes) = tokio::task::spawn_blocking(move || crate::diagnostics::runtime::in_scope(diagnostic_context, || {
-                let prepared = optimization::prepare(&directory, tier.limit(), deadline)?;
+                let prepared = optimization::prepare(&directory, tier.limit(), deadline, Some(&cache))?;
                 let original_bytes = prepared.original_bytes();
                 let package = Package::create(prepared.path(), 100_000)?;
                 ensure!(package.bytes <= tier.limit(), "Report size changed during packaging and exceeds the Azure {} storage limit; retry deployment", tier.label());

@@ -765,7 +765,10 @@ target already serves the same reports:
 
 Target settings that shape the hosted site are part of both comparisons: provider,
 Azure environment, Netlify site, and Cloudflare account, Worker, routing, HTML
-handling, compatibility date, and exclusions. When nothing changed, Activity reports
+handling, compatibility date, and exclusions. When the site can be read, its own
+state decides: a site that no longer serves what this workspace published there
+(a deleted site, another page, an older report, or a damaged state) is published
+again rather than reported up to date. When nothing changed, Activity reports
 **Site already up to date**, keeps **Open Site**, and offers **Deploy anyway**.
 Deploy anyway repeats the same target and suites and publishes without either
 comparison, for example after the site was changed from another workspace or
@@ -824,7 +827,12 @@ Deployment budgets are 250 MiB for Free and 500 MiB for Standard per environment
 not the ZIP size. An unrecognized tier is logged and conservatively uses the Free
 budget. Reports already within budget are uploaded without image changes.
 
-Oversized Azure reports are optimized in a separate OS-temporary directory.
+Oversized Azure reports are optimized in a separate OS-temporary directory. Every
+update optimizes the whole package again, so results are kept in the desktop app's
+local cache folder (on Windows,
+`%LOCALAPPDATA%\Regressify\Regressify Desktop\cache\image-optimization`), up to
+4 GiB with the least recently used removed first, and reused by later deployments;
+the folder can be deleted at any time.
 Local screenshots, references, report metadata, and files used by future
 comparisons are never overwritten. Lossless PNG recompression comes first, a few
 images at a time. If

@@ -1596,20 +1596,45 @@ pub fn unchanged_deployment(
 ) -> Result<(String, Option<String>)> {
     phase("Comparing staged reports with the last deployment to this target");
     let fingerprint = deployment_fingerprint(staging, &job.suite_ids, &job.target)?;
-    let url = decide_publication(job, settings, &fingerprint, None, inputs)?;
+    let url = decide_publication(job, settings, &fingerprint, &SiteContent::Unknown, inputs)?;
     Ok((fingerprint, url))
+}
+
+/// What a deployment's read of the site says about the content it serves.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SiteContent {
+    /// Not read (no URL, or unreachable), or nothing this workspace published there to compare:
+    /// the local record of the last publication decides.
+    #[default]
+    Unknown,
+    /// The site's published state reports this content fingerprint.
+    Reports(String),
+    /// The site was read and no longer serves the state this workspace last published there
+    /// (no report, an older report format, or an invalid state), so it must be published again.
+    Differs,
+}
+
+impl SiteContent {
+    /// Whether the site may serve content with `fingerprint`: it says so, or cannot tell.
+    fn may_serve(&self, fingerprint: &str) -> bool {
+        match self {
+            Self::Unknown => true,
+            Self::Reports(reported) => reported == fingerprint,
+            Self::Differs => false,
+        }
+    }
 }
 
 /// Decides whether content with `fingerprint` must be published; see `unchanged_deployment`.
 ///
-/// `remote` is the fingerprint the site itself reports, when it could be read. It is the
-/// authority: the local record only decides when the site could not be read, because another
+/// `remote` is what the site itself reports, when it could be read. It is the authority: the
+/// local record only decides when the site could not tell (`SiteContent::Unknown`), because another
 /// machine may have changed the site since this workspace recorded it.
 pub(crate) fn decide_publication(
     job: &DeploymentJob,
     settings: Option<&Path>,
     fingerprint: &str,
-    remote: Option<&str>,
+    remote: &SiteContent,
     inputs: Option<&str>,
 ) -> Result<Option<String>> {
     let Some(path) = settings else {
@@ -1617,13 +1642,13 @@ pub(crate) fn decide_publication(
     };
     let saved = current_settings(path, job)?;
     let unchanged_url = || match remote {
-        Some(remote) if remote == fingerprint => saved
+        SiteContent::Reports(remote) if remote == fingerprint => saved
             .targets
             .iter()
             .find(|target| target.id == job.target.id)
             .and_then(|target| target.published_url.clone()),
-        Some(_) => None,
-        None => saved.unchanged_site_url(&job.target, fingerprint),
+        SiteContent::Reports(_) | SiteContent::Differs => None,
+        SiteContent::Unknown => saved.unchanged_site_url(&job.target, fingerprint),
     };
     if job.force {
         phase("Deploy anyway requested; publishing without comparing to the last deployment");
@@ -1657,7 +1682,7 @@ pub(crate) fn unchanged_deployment_inputs_on(
     job: &DeploymentJob,
     settings: Option<&Path>,
     inputs: &str,
-    remote: Option<&str>,
+    remote: &SiteContent,
 ) -> Result<Option<UnchangedSite>> {
     let Some(path) = settings else {
         return Ok(None);
@@ -1668,7 +1693,7 @@ pub(crate) fn unchanged_deployment_inputs_on(
     }
     let unchanged = saved
         .unchanged_inputs(&job.target, inputs)
-        .filter(|(_, fingerprint)| remote.is_none_or(|remote| remote == fingerprint));
+        .filter(|(_, fingerprint)| remote.may_serve(fingerprint));
     if unchanged.is_some() {
         phase(
             "No changes to the selected reports since the last deployment to this target; skipping report generation and upload",
@@ -1692,7 +1717,7 @@ pub fn check_unchanged_inputs(
     args: &crate::cli::args::SnapshotArgs,
     settings: Option<&Path>,
 ) -> Result<(Option<String>, Option<UnchangedSite>)> {
-    check_unchanged_inputs_on(output, root, job, args, settings, None)
+    check_unchanged_inputs_on(output, root, job, args, settings, &SiteContent::Unknown)
 }
 
 pub(crate) fn check_unchanged_inputs_on(
@@ -1701,7 +1726,7 @@ pub(crate) fn check_unchanged_inputs_on(
     job: &DeploymentJob,
     args: &crate::cli::args::SnapshotArgs,
     settings: Option<&Path>,
-    remote: Option<&str>,
+    remote: &SiteContent,
 ) -> Result<(Option<String>, Option<UnchangedSite>)> {
     phase("Checking the selected reports for changes since the last deployment");
     let inputs = match crate::config::load_workspace_config(root)
@@ -1947,6 +1972,7 @@ mod tests {
             root.path(),
             250 * 1024 * 1024,
             std::time::Instant::now() + std::time::Duration::from_secs(10),
+            None,
         )
         .err()
         .unwrap()
@@ -2158,9 +2184,11 @@ mod tests {
             })
             .await?;
             super::stage_reports(source.path(), &suites, &staged_report)?;
-            let original = optimization::prepare(&staged_report, 500 * 1024 * 1024, deadline)?
-                .original_bytes();
-            let prepared = optimization::prepare(&staged_report, original * 85 / 100, deadline)?;
+            let original =
+                optimization::prepare(&staged_report, 500 * 1024 * 1024, deadline, None)?
+                    .original_bytes();
+            let prepared =
+                optimization::prepare(&staged_report, original * 85 / 100, deadline, None)?;
             assert_eq!(prepared.original_bytes(), original);
             super::with_heartbeat("Test deployment", async {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -3817,6 +3845,20 @@ mod tests {
             (fingerprint.clone(), Some(url.to_owned()))
         );
         assert_eq!(check(&job)?.1, Some((url.to_owned(), fingerprint.clone())));
+        // A site read that no longer finds what this workspace published there vouches for
+        // nothing: both checks publish again, whatever the local record says.
+        let current = check(&job)?.0.unwrap();
+        let early = |remote: &SiteContent| {
+            unchanged_deployment_inputs_on(&job, Some(&path), &current, remote)
+        };
+        assert!(early(&SiteContent::Unknown)?.is_some());
+        assert!(early(&SiteContent::Reports(fingerprint.clone()))?.is_some());
+        assert!(early(&SiteContent::Reports("other".into()))?.is_none());
+        assert!(early(&SiteContent::Differs)?.is_none());
+        assert!(
+            decide_publication(&job, Some(&path), &fingerprint, &SiteContent::Differs, None)?
+                .is_none()
+        );
         // Without inputs the early check is disabled, never failed.
         fs::remove_dir_all(output.join("one"))?;
         assert_eq!(check(&job)?, (None, None));

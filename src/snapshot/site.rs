@@ -920,10 +920,9 @@ pub(crate) fn generate_site(
     artifact_paths(&root, &selected)?;
     // Saved only after publication so the index never describes files that were not written.
     // A failed save loses reuse for the next generation, not this valid snapshot.
-    if let Err(error) = super::preview_cache::PreviewCache::save(
-        &root,
-        super::capture_report::preview_cache_entries(&images),
-    ) {
+    let mut entries = preview_cache.others(&root, &selected);
+    entries.extend(super::capture_report::preview_cache_entries(&images));
+    if let Err(error) = super::preview_cache::PreviewCache::save(&root, entries) {
         super::preview_cache::warn(&format!(
             "Warning: Snapshot previews will be regenerated next time: {error:#}"
         ));
@@ -2144,6 +2143,34 @@ mod tests {
             "*"
         );
         assert_eq!(config["routes"][0]["headers"]["Cache-Control"], "no-cache");
+        // Deployments read the site state back before every update, so it is never cached.
+        let state_headers = headers
+            .split("/_snapshot/deployment.json")
+            .nth(1)
+            .unwrap()
+            .trim_start();
+        assert!(
+            state_headers
+                .lines()
+                .take_while(|line| !line.is_empty())
+                .any(|line| line.trim() == "Cache-Control: no-cache")
+        );
+        // Azure applies the first matching route: the state's precedes the immutable assets'.
+        let routes = config["routes"].as_array().unwrap();
+        let state = routes
+            .iter()
+            .position(|route| route["route"] == "/_snapshot/deployment.json")
+            .unwrap();
+        assert_eq!(routes[state]["headers"]["Cache-Control"], "no-cache");
+        let immutable = routes
+            .iter()
+            .position(|route| {
+                route["route"]
+                    .as_str()
+                    .is_some_and(|route| route.contains("json}"))
+            })
+            .unwrap();
+        assert!(state < immutable);
         assert!(
             fs::read_to_string(temp.path().join("_redirects"))
                 .unwrap()

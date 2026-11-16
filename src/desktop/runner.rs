@@ -516,8 +516,10 @@ impl RunSnapshot {
                 .as_ref()
                 .context("Deployment is missing its target")?;
             match (&self.outcome, self.progress.deployment.as_ref()) {
-                // A skipped deployment published nothing, so the previous record stays exact.
-                (RunOutcome::Completed, Some(deployment)) if deployment.unchanged => {}
+                // A skip on local records alone published nothing, so they stay exact. One the
+                // site's own state confirmed (it lists the site's suites) is recorded below.
+                (RunOutcome::Completed, Some(deployment))
+                    if deployment.unchanged && deployment.suites.is_none() => {}
                 (RunOutcome::Completed, Some(deployment)) => {
                     super::deployment::DeployTargets::record_deployed_report(
                         deployment_path,
@@ -1853,7 +1855,10 @@ pub(crate) mod tests {
         let recorded = "a".repeat(64);
         let deployed = "b".repeat(64);
         let url = "https://reports.example.com/";
-        let save = |outcome: RunOutcome, unchanged: bool| -> Result<DeployTargets> {
+        let save = |outcome: RunOutcome,
+                    unchanged: bool,
+                    suites: Option<Vec<String>>|
+         -> Result<DeployTargets> {
             let mut request = request(RunCommand::Deploy);
             request.root = root.path().into();
             request.options.deployment = Some(DeploymentJob {
@@ -1874,7 +1879,7 @@ pub(crate) mod tests {
                 fingerprint: Some(if unchanged { &recorded } else { &deployed }.clone()),
                 input_fingerprint: Some("c".repeat(64)),
                 unchanged,
-                suites: None,
+                suites,
             });
             manager.progress.end(false, None);
             manager
@@ -1903,17 +1908,31 @@ pub(crate) mod tests {
 
         // A skip published nothing: the record, membership, and file stay exactly as they were.
         let before = reset()?;
-        let settings = save(RunOutcome::Completed, true)?;
+        let settings = save(RunOutcome::Completed, true, None)?;
         assert_eq!(std::fs::read(&path)?, before);
         assert_eq!(
             settings.report_fingerprint(&target),
             Some(recorded.as_str())
         );
         assert!(settings.latest_report_url(&["reports".into()]).is_none());
+        // A skip the site's own state confirmed records it: the site serves that content, so
+        // links follow its suites and the next early check knows these inputs.
+        reset()?;
+        let settings = save(RunOutcome::Completed, true, Some(vec!["reports".into()]))?;
+        assert_eq!(
+            settings.report_fingerprint(&target),
+            Some(recorded.as_str())
+        );
+        assert!(settings.latest_report_url(&["reports".into()]).is_some());
+        assert!(
+            settings
+                .unchanged_inputs(&target, &"c".repeat(64))
+                .is_some()
+        );
 
         // A confirmed publication records the new content, its inputs, and membership.
         reset()?;
-        let settings = save(RunOutcome::Completed, false)?;
+        let settings = save(RunOutcome::Completed, false, None)?;
         assert_eq!(
             settings.report_fingerprint(&target),
             Some(deployed.as_str())
@@ -1930,7 +1949,7 @@ pub(crate) mod tests {
             RunOutcome::Cancelled,
         ] {
             reset()?;
-            let settings = save(outcome, false)?;
+            let settings = save(outcome, false, None)?;
             assert!(settings.report_fingerprint(&target).is_none());
             assert_eq!(
                 settings

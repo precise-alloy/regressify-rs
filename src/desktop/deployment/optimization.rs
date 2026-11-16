@@ -732,11 +732,24 @@ fn reduce_images(
     Ok(())
 }
 
-pub(super) fn prepare(root: &Path, limit: u64, deadline: Instant) -> Result<PreparedReport> {
+pub(super) fn prepare(
+    root: &Path,
+    limit: u64,
+    deadline: Instant,
+    cache: Option<&OptimizationCache>,
+) -> Result<PreparedReport> {
     check_deadline(deadline)?;
     phase("Measuring uncompressed deployment content");
     let (files, original_bytes) = inventory(root)?;
-    prepare_report(root, files, original_bytes, Request::new(limit, deadline))
+    prepare_report(
+        root,
+        files,
+        original_bytes,
+        Request {
+            cache,
+            ..Request::new(limit, deadline)
+        },
+    )
 }
 
 /// Optimizes the selected `paths` of the snapshot site at `root` as `request` asks.
@@ -1356,12 +1369,38 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn whole_site_preparations_reuse_cached_results() -> Result<()> {
+        // Azure optimizes its whole package on every update, reused suites included.
+        let root = report_fixture()?;
+        let cache = OptimizationCache::default();
+        let short = || -> Result<u64> {
+            let error = prepare(root.path(), 1, deadline(), Some(&cache))
+                .err()
+                .context("a one-byte limit cannot fit")?;
+            Ok(error
+                .downcast_ref::<DoesNotFit>()
+                .context("typed shortfall")?
+                .remaining)
+        };
+        let first = short()?;
+        let filled = (cache.recompressions.get(), cache.quantizations.get());
+        assert!(filled.0.0 > 0 && filled.1.0 > 0);
+        assert_eq!(short()?, first);
+        // Every lookup of the second preparation was answered by the first.
+        let (recompressions, quantizations) =
+            (cache.recompressions.get(), cache.quantizations.get());
+        assert_eq!(recompressions.0 - filled.0.0, recompressions.1 - filled.0.1);
+        assert_eq!(quantizations.0 - filled.1.0, quantizations.1 - filled.1.1);
+        Ok(())
+    }
+
+    #[test]
     fn parallel_recompression_changes_only_the_images_needed_to_fit() -> Result<()> {
         let root = report_fixture()?;
         let (files, total) = inventory(root.path())?;
         // One byte over: the first image of the first batch is enough, even though its whole
         // batch was recompressed.
-        let prepared = prepare(root.path(), total - 1, deadline())?;
+        let prepared = prepare(root.path(), total - 1, deadline(), None)?;
         let changed = files
             .iter()
             .filter(|file| {
@@ -1390,7 +1429,7 @@ pub(super) mod tests {
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         let limit = original_total * 85 / 100;
-        let prepared = prepare(root.path(), limit, deadline())?;
+        let prepared = prepare(root.path(), limit, deadline(), None)?;
         assert_eq!(prepared.original_bytes(), original_total);
         assert_ne!(prepared.path(), root.path());
         assert!(inventory(prepared.path())?.1 <= limit);
@@ -1468,7 +1507,7 @@ pub(super) mod tests {
     fn fitting_reports_are_byte_identical_and_need_no_optimization_copy() -> Result<()> {
         let root = tempfile::tempdir()?;
         fs::write(root.path().join("index.html"), "report")?;
-        let prepared = prepare(root.path(), 6, deadline())?;
+        let prepared = prepare(root.path(), 6, deadline(), None)?;
         assert_eq!(prepared.original_bytes(), 6);
         assert!(prepared.temporary.is_none());
         assert_eq!(prepared.path(), root.path());
@@ -1508,7 +1547,7 @@ pub(super) mod tests {
         let pixels = vec![rgb::RGBA8::new(10, 20, 30, 255); 64 * 64];
         let original = lodepng::encode32(&pixels, 64, 64)?;
         fs::write(&path, &original)?;
-        let error = prepare(root.path(), 1, deadline())
+        let error = prepare(root.path(), 1, deadline(), None)
             .err()
             .context("Expected a size failure")?;
         let message = error.to_string();
@@ -1528,7 +1567,7 @@ pub(super) mod tests {
         data["tests"][0]["status"] = json!("fail");
         fs::write(&config, format!("report({data});"))?;
         let (_, original_total) = inventory(root.path())?;
-        let prepared = prepare(root.path(), original_total * 85 / 100, deadline())?;
+        let prepared = prepare(root.path(), original_total * 85 / 100, deadline(), None)?;
         let mut reduced = 0;
         for file in inventory(root.path())?.0.into_iter().filter(|file| {
             file.relative
@@ -1555,7 +1594,7 @@ pub(super) mod tests {
     fn expired_deadlines_abort_without_changing_the_source() -> Result<()> {
         let root = tempfile::tempdir()?;
         fs::write(root.path().join("index.html"), "report")?;
-        let error = prepare(root.path(), 1, Instant::now())
+        let error = prepare(root.path(), 1, Instant::now(), None)
             .err()
             .context("Expected deadline")?;
         assert!(error.to_string().contains("deadline"));
