@@ -4,7 +4,7 @@ description: Deploy reports to Azure Static Web Apps, Netlify, or Cloudflare Wor
 sidebar:
   label: Publish reports
   order: 8
-lastUpdated: 2026-11-09
+lastUpdated: 2026-11-16
 # The DO_NOT_TRACK paragraph applies to every deployment, so it sits before the
 # subsections rather than under Landing apps. (A YAML comment is not rendered.)
 ---
@@ -50,7 +50,7 @@ The Deploy dialog compares your selection with the suites the site already serve
 1. Click a count ② to list that group's suites; click it again to hide them. Long groups have a **Find a suite** search
    field.
 1. Pick a mode ③. **Update selected suites** keeps every other suite on the site. **Replace the whole site** rebuilds
-   and publishes only the selection; tick "I understand these N suites will be removed" to confirm.
+   and publishes only the selection; see [Replace the whole site](#replace-the-whole-site).
 1. Click **Deploy N** ④.
 
 ![The Deploy reports dialog with the plan counts, an open group list, the Update/Replace choice, and Deploy numbered.](../../../../assets/docs/desktop/deploy-plan.png)
@@ -59,8 +59,23 @@ The Deploy dialog compares your selection with the suites the site already serve
   them on the site without uploading them again. Azure Static Web Apps accepts only whole sites, so Regressify uploads
   this computer's copies of them again, after checking that they match the site. **Replace** always rebuilds the
   selected suites. If an update reports that a kept suite can't be reused, deploy with **Replace**.
-- Deploy reads the list of suites from the site itself. If the site can't be read, it uses the last state published
-  from this workspace, or only allows **Replace**.
+- Deploy reads the list of suites from the site itself and waits until it has. If the site can't be read, it uses the
+  last state published from this workspace, or only allows **Replace**. If that saved state is damaged, only
+  **Replace** works.
+- If you renamed a suite only by letter case (for example `shop` to `Shop`), remove the old suite in the same update,
+  or use **Replace**.
+
+### Replace the whole site
+
+1. Choose **Replace the whole site with the selection** ①. Suites on the site that you didn't select move to
+   **Remove**, and a red warning says how many will go.
+1. Tick **I understand these N suites will be removed** ②.
+1. Click **Deploy N** ③.
+
+![The Deploy reports dialog in Replace mode with the Replace option, the removal confirmation, and Deploy numbered.](../../../../assets/docs/desktop/deploy-replace.png)
+
+- When the suites on the site are unknown, **Replace** always asks you to confirm, even with every suite selected: the
+  site may still serve suites this workspace no longer has.
 
 ### Deploy anyway
 

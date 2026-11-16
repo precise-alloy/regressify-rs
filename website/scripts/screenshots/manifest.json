@@ -617,6 +617,25 @@
     "crop": "490,84,462,384"
   },
   {
+    "file": "deploy-replace",
+    "raw": "deploy-replace",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Replace the whole site with the selection"
+      },
+      {
+        "n": 2,
+        "key": "I understand these 2 suites will be removed"
+      },
+      {
+        "n": 3,
+        "key": "Deploy selected reports"
+      }
+    ],
+    "crop": "490,84,462,408"
+  },
+  {
     "file": "remove-suites-menu",
     "raw": "remove-menu",
     "crop": "0,250,500,180",
