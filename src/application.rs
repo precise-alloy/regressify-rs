@@ -1,4 +1,4 @@
-//! Shared engine entry point. Each invocation owns one process's run settings.
+//! Shared engine entry point. The first invocation sets the process's run settings.
 
 use std::{env::set_current_dir, path::PathBuf};
 
@@ -38,8 +38,7 @@ pub(crate) async fn execute_with(cli: Cli, options: EngineOptions) -> Result<()>
         operation_id,
         post_run_snapshot,
     } = options;
-    set_root(&cli)?;
-    set_global_vars(&cli)?;
+    configure_process(&cli)?;
     let (command, phase) = match &cli.command {
         Command::Test(_) => (SafeValue::Test, "Validating test suites"),
         Command::Ref(_) => (SafeValue::Reference, "Validating test suites"),
@@ -199,6 +198,21 @@ fn set_global_vars(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// Process-wide settings live in `OnceLock`s that the first command sets. A later command in
+/// the same process (a deployment retrying its snapshot generation over the Cloudflare budget)
+/// reuses them and ignores its own global options, so it must run in the same workspace.
+fn configure_process(cli: &Cli) -> Result<()> {
+    let Some(root) = common::ROOT_DIR.get_value() else {
+        set_root(cli)?;
+        return set_global_vars(cli);
+    };
+    anyhow::ensure!(
+        cli.root.normalize()? == *root,
+        "This process already runs commands for another workspace"
+    );
+    set_current_dir(root).map_err(|error| anyhow!("Failed to set current directory: {error}"))
+}
+
 fn set_root(cli: &Cli) -> Result<()> {
     let work_dir: PathBuf = cli.root.normalize()?;
     set_current_dir(&work_dir)
@@ -212,6 +226,53 @@ mod tests {
     use super::*;
     use crate::diagnostics::{install, journal::JournalReader, record::Outcome};
     use clap::Parser;
+
+    #[test]
+    fn later_commands_in_a_process_reuse_its_workspace_settings() {
+        const CHILD: &str = "REGRESSIFY_REPEATED_COMMAND_TEST";
+        const ROOT: &str = "REGRESSIFY_REPEATED_COMMAND_ROOT";
+        const OTHER: &str = "REGRESSIFY_REPEATED_COMMAND_OTHER";
+        if std::env::var_os(CHILD).is_some() {
+            let version = |root: std::ffi::OsString| {
+                let cli = Cli::try_parse_from([
+                    "regressify".into(),
+                    "--root".into(),
+                    root,
+                    "version".into(),
+                ])
+                .unwrap();
+                tokio::runtime::Runtime::new()
+                    .unwrap()
+                    .block_on(execute(cli))
+            };
+            let root = std::env::var_os(ROOT).unwrap();
+            version(root.clone()).unwrap();
+            // A deployment that retries its snapshot generation runs a second command.
+            version(root).unwrap();
+            let error = version(std::env::var_os(OTHER).unwrap()).unwrap_err();
+            assert!(error.to_string().contains("another workspace"), "{error:#}");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "application::tests::later_commands_in_a_process_reuse_its_workspace_settings",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env(ROOT, root.path())
+            .env(OTHER, other.path())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 
     #[test]
     fn command_execution_retains_success_and_failure_without_console_output() {

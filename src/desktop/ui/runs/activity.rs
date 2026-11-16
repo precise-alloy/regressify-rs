@@ -12,6 +12,46 @@ pub(crate) fn status_color(status: Status, cx: &App) -> Hsla {
 }
 
 impl RunPanel {
+    /// The completed deployment found its content already published and uploaded nothing.
+    fn deployment_unchanged(&self) -> bool {
+        matches!(self.manager.outcome, Some(RunOutcome::Completed))
+            && self
+                .manager
+                .progress
+                .deployment
+                .as_ref()
+                .is_some_and(|deployment| deployment.unchanged)
+    }
+
+    /// Repeats the skipped deployment with the same target and suites, publishing even though
+    /// the content matches the last record, e.g. after the site changed outside this workspace.
+    /// The request goes through the normal run guard, which revalidates the suite catalog.
+    fn deploy_anyway(&mut self, cx: &mut Context<Self>) {
+        if self.running() || !self.deployment_unchanged() {
+            return;
+        }
+        let Some(mut request) = self.manager.request.clone() else {
+            return;
+        };
+        let Some(job) = request.options.deployment.as_mut() else {
+            return;
+        };
+        job.force = true;
+        let expected = job.suite_ids.clone();
+        let suite_names = self
+            .suites
+            .iter()
+            .filter(|suite| expected.contains(&suite.output_id))
+            .map(|suite| suite.name.clone())
+            .collect();
+        cx.emit(RunEvent::Requested(Box::new(RunIntent {
+            request,
+            suite_names,
+            expected_output_ids: Some(expected),
+            review_after_run: false,
+        })));
+    }
+
     #[cfg(test)]
     pub(in crate::desktop::ui) fn group_collapsed(&self, suite: &str) -> bool {
         self.collapsed.contains(suite)
@@ -40,6 +80,9 @@ impl RunPanel {
                     Some(RunCommand::Init) => "Workspace initialized".into(),
                     Some(RunCommand::Install) => "Chromium is ready".into(),
                     Some(RunCommand::Snapshot) => "Report created".into(),
+                    Some(RunCommand::Deploy) if self.deployment_unchanged() => {
+                        "Site already up to date".into()
+                    }
                     Some(RunCommand::Deploy) => "Reports deployed".into(),
                     Some(RunCommand::Optimize) => "Image optimization completed".into(),
                     _ => "Command completed".into(),
@@ -650,8 +693,14 @@ impl RunPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let progress = &self.manager.progress;
+        let unchanged = self.deployment_unchanged();
         let (heading, color, icon) = match &self.manager.outcome {
             None => ("Deploying reports", cx.theme().primary, None),
+            Some(RunOutcome::Completed) if unchanged => (
+                "Site already up to date",
+                cx.theme().success,
+                Some(gpui_kit::assets::IconName::CircleCheck),
+            ),
             Some(RunOutcome::Completed) => (
                 "Deployment complete",
                 cx.theme().success,
@@ -668,7 +717,9 @@ impl RunPanel {
                 Some(gpui_kit::assets::IconName::Square),
             ),
         };
-        let phase = if progress.phase.is_empty() {
+        let phase = if unchanged {
+            "No changes since the last deployment to this target; nothing was uploaded"
+        } else if progress.phase.is_empty() {
             "Preparing selected reports"
         } else {
             &progress.phase
@@ -879,7 +930,19 @@ impl RunPanel {
                                     })),
                             )
                         },
-                    ),
+                    )
+                    .when(unchanged, |row| {
+                        row.child(
+                            Button::new("deployment-deploy-anyway")
+                                .icon(gpui_kit::assets::IconName::CloudUpload)
+                                .label("Deploy anyway")
+                                .accessibility_label("Deploy the same reports anyway")
+                                .tooltip(
+                                    "Publish again even though nothing changed, for example after the site was changed from another workspace",
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.deploy_anyway(cx))),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1074,6 +1137,9 @@ mod tests {
                     suite_ids: vec!["ui-test".into()],
                     catalog_ids: vec!["ui-test".into()],
                     partial_confirmed: false,
+                    force: false,
+                    mode: crate::desktop::deployment::DeploymentMode::Replace,
+                    remove_ids: Vec::new(),
                 }),
                 ..Default::default()
             },
@@ -1272,6 +1338,10 @@ mod tests {
                             event: Event::Deployed {
                                 target: "QA reports".into(),
                                 url: Some("https://reports.example.com".into()),
+                                fingerprint: Some("a".repeat(64)),
+                                input_fingerprint: None,
+                                unchanged: false,
+                                suites: None,
                             },
                         });
                         panel.manager.outcome = Some(outcome.clone());
@@ -1297,9 +1367,97 @@ mod tests {
                     window.try_find("deployment-open-site").is_some(),
                     matches!(outcome, RunOutcome::Completed)
                 );
+                assert!(window.try_find("deployment-deploy-anyway").is_none());
             }
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn skipped_deployment_reports_up_to_date_and_offers_deploy_anyway(cx: &mut TestAppContext) {
+        use std::{cell::RefCell, rc::Rc};
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = super::super::super::tests::editor(cx, directory.path());
+        let requests = Rc::new(RefCell::new(Vec::<super::RunIntent>::new()));
+        let received = requests.clone();
+        let _subscription = cx.update(|cx| {
+            view.update(cx, |this, cx| {
+                cx.subscribe(&this.runs, move |_, _, event, _| {
+                    if let super::RunEvent::Requested(intent) = event {
+                        received.borrow_mut().push((**intent).clone());
+                    }
+                })
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.main_tab = 1;
+                // Keep the editor from launching a real worker for the emitted request.
+                this.busy = true;
+                this.runs.update(cx, |panel, cx| {
+                    panel.manager.request = Some(deployment_request(directory.path()));
+                    panel.manager.progress.apply(Record {
+                        version: 1,
+                        elapsed_ms: 900,
+                        event: Event::Deployed {
+                            target: "QA reports".into(),
+                            url: Some("https://reports.example.com".into()),
+                            fingerprint: Some("b".repeat(64)),
+                            input_fingerprint: None,
+                            unchanged: true,
+                            suites: None,
+                        },
+                    });
+                    panel.manager.progress.end(false, None);
+                    cx.notify();
+                });
+                cx.notify();
+            });
+            window.render_frame(cx);
+            // Unfinished and failed runs never offer a forced repeat.
+            for outcome in [None, Some(RunOutcome::Failed("Upload unavailable".into()))] {
+                view.update(cx, |this, cx| {
+                    this.runs.update(cx, |panel, cx| {
+                        panel.manager.outcome = outcome.clone();
+                        cx.notify();
+                    });
+                });
+                window.render_frame(cx);
+                assert!(window.try_find("deployment-deploy-anyway").is_none());
+            }
+            view.update(cx, |this, cx| {
+                this.runs.update(cx, |panel, cx| {
+                    panel.manager.outcome = Some(RunOutcome::Completed);
+                    cx.notify();
+                });
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("run-outcome-heading").label(),
+                Some("Site already up to date")
+            );
+            assert_eq!(
+                window.find("live-phase").label(),
+                Some("No changes since the last deployment to this target; nothing was uploaded")
+            );
+            assert!(window.find("deployment-open-site").visible());
+            assert!(window.find("deployment-deploy-anyway").visible());
+            window.click("deployment-deploy-anyway", cx);
+        })
+        .unwrap();
+        let requests = requests.borrow();
+        assert_eq!(requests.len(), 1);
+        let intent = &requests[0];
+        assert_eq!(intent.request.command, RunCommand::Deploy);
+        let job = intent.request.options.deployment.as_ref().unwrap();
+        assert!(job.force);
+        assert_eq!(job.target.id, "qa");
+        assert_eq!(job.suite_ids, vec!["ui-test".to_string()]);
+        assert_eq!(
+            intent.expected_output_ids,
+            Some(vec!["ui-test".to_string()])
+        );
+        assert!(!intent.review_after_run);
     }
 
     #[gpui_kit::test]

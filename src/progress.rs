@@ -122,10 +122,32 @@ pub enum Event {
     Deployed {
         target: String,
         url: Option<String>,
+        /// Content fingerprint of a report deployment; landing deployments have none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fingerprint: Option<String>,
+        /// Snapshot input fingerprint the published content was generated from, if known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_fingerprint: Option<String>,
+        /// The target already served this content, so nothing was uploaded.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unchanged: bool,
+        /// Every suite the site serves after a publication, including kept suites.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suites: Option<Vec<String>>,
     },
     Finished {
         error: Option<String>,
     },
+}
+
+/// The suites a `Deployed` event can carry: `None` when the list would take more than half
+/// the event size limit, leaving room for its other fields. Suite IDs have no length limit, so
+/// a large site's membership may not fit one event, and an oversized event would fail the run
+/// after publication; the desktop app then reads it from the local copy of the published state.
+pub fn deployed_suites(suites: Option<Vec<String>>) -> Option<Vec<String>> {
+    let suites = suites?;
+    let bytes = serde_json::to_vec(&suites).map_or(usize::MAX, |bytes| bytes.len());
+    (bytes <= MAX_EVENT_BYTES / 2).then_some(suites)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -369,6 +391,15 @@ mod capture_index {
 pub struct DeploymentResult {
     pub target: String,
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_fingerprint: Option<String>,
+    /// Skipped because the target already served identical content.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suites: Option<Vec<String>>,
 }
 
 impl DeploymentResult {
@@ -651,8 +682,22 @@ impl LiveProgress {
                     suite.finished = true;
                 }
             }
-            Event::Deployed { target, url } => {
-                let deployment = DeploymentResult { target, url };
+            Event::Deployed {
+                target,
+                url,
+                fingerprint,
+                input_fingerprint,
+                unchanged,
+                suites,
+            } => {
+                let deployment = DeploymentResult {
+                    target,
+                    url,
+                    fingerprint,
+                    input_fingerprint,
+                    unchanged,
+                    suites,
+                };
                 if deployment.has_safe_url() {
                     self.deployment = Some(deployment);
                 }
@@ -806,6 +851,18 @@ fn bounded_log_message(mut message: String) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn deployed_events_carry_only_memberships_that_fit() {
+        let few = vec!["checkout".to_owned(); 3];
+        assert_eq!(super::deployed_suites(Some(few.clone())), Some(few));
+        assert_eq!(super::deployed_suites(None), None);
+        // Thousands of long suite IDs fit a site state, but not one progress event.
+        let many = (0..5000)
+            .map(|index| format!("{index:05}{}", "x".repeat(240)))
+            .collect::<Vec<_>>();
+        assert_eq!(super::deployed_suites(Some(many)), None);
+    }
+
+    #[test]
     fn deployed_site_results_are_preserved_and_unsafe_urls_are_rejected() {
         let mut live = LiveProgress::default();
         for url in [
@@ -816,12 +873,34 @@ mod tests {
             live.apply(record(Event::Deployed {
                 target: "QA".into(),
                 url: Some(url.into()),
+                fingerprint: None,
+                input_fingerprint: None,
+                unchanged: false,
+                suites: None,
             }));
             assert!(live.deployment.is_none());
         }
         live.apply(record(Event::Deployed {
             target: "QA".into(),
             url: Some("https://reports.example.com/".into()),
+            fingerprint: Some("a".repeat(64)),
+            input_fingerprint: None,
+            unchanged: true,
+            suites: None,
+        }));
+        let deployed = live.deployment.as_ref().unwrap();
+        assert!(deployed.unchanged);
+        assert_eq!(
+            deployed.fingerprint.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+        live.apply(record(Event::Deployed {
+            target: "QA".into(),
+            url: Some("https://reports.example.com/".into()),
+            fingerprint: None,
+            input_fingerprint: None,
+            unchanged: false,
+            suites: None,
         }));
         live.apply(record(Event::Finished { error: None }));
         assert_eq!(live.deployment.as_ref().unwrap().target, "QA");
@@ -833,9 +912,33 @@ mod tests {
             serde_json::from_str(r#"{"target":"QA","url":"https://reports.example.com/"}"#)
                 .unwrap();
         assert!(legacy.has_safe_url());
+        assert!(!legacy.unchanged && legacy.fingerprint.is_none());
+        // Workers from before skipped deployments omit both fields, and new results without
+        // them keep the legacy wire format.
+        let legacy_event: Record = serde_json::from_str(
+            r#"{"version":1,"elapsedMs":0,"event":{"event":"deployed","target":"QA","url":null}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            legacy_event.event,
+            Event::Deployed {
+                fingerprint: None,
+                input_fingerprint: None,
+                unchanged: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            r#"{"target":"QA","url":"https://reports.example.com/"}"#
+        );
         live.apply(record(Event::Deployed {
             target: "Private".into(),
             url: None,
+            fingerprint: None,
+            input_fingerprint: None,
+            unchanged: false,
+            suites: None,
         }));
         assert!(live.deployment.as_ref().unwrap().url.is_none());
     }

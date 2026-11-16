@@ -8,6 +8,12 @@
       }
     },
     {
+      "route": "/_snapshot/deployment.json",
+      "headers": {
+        "Cache-Control": "no-cache"
+      }
+    },
+    {
       "route": "/*.{woff,woff2,ttf,otf,svg,css,js,ico,png,jpg,jpeg,webp,gif,xsl,json}",
       "headers": {
         "Cache-Control": "public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000"

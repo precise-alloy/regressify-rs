@@ -354,9 +354,9 @@ replaces individual files atomically, and writes HTML last. It removes obsolete
 files only inside the generated `_snapshot` directory. Capture history and raw
 comparison reports are untouched. Desktop deployment includes only dependencies
 of the current manifest and refreshes query versions after image compression.
-Azure (250 MiB Free, 500 MiB Standard) and Cloudflare (2 GiB) share budget-aware PNG
-optimization in temporary copies. Original captures and stable filenames remain
-unchanged; diffs and error placeholders stay lossless.
+Azure (250 MiB Free, 500 MiB Standard) applies budget-aware PNG optimization in
+temporary copies; Cloudflare sets no total size budget. Original captures and
+stable filenames remain unchanged; diffs and error placeholders stay lossless.
 
 Deploy at the site's origin root. Routes are `/`, `/suites/:suiteId`, and
 `/suites/:suiteId/images/:captureId`. Serve `/index.html` for suite-route requests,

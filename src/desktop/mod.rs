@@ -25,3 +25,8 @@ pub mod jump_list;
 
 #[cfg(feature = "gui")]
 pub mod ui;
+
+/// The desktop app's per-user directories (settings, cache), when the platform has them.
+pub(crate) fn project_directories() -> Option<directories::ProjectDirs> {
+    directories::ProjectDirs::from("", "Regressify", "Regressify Desktop")
+}

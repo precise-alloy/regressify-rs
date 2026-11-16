@@ -217,7 +217,7 @@ mod tests {
         .unwrap();
         assert_eq!(report["tests"][0]["logs"]["test"]["state"], "complete");
         assert_eq!(report["tests"][0]["logs"]["test"]["records"], 2);
-        crate::snapshot::refresh_site_versions(&stage).unwrap();
+        crate::snapshot::refresh_site_versions(&stage, &Default::default()).unwrap();
         assert_eq!(
             crate::snapshot::artifact_paths(&stage, &["chosen".into()])
                 .unwrap()

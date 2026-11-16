@@ -1,13 +1,16 @@
 # Deployment Packaging
 
-Verified: 2026-10-17
+Verified: 2026-11-13
 
 - The [worker](../../src/desktop/worker.rs) regenerates selected snapshots, then
   stages only the active SPA manifest and its versioned dependencies. The shared
   [optimizer](../../src/desktop/deployment/optimization.rs) uses Azure's staged
   files or Cloudflare's validated asset list, never the original output tree.
-  Budgets are 250 MiB for Azure Free/unknown, 500 MiB for Standard, and 2 GiB for
-  Cloudflare. Fitting reports need no optimization copy; Netlify is unchanged.
+  Budgets are 250 MiB for Azure Free/unknown and 500 MiB for Standard; Cloudflare
+  sets none outside tests ([why](deployment-cloudflare.md)). Fitting reports need no
+  optimization copy; Netlify is unchanged. The optimizer's quality floors and
+  persistent cache are described in the
+  [packaging skill](../../.github/skills/deployment-packaging/SKILL.md).
 - [Artifact reads](../../src/desktop/deployment.rs) require a canonical root for
   containment checks, including Windows extended-length paths. Cloudflare reads
   hosting policies from the original canonical staging root; its temporary

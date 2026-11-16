@@ -15,6 +15,8 @@ mod activity;
 mod artifacts;
 mod log;
 mod settings;
+mod site;
+pub(super) use site::SiteSource;
 
 const RUN_UI_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -130,7 +132,17 @@ impl RunIntent {
         if !request.command.supports_scenarios() {
             request.options.scenarios.clear();
         }
-        if request.command.supports_suites() {
+        let removal_only = request.command == RunCommand::Deploy
+            && self.suite_names.is_empty()
+            && request
+                .options
+                .deployment
+                .as_ref()
+                .is_some_and(|job| !job.remove_ids.is_empty());
+        if removal_only {
+            // Removing suites from a site generates none, so it has no suite filters.
+            request.options.suites.clear();
+        } else if request.command.supports_suites() {
             let mut selection = SuiteSelection::default();
             for name in &self.suite_names {
                 let suite = suites
@@ -227,6 +239,7 @@ pub(super) struct RunPanel {
     executed_suites: Vec<(String, String)>,
     artifacts: artifacts::ArtifactScan,
     deployment_path: Option<PathBuf>,
+    site: site::SiteScan,
 }
 
 impl EventEmitter<RunEvent> for RunPanel {}
@@ -316,6 +329,7 @@ impl RunPanel {
             run_refresh_pending: false,
             executed_suites: Vec::new(),
             artifacts: artifacts::ArtifactScan::default(),
+            site: site::SiteScan::default(),
             deployment_path: None,
         };
         panel.rebuild(window, cx);
@@ -676,6 +690,7 @@ impl RunPanel {
         self.started = None;
         self.executed_suites.clear();
         self.artifacts.clear();
+        self.reset_site();
         self.deployment_path = None;
         self.log
             .update(cx, |state, cx| state.set_value("", window, cx));
@@ -1289,6 +1304,42 @@ impl RunPanel {
         let previous = self.command;
         self.command = RunCommand::Snapshot;
         let result = self.prepare_intent(cx);
+        self.command = previous;
+        result
+    }
+
+    /// A deployment intent that generates no suite, for removing suites from a site. It keeps
+    /// the current report settings (output directory and report text) like any deployment.
+    pub(super) fn removal_intent(&mut self, cx: &mut Context<Self>) -> Result<RunIntent> {
+        let previous = self.command;
+        self.command = RunCommand::Snapshot;
+        let result = (|| {
+            self.flush_options(RunCommand::Snapshot, cx)?;
+            let mut values = self.options.clone();
+            let defaults = serde_json::to_value(RunOptions::default())?;
+            if let Some(values) = values.as_object_mut() {
+                for (key, value) in values {
+                    if !RunOptions::applies(key, RunCommand::Snapshot) {
+                        *value = defaults[key].clone();
+                    }
+                }
+            }
+            let options: RunOptions = serde_json::from_value(values)?;
+            let root = self
+                .root
+                .clone()
+                .ok_or_else(|| anyhow!("Open a workspace before deploying"))?;
+            Ok(RunIntent {
+                request: RunRequest {
+                    root,
+                    command: RunCommand::Snapshot,
+                    options,
+                },
+                suite_names: Vec::new(),
+                expected_output_ids: Some(Vec::new()),
+                review_after_run: false,
+            })
+        })();
         self.command = previous;
         result
     }
@@ -2909,6 +2960,280 @@ mod tests {
                 })
             })
         });
+    }
+
+    #[gpui_kit::test]
+    fn removal_only_deployments_resolve_without_suite_filters(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = super::super::tests::editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, _, cx| {
+            view.update(cx, |this, cx| {
+                let suites = this.session.suites.clone();
+                let mut intent = this.runs.update(cx, |panel, cx| {
+                    panel.select_all(false, cx);
+                    panel.removal_intent(cx).unwrap()
+                });
+                assert!(intent.suite_names.is_empty());
+                intent.request.command = RunCommand::Deploy;
+                let job = crate::desktop::deployment::DeploymentJob {
+                    target: serde_json::from_value(serde_json::json!({ "id": "qa", "name": "QA" }))
+                        .unwrap(),
+                    suite_ids: Vec::new(),
+                    catalog_ids: suites.iter().map(|suite| suite.output_id.clone()).collect(),
+                    partial_confirmed: false,
+                    force: false,
+                    mode: crate::desktop::deployment::DeploymentMode::Update,
+                    remove_ids: vec!["gone".into()],
+                };
+                intent.request.options.deployment = Some(job.clone());
+                let request = intent.resolve(&suites).unwrap();
+                assert!(request.options.suites.is_empty());
+                request.arguments().unwrap();
+                // Without suites to remove, an empty selection is still rejected.
+                let mut empty = intent.clone();
+                empty.request.options.deployment =
+                    Some(crate::desktop::deployment::DeploymentJob {
+                        remove_ids: Vec::new(),
+                        ..job
+                    });
+                assert!(empty.resolve(&suites).is_err());
+            });
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn site_scans_follow_targets_the_loaded_settings_still_hold() {
+        use crate::desktop::deployment::DeployTargets;
+        let target = |id: &str| {
+            let mut target = crate::desktop::deployment::netlify::tests::target();
+            target.id = id.into();
+            target.name = id.into();
+            target
+        };
+        let publications = DeployTargets {
+            targets: vec![target("chosen"), target("selected")],
+            selected: Some("selected".into()),
+            ..Default::default()
+        };
+        let followed = |current: Option<&str>| {
+            super::artifacts::followed_target(current.map(target).as_ref(), &publications)
+                .map(|target| target.id)
+        };
+        // The target the Deploy dialog chose stays followed while it exists.
+        assert_eq!(followed(Some("chosen")).as_deref(), Some("chosen"));
+        // One from another workspace, or deleted, falls back to the saved selection.
+        assert_eq!(followed(Some("elsewhere")).as_deref(), Some("selected"));
+        assert_eq!(followed(None).as_deref(), Some("selected"));
+        let none = DeployTargets::default();
+        assert!(super::artifacts::followed_target(Some(&target("chosen")), &none).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn closing_a_workspace_forgets_its_site(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let (handle, view) = super::super::tests::editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |this, cx| {
+                this.runs.update(cx, |panel, cx| {
+                    panel.set_site_for_test(
+                        Some(crate::desktop::deployment::netlify::tests::target()),
+                        Some(Default::default()),
+                        super::SiteSource::Site,
+                        Default::default(),
+                        cx,
+                    );
+                    panel.clear(window, cx);
+                    assert!(panel.site_target().is_none());
+                    assert!(panel.site_suites().is_none());
+                    assert_eq!(*panel.site_source(), super::SiteSource::Unknown);
+                });
+            });
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    async fn sites_published_before_are_never_shown_as_empty(cx: &mut TestAppContext) {
+        use super::SiteSource;
+        use crate::desktop::deployment::{DeployTargets, DeploymentProvider, site_state};
+        let directory = tempfile::tempdir().unwrap();
+        let (_handle, view) = super::super::tests::editor(cx, directory.path());
+        let settings = directory.path().join("deployments/workspace.json");
+        // Answers every request with 404, as a site that serves no report (or a gateway
+        // hiding one) does.
+        let site = crate::test::browser_tests::Site::new(|request| {
+            let _ = request.respond(tiny_http::Response::empty(404));
+        })
+        .unwrap();
+        let mut private = crate::desktop::deployment::netlify::tests::target();
+        private.id = "private".into();
+        let mut public = private.clone();
+        public.id = "public".into();
+        public.name = "Public QA".into();
+        // Saved settings only accept HTTPS URLs; the site read uses the target it is given,
+        // which points at the local test server.
+        let saved_public = public.clone();
+        public.published_url = Some(format!("{}/reports/", site.origin));
+        DeployTargets {
+            targets: vec![private.clone(), saved_public.clone()],
+            selected: Some(private.id.clone()),
+            ..Default::default()
+        }
+        .save(&settings)
+        .unwrap();
+        cx.update(|cx| {
+            view.update(cx, |this, cx| {
+                this.runs.update(cx, |panel, cx| {
+                    panel.set_deployment_storage_path(settings.clone(), cx)
+                })
+            })
+        });
+        let read = |cx: &mut TestAppContext, target: &crate::desktop::deployment::DeployTarget| {
+            cx.update(|cx| {
+                view.update(cx, |this, cx| {
+                    this.runs.update(cx, |panel, cx| {
+                        panel.refresh_site(Some(target.clone()), true, cx)
+                    })
+                })
+            });
+        };
+        let settle = async |cx: &mut TestAppContext| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                let loading = cx
+                    .update(|cx| *view.read(cx).runs.read(cx).site_source() == SiteSource::Loading);
+                if !loading {
+                    break;
+                }
+                cx.background_executor
+                    .timer(std::time::Duration::from_millis(10))
+                    .await;
+            }
+            cx.run_until_parked();
+            cx.update(|cx| {
+                let runs = view.read(cx).runs.read(cx);
+                (
+                    runs.site_source().clone(),
+                    runs.site_suites().map(|suites| suites.suites.len()),
+                )
+            })
+        };
+
+        // Never published: an unread private site is empty.
+        read(cx, &private);
+        assert_eq!(settle(cx).await, (SiteSource::Local, Some(0)));
+        // A private publication left only its marker: the suites are unknown, not absent.
+        site_state::mark_published(&settings, &private.id).unwrap();
+        read(cx, &private);
+        let (source, suites) = settle(cx).await;
+        assert!(matches!(source, SiteSource::Unavailable(_)), "{source:?}");
+        assert_eq!(suites, None);
+
+        // A public site that serves nothing and was never published here is empty.
+        read(cx, &public);
+        assert_eq!(settle(cx).await, (SiteSource::Site, Some(0)));
+        // Once published, an empty answer falls back to the state published from here.
+        DeployTargets::record_report_publication(
+            &settings,
+            &saved_public,
+            Some("https://qa-reports.netlify.app/"),
+            &["shop".into()],
+        )
+        .unwrap();
+        site_state::save_local(
+            &settings,
+            &public.id,
+            &site_state::tests::state(DeploymentProvider::Netlify, &["shop"]),
+        )
+        .unwrap();
+        read(cx, &public);
+        assert_eq!(settle(cx).await, (SiteSource::Local, Some(1)));
+        // Without a local copy either, the suites are unknown.
+        site_state::forget_local(&settings, &public.id).unwrap();
+        read(cx, &public);
+        let (source, suites) = settle(cx).await;
+        assert!(matches!(source, SiteSource::Unavailable(_)), "{source:?}");
+        assert_eq!(suites, None);
+    }
+
+    #[gpui_kit::test]
+    async fn suite_statuses_follow_recorded_inputs_after_approvals(cx: &mut TestAppContext) {
+        use crate::desktop::deployment::{
+            DeployTargets, DeploymentProvider,
+            site_state::{self, SuiteInputs},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let (_handle, view) = super::super::tests::editor(cx, directory.path());
+        // Results of a published suite, and the records its publication left.
+        let baseline = directory
+            .path()
+            .join(".regressify/ui-test/bitmaps_reference/home.png");
+        std::fs::create_dir_all(baseline.parent().unwrap()).unwrap();
+        std::fs::write(&baseline, "published").unwrap();
+        let settings = directory.path().join("deployments/workspace.json");
+        let mut target = crate::desktop::deployment::netlify::tests::target();
+        target.id = "qa".into();
+        DeployTargets {
+            targets: vec![target],
+            selected: Some("qa".into()),
+            ..Default::default()
+        }
+        .save(&settings)
+        .unwrap();
+        let state = site_state::tests::state(DeploymentProvider::Netlify, &["ui-test"]);
+        site_state::save_local(&settings, "qa", &state).unwrap();
+        let output = directory.path().join(".regressify");
+        let inputs = std::collections::BTreeMap::from([(
+            "ui-test".to_owned(),
+            crate::snapshot::suite_input_fingerprint(&output, "ui-test").unwrap(),
+        )]);
+        let records = SuiteInputs::default().after(&state, &inputs).unwrap();
+        site_state::save_inputs(&settings, "qa", &records).unwrap();
+        let status = |cx: &mut TestAppContext| {
+            cx.update(|cx| view.read(cx).runs.read(cx).site_status("ui-test"))
+        };
+
+        cx.update(|cx| {
+            view.update(cx, |this, cx| {
+                this.runs.update(cx, |panel, cx| {
+                    panel.set_deployment_storage_path(settings.clone(), cx)
+                })
+            })
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if status(cx) == Some(false) {
+                break;
+            }
+            cx.background_executor
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert_eq!(status(cx), Some(false), "published inputs read as deployed");
+
+        // An approval rewrites the baseline without a new run; the next scan reports it.
+        std::fs::write(&baseline, "approved").unwrap();
+        cx.update(|cx| {
+            view.update(cx, |this, cx| {
+                this.runs
+                    .update(cx, |panel, cx| panel.refresh_artifacts(cx))
+            })
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            if status(cx) == Some(true) {
+                break;
+            }
+            cx.background_executor
+                .timer(std::time::Duration::from_millis(10))
+                .await;
+        }
+        assert_eq!(
+            status(cx),
+            Some(true),
+            "approved inputs read as newer than the site"
+        );
     }
 
     #[gpui_kit::test]
