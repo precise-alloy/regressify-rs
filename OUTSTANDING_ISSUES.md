@@ -3,6 +3,22 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Website Tailwind Adoption (2026-11-17)
+
+- Resolved: the website's components, layouts, and pages now use Tailwind CSS v4
+  utilities themed by the design tokens, with no `<style>` blocks
+  ([styling notes](website/README.md#styling)). Computed styles of every rendered
+  element matched the previous build on all nine routes, in light and dark, at
+  1280px and 390px, in resting, hover, focus, and open states, for offline and
+  release builds. Remaining differences were only equivalent serializations
+  (background position, repeated transition lists).
+- Open, pre-existing: the About page title renders at body size (16px). Its old
+  rule used `--text-xxl` and `--leading-xxl`, which tokens.css does not define,
+  so the size fell back to the inherited value. The conversion keeps that size
+  (`text-md`); choosing a display size is a design decision.
+- Not covered by the comparison: the blog post layout (no posts exist yet) and
+  the image viewer while open. Both were converted rule by rule.
+
 ## Desktop Capture Results Refresh (2026-11-11)
 
 - Resolved: after a successful Test or Reference, Results could retain a pinned

@@ -1,6 +1,7 @@
 // @ts-check
 import sitemap from '@astrojs/sitemap';
 import starlight from '@astrojs/starlight';
+import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'astro/config';
 import { SITE } from './src/config/site.ts';
 
@@ -45,7 +46,9 @@ export default defineConfig({
       // Code stays monochrome to match the desktop's neutral palette and keep
       // contrast predictable in both themes.
       expressiveCode: false,
-      customCss: ['./src/styles/tokens.css', './src/styles/starlight.css'],
+      // tailwind.css adds the site's utilities above Starlight's cascade layers;
+      // starlight.css stays unlayered so its --sl-* mapping always applies.
+      customCss: ['./src/styles/tokens.css', './src/styles/tailwind.css', './src/styles/starlight.css'],
       components: {
         Head: './src/components/starlight/Head.astro',
         Header: './src/components/starlight/Header.astro',
@@ -67,6 +70,10 @@ export default defineConfig({
     }),
     sitemap({ filter: (page) => !/^\/admin(?:\/|$)/.test(new URL(page).pathname) }),
   ],
+  vite: {
+    // Tailwind CSS v4. Its entry and theme are in src/styles/tailwind.css.
+    plugins: [tailwindcss()],
+  },
   markdown: {
     // Code stays monochrome to match the desktop's neutral palette and keep
     // contrast predictable in both themes.

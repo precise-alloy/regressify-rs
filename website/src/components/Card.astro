@@ -9,16 +9,6 @@ interface Props extends HTMLAttributes<'div'> {
 const { as: Tag = 'div', class: className, ...rest } = Astro.props;
 ---
 
-<Tag class:list={['card', className]} {...rest}>
+<Tag class:list={['rounded-lg border border-border bg-card p-xl text-card-foreground', className]} {...rest}>
   <slot />
 </Tag>
-
-<style>
-  .card {
-    padding: var(--space-xl);
-    border: var(--border-width) solid var(--border);
-    border-radius: var(--radius-lg);
-    background: var(--card);
-    color: var(--card-foreground);
-  }
-</style>

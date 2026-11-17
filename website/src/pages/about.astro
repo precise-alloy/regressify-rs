@@ -36,17 +36,18 @@ const advisors = ['Nga Nguyen', 'Hanh Nguyen', 'Duyen Pham'] as const;
   title="About"
   description="Learn about Regressify, the team and QA advisors behind it, and its open-source licensing."
 >
-  <div class="container page">
-    <header class="heading">
+  <div class="page-container grid gap-xxl py-xxl">
+    <header class="grid gap-sm border-b border-b-border pb-xl">
+      {/* Body size on purpose for now: the pre-Tailwind rule used missing --text-xxl tokens and rendered at the inherited size (see OUTSTANDING_ISSUES.md). */}
       <h1>About Regressify</h1>
-      <p class="lead muted">
+      <p class="muted max-w-[64ch] text-lg">
         Visual regression testing for web pages, built in Rust for both the desktop and the command line.
       </p>
     </header>
 
-    <section class="section" aria-labelledby="overview-heading">
+    <section class="grid gap-lg" aria-labelledby="overview-heading">
       <h2 id="overview-heading">Overview</h2>
-      <div class="prose">
+      <div class="prose grid gap-md">
         <p>
           Regressify helps QA and engineering teams catch unintended visual changes before they reach production. It combines a standalone CLI (<code>regressify</code>) for scripts and CI pipelines with a native desktop workbench (<code>regressify-desktop</code>) for authoring suites, running captures, reviewing visual diffs, managing Git changes, and publishing reports.
         </p>
@@ -56,32 +57,32 @@ const advisors = ['Nga Nguyen', 'Hanh Nguyen', 'Duyen Pham'] as const;
       </div>
     </section>
 
-    <section class="section" aria-labelledby="contributors-heading">
+    <section class="grid gap-lg" aria-labelledby="contributors-heading">
       <h2 id="contributors-heading">Contributors</h2>
-      <div class="contributors-grid">
+      <div class="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-lg">
         {
           developers.map((person) => (
-            <Card as="div" class="contributor-card">
-              <span class="role muted">{person.role}</span>
-              <a href={person.href} class="person-name" rel="noopener noreferrer">
+            <Card as="div" class="flex flex-col gap-xs">
+              <span class="muted text-xs">{person.role}</span>
+              <a href={person.href} class="text-md font-semibold" rel="noopener noreferrer">
                 {person.name}
               </a>
             </Card>
           ))
         }
-        <Card as="div" class="contributor-card advisors-card">
-          <span class="role muted">Advisors (QA)</span>
-          <p class="person-name">{advisors.join(', ')}</p>
-          <p class="advisor-note muted">
+        <Card as="div" class="col-span-full flex flex-col gap-xs">
+          <span class="muted text-xs">Advisors (QA)</span>
+          <p class="text-md font-semibold">{advisors.join(', ')}</p>
+          <p class="muted mt-xs text-sm">
             QA engineers who use Regressify in practice, provide feedback, and report bugs so developers can improve the tool.
           </p>
         </Card>
       </div>
     </section>
 
-    <section class="section" aria-labelledby="license-heading">
+    <section class="grid gap-lg" aria-labelledby="license-heading">
       <h2 id="license-heading">License &amp; Source</h2>
-      <div class="prose">
+      <div class="prose grid gap-md">
         <p>
           Copyright &copy; 2023–2026 Tuyen Pham. Regressify is free software licensed under the{' '}
           <strong>GNU Affero General Public License v3.0 or later</strong> and comes with ABSOLUTELY NO WARRANTY.
@@ -108,76 +109,3 @@ const advisors = ['Nga Nguyen', 'Hanh Nguyen', 'Duyen Pham'] as const;
     </section>
   </div>
 </BaseLayout>
-
-<style>
-  .page {
-    padding-block: var(--space-xxl);
-    display: grid;
-    gap: var(--space-xxl);
-  }
-
-  .heading {
-    display: grid;
-    gap: var(--space-sm);
-    padding-bottom: var(--space-xl);
-    border-bottom: var(--border-width) solid var(--border);
-  }
-
-  h1 {
-    font-size: var(--text-xxl);
-    line-height: var(--leading-xxl);
-  }
-
-  .lead {
-    max-width: 64ch;
-    font-size: var(--text-lg);
-    line-height: var(--leading-lg);
-  }
-
-  .section {
-    display: grid;
-    gap: var(--space-lg);
-  }
-
-  h2 {
-    font-size: var(--text-xl);
-    line-height: var(--leading-xl);
-  }
-
-  .prose {
-    display: grid;
-    gap: var(--space-md);
-  }
-
-  .contributors-grid {
-    display: grid;
-    gap: var(--space-lg);
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  }
-
-  .contributor-card {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-xs);
-  }
-
-  .advisors-card {
-    grid-column: 1 / -1;
-  }
-
-  .role {
-    font-size: var(--text-xs);
-    line-height: var(--leading-xs);
-  }
-
-  .person-name {
-    font-size: var(--text-md);
-    font-weight: var(--weight-semibold);
-  }
-
-  .advisor-note {
-    margin-top: var(--space-xs);
-    font-size: var(--text-sm);
-    line-height: var(--leading-sm);
-  }
-</style>

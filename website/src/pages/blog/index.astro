@@ -7,22 +7,22 @@ const posts = await getPosts();
 ---
 
 <BaseLayout title="Blog" description="News and release notes from the Regressify project.">
-  <div class="container blog">
-    <header class="heading">
+  <div class="page-container max-w-[calc(72ch+2*var(--space-xl))] py-xxl">
+    <header class="flex flex-wrap items-end justify-between gap-lg border-b border-b-border pb-lg">
       <div>
-        <h1>Blog</h1>
+        <h1 class="text-3xl leading-[1.2]">Blog</h1>
         <p class="muted">News and release notes from the Regressify project.</p>
       </div>
-      <a href="/rss.xml" class="rss"><Icon name="rss" /> RSS</a>
+      <a href="/rss.xml" class="inline-flex items-center gap-xs text-(length:--text-sm)"><Icon name="rss" /> RSS</a>
     </header>
-    <ul class="posts">
+    <ul class="m-0 list-none p-0">
       {
         posts.map((post) => (
-          <li>
-            <article>
-              <time datetime={post.data.date.toISOString()}>{formatDate(post.data.date)}</time>
-              <h2>
-                <a href={`/blog/${post.id}/`}>{post.data.title}</a>
+          <li class="border-b border-b-border py-xl">
+            <article class="grid gap-xs">
+              <time datetime={post.data.date.toISOString()} class="text-(length:--text-xs) text-muted-foreground">{formatDate(post.data.date)}</time>
+              <h2 class="text-xl">
+                <a href={`/blog/${post.id}/`} class="no-underline hover:underline">{post.data.title}</a>
               </h2>
               <p class="muted">{post.data.description}</p>
             </article>
@@ -33,66 +33,3 @@ const posts = await getPosts();
     {posts.length === 0 && <p class="muted">No posts yet.</p>}
   </div>
 </BaseLayout>
-
-<style>
-  .blog {
-    max-width: calc(72ch + 2 * var(--space-xl));
-    padding-block: var(--space-xxl);
-  }
-
-  .heading {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: var(--space-lg);
-    padding-bottom: var(--space-lg);
-    border-bottom: var(--border-width) solid var(--border);
-  }
-
-  h1 {
-    font-size: var(--text-3xl);
-    line-height: 1.2;
-  }
-
-  .rss {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-xs);
-    font-size: var(--text-sm);
-  }
-
-  .posts {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
-
-  .posts li {
-    padding-block: var(--space-xl);
-    border-bottom: var(--border-width) solid var(--border);
-  }
-
-  article {
-    display: grid;
-    gap: var(--space-xs);
-  }
-
-  time {
-    color: var(--muted-foreground);
-    font-size: var(--text-xs);
-  }
-
-  h2 {
-    font-size: var(--text-xl);
-    line-height: var(--leading-xl);
-  }
-
-  h2 a {
-    text-decoration: none;
-  }
-
-  h2 a:hover {
-    text-decoration: underline;
-  }
-</style>

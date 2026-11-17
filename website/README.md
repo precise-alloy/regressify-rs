@@ -4,8 +4,9 @@ The public site for Regressify: a minimal landing page, downloads, docs, a blog,
 and a private deployment admin view. Public pages are static [Astro](https://astro.build)
 with no UI framework and work without JavaScript. The docs use
 [Starlight](https://starlight.astro.build) for the Astro docs layout; its search
-needs JavaScript. The admin view uses a Worker API and JavaScript. The site's look
-follows the desktop app's theme.
+needs JavaScript. The admin view uses a Worker API and JavaScript. Styles use
+[Tailwind CSS](https://tailwindcss.com) v4 utilities themed with the design tokens
+(see [Styling](#styling)). The site's look follows the desktop app's theme.
 
 ## Develop
 
@@ -29,6 +30,7 @@ bun run dev
 | --------------------------- | -------------------------------------------------------------------------- |
 | `src/config/site.ts`        | Site name, description, repository URL, and navigation.                    |
 | `src/styles/tokens.css`     | Design tokens mirrored from the desktop theme (light and dark).            |
+| `src/styles/tailwind.css`   | Tailwind entry: layer order, sources, and the token-only theme.            |
 | `src/styles/global.css`     | Base element styles and Markdown `.prose` styles (not loaded on docs).     |
 | `src/styles/starlight.css`  | Maps Starlight's `--sl-*` theme onto the tokens for the docs.              |
 | `src/components/`           | Button, Card, CodeBlock, Header, Footer, ThemeToggle, and others.          |
@@ -92,17 +94,18 @@ Each page starts at `##`; the title is the page's only h1. Keep heading text sta
 
 **Theme and overrides.** Docs share the site's header identity, design tokens, and theme preference:
 
-| File                                                                           | Role                                                                                                          |
-| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| [src/styles/tokens.css](src/styles/tokens.css)                                 | Design tokens mirrored from the desktop theme; loaded through Starlight's `customCss`.                        |
-| [src/styles/starlight.css](src/styles/starlight.css)                           | Maps Starlight's `--sl-*` colors, fonts, header height, and spacing onto the tokens for both themes.          |
-| [src/components/starlight/Header.astro](src/components/starlight/Header.astro) | Brand, search, `HEADER_LINKS`, GitHub, and theme toggle, like the site header.                                |
-| [src/components/starlight/Head.astro](src/components/starlight/Head.astro)     | Stock head plus the legacy hash redirect on `/docs/desktop-app/` only.                                        |
-| `ThemeProvider.astro`, `ThemeSelect.astro`                                     | Use the site's `regressify-theme` preference and the shared [ThemeScript](src/components/ThemeScript.astro). |
-| `MobileMenuFooter.astro`                                                       | Below 50rem, holds the header links, GitHub, and theme toggle in the sidebar menu.                            |
-| `MarkdownContent.astro`                                                        | Stock Markdown wrapper plus [ImageZoom](src/components/ImageZoom.astro) for full-screen screenshots.          |
+| File                                                                           | Role                                                                                                           |
+| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| [src/styles/tokens.css](src/styles/tokens.css)                                 | Design tokens mirrored from the desktop theme; loaded through Starlight's `customCss`.                         |
+| [src/styles/tailwind.css](src/styles/tailwind.css)                             | Tailwind utilities, layered above Starlight's styles; loaded through `customCss` after the tokens.             |
+| [src/styles/starlight.css](src/styles/starlight.css)                           | Maps Starlight's `--sl-*` colors, fonts, header height, and spacing onto the tokens for both themes.           |
+| [src/components/starlight/Header.astro](src/components/starlight/Header.astro) | Brand, search, `HEADER_LINKS`, GitHub, and theme toggle, like the site header; its grid is in `starlight.css`. |
+| [src/components/starlight/Head.astro](src/components/starlight/Head.astro)     | Stock head plus the legacy hash redirect on `/docs/desktop-app/` only.                                         |
+| `ThemeProvider.astro`, `ThemeSelect.astro`                                     | Use the site's `regressify-theme` preference and the shared [ThemeScript](src/components/ThemeScript.astro).   |
+| `MobileMenuFooter.astro`                                                       | Below 50rem, holds the header links, GitHub, and theme toggle in the sidebar menu.                             |
+| `MarkdownContent.astro`                                                        | Stock Markdown wrapper plus [ImageZoom](src/components/ImageZoom.astro) for full-screen screenshots.           |
 
-Do not import `global.css` into docs pages: Starlight's styles are in cascade layers, so the site's unlayered element rules would override them. Starlight also sets `scopedStyleStrategy: 'where'` for the whole site, so scoped component styles get no extra specificity from scoping; `global.css` keeps its link hover rule at `a:where(:hover)` for that reason. Starlight's hover prefetch is turned off (`prefetch: false`) so links to `/admin/` are never prefetched.
+Do not import `global.css` into docs pages: its element rules sit in the `base` layer, which comes after Starlight's `starlight` layer, so they would override Starlight's components. Starlight also sets `scopedStyleStrategy: 'where'` for the whole site, so any scoped component style would get no extra specificity from scoping; `global.css` keeps its link hover rule at `a:where(:hover)` for that reason. Starlight's hover prefetch is turned off (`prefetch: false`) so links to `/admin/` are never prefetched.
 
 ### Blog Posts
 
@@ -155,6 +158,28 @@ To recapture:
 - Replace any absolute path that reveals a user name before committing. The Git view, the Run Reference confirmation, and the cleanup dialog show one.
 - Don't capture the Software updates dialog from a local build; it says updates are unavailable, which official installs don't.
 - Keep each image's alt text describing what the screenshot shows and which controls are numbered.
+
+## Styling
+
+Components, layouts, and pages are styled with [Tailwind CSS](https://tailwindcss.com) v4 utilities; `.astro` files have no `<style>` blocks. Tailwind runs as a Vite plugin (`@tailwindcss/vite` in [astro.config.mjs](astro.config.mjs)) and is configured in CSS, in [src/styles/tailwind.css](src/styles/tailwind.css). Landing pages load it through `global.css`; docs pages load it through Starlight's `customCss`. Repeated class lists live in a constant in the component's front matter (or in [admin-table.ts](src/lib/admin-table.ts) for the rows it builds).
+
+CSS outside utilities is limited to markup that cannot carry classes or sits outside a component:
+
+- [global.css](src/styles/global.css): the landing reset, shared classes (`.page-container`, `.eyebrow`, `.muted`, `.visually-hidden`, `.skip-link`, `.requires-js`), `.prose` for rendered Markdown, and the admin dialog's page scroll lock on `<body>` and `<html>`.
+- [starlight.css](src/styles/starlight.css): Starlight's theme, Starlight-rendered markup, and the docs header grid (`.sl-header`), which reads Starlight's layout properties.
+
+Rules:
+
+- **Token-only theme.** The theme exposes only the tokens in [tokens.css](src/styles/tokens.css), so utilities read like the tokens: `bg-muted`, `text-muted-foreground`, `border-border`, `p-lg`, `gap-sm`, `h-control-md`, `text-sm` (with its `leading-sm`), `font-semibold`, `rounded-md`, `max-w-page`. Tailwind's default palette and numeric spacing (`p-4`) do not exist; use an arbitrary value such as `py-[96px]` for a one-off. `--text-2xl` and larger have no line-height token; add `leading-*`. To change only the font size and keep the inherited line height, use `text-(length:--text-sm)`. When a token is added or renamed, update the theme in `tailwind.css` too.
+- **Breakpoints.** `sm` (640px) and `md` (768px) are named; use `min-[900px]:` for other widths. Tailwind's `max-*` variants exclude their value (`width < N`), so a former `max-width: 767px` query is `max-[768px]:`.
+- **Variants.** `hover:` is a plain `:hover` (Tailwind's default would require `@media (hover: hover)`). `dark:` follows the resolved `[data-theme]`, else the system preference, matching `tokens.css`; token colors use `light-dark()` and need no `dark:`. Name nested groups (`group/menu`, `group-open/menu:hidden`) so a state on one group never matches another.
+- **Cascade.** The layer order is `starlight, base, components, utilities`. `global.css` keeps its reset in `base` and its shared classes in `components`, so a utility on the same element wins. Unlayered CSS (`tokens.css`, most of `starlight.css`) beats every layer, so a `starlight.css` rule that can match site components (such as its `:focus-visible` ring) belongs in `@layer base`.
+- **No Preflight or Starlight plugin.** Only the utilities are imported. `global.css` stays the landing reset and Starlight keeps its own. `@astrojs/starlight-tailwind` is not used: it maps Starlight's colors from Tailwind's palette (the opposite of `starlight.css`) and adds a global `border: 0 solid` reset.
+- **Sources.** Automatic detection is off. Utilities are generated from `src/components`, `src/layouts`, `src/pages`, and `src/lib` only, never from Markdown content. Add an `@source` line when markup moves elsewhere. A class added by a script must appear as a full literal in one of those folders.
+- **Exact equivalents.** Use side-specific colors with side-specific borders (`border-b border-b-border`, not `border-border`). Write `border: 0` as `[border:0]` (Tailwind's `border-0` keeps a solid style) and a fixed shadow as `[box-shadow:...]` (`shadow-*` adds ring layers). Controls that inherit the page font use `font-inherit` (defined in `tailwind.css`) plus explicit size, weight, and line height, because Tailwind sorts an arbitrary `[font:inherit]` after `text-*` and it would reset them.
+- **Focus ring.** The site focus ring is a `box-shadow` on `:focus-visible` in `base`, so a `shadow-*` utility on a focusable element replaces it. Give such an element its own focus style.
+
+`.page-container` is the page column (`--page-width`, 1080px, with a 16/24px gutter). It was called `.container` before Tailwind, renamed because Tailwind's own `container` utility would merge into it and cap its width at each breakpoint.
 
 ## Download Resolution
 

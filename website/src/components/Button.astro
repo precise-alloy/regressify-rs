@@ -16,7 +16,29 @@ type Props = {
 } & Omit<HTMLAttributes<'a'> & HTMLAttributes<'button'>, 'class'>;
 
 const { variant = 'default', size = 'md', href, icon = false, class: className, ...rest } = Astro.props;
-const classes = ['btn', `btn-${variant}`, `btn-${size}`, icon && 'btn-icon', className];
+
+// gpui-component buttons draw labels at the theme's normal weight.
+const base =
+  'inline-flex items-center justify-center rounded-md border font-inherit font-normal leading-[1.25] whitespace-nowrap no-underline cursor-pointer transition-[background-color,border-color]';
+// Heights follow the desktop control sizes; icon buttons are square with no inline padding.
+const sizes: Record<Size, string> = {
+  sm: 'h-control-sm gap-xs text-sm',
+  md: 'h-control-md gap-sm text-sm',
+  lg: 'h-control-lg gap-sm text-md',
+};
+const padding: Record<Size, string> = { sm: 'px-sm', md: 'px-[10px]', lg: 'px-lg' };
+const iconWidth: Record<Size, string> = { sm: 'w-control-sm px-0', md: 'w-control-md px-0', lg: 'w-control-lg px-0' };
+const variants: Record<Variant, string> = {
+  // Desktop focus_style also recolors the control's own border to the ring.
+  default:
+    'border-input bg-button text-button-foreground hover:bg-button-hover hover:text-button-foreground active:bg-button-active focus-visible:border-ring',
+  primary:
+    'border-primary bg-primary text-primary-foreground hover:border-primary-hover hover:bg-primary-hover hover:text-primary-foreground active:bg-primary-active',
+  // Desktop ghost buttons use button_active when pressed and the selected color when toggled on.
+  ghost:
+    'border-transparent bg-transparent text-button-ghost-foreground hover:bg-button-ghost-hover hover:text-button-ghost-foreground active:bg-button-active aria-pressed:bg-button-ghost-selected aria-[current=page]:bg-button-ghost-selected',
+};
+const classes = [base, sizes[size], icon ? iconWidth[size] : padding[size], variants[variant], className];
 ---
 
 {
@@ -30,115 +52,3 @@ const classes = ['btn', `btn-${variant}`, `btn-${size}`, icon && 'btn-icon', cla
     </button>
   )
 }
-
-<style>
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-sm);
-    border: var(--border-width) solid transparent;
-    border-radius: var(--radius-md);
-    font: inherit;
-    /* gpui-component buttons draw labels at the theme's normal weight. */
-    font-weight: var(--weight-normal);
-    line-height: 1.25;
-    white-space: nowrap;
-    text-decoration: none;
-    cursor: pointer;
-    transition:
-      background-color var(--duration-fast) ease,
-      border-color var(--duration-fast) ease;
-  }
-
-  .btn-sm {
-    height: var(--control-sm);
-    padding-inline: var(--space-sm);
-    gap: var(--space-xs);
-    font-size: var(--text-sm);
-  }
-
-  .btn-md {
-    height: var(--control-md);
-    padding-inline: 10px;
-    font-size: var(--text-sm);
-  }
-
-  .btn-lg {
-    height: var(--control-lg);
-    padding-inline: var(--space-lg);
-    font-size: var(--text-md);
-  }
-
-  .btn-icon {
-    padding-inline: 0;
-  }
-
-  .btn-icon.btn-sm {
-    width: var(--control-sm);
-  }
-
-  .btn-icon.btn-md {
-    width: var(--control-md);
-  }
-
-  .btn-icon.btn-lg {
-    width: var(--control-lg);
-  }
-
-  .btn-default {
-    background: var(--button);
-    border-color: var(--input);
-    color: var(--button-foreground);
-  }
-
-  .btn-default:hover {
-    background: var(--button-hover);
-    color: var(--button-foreground);
-  }
-
-  .btn-default:active {
-    background: var(--button-active);
-  }
-
-  /* Desktop focus_style also recolors the control's own border to the ring. */
-  .btn-default:focus-visible {
-    border-color: var(--ring);
-  }
-
-  .btn-primary {
-    background: var(--primary);
-    border-color: var(--primary);
-    color: var(--primary-foreground);
-  }
-
-  .btn-primary:hover {
-    background: var(--primary-hover);
-    border-color: var(--primary-hover);
-    color: var(--primary-foreground);
-  }
-
-  .btn-primary:active {
-    background: var(--primary-active);
-  }
-
-  .btn-ghost {
-    background: transparent;
-    color: var(--button-ghost-foreground);
-  }
-
-  .btn-ghost:hover {
-    background: var(--button-ghost-hover);
-    color: var(--button-ghost-foreground);
-  }
-
-  /* Desktop ghost buttons use button_active when pressed and secondary_active when selected. */
-  .btn-ghost:active {
-    background: var(--button-active);
-  }
-
-  .btn-ghost[aria-pressed='true'],
-  .btn-ghost[aria-current='page'] {
-    background: var(--button-ghost-selected);
-  }
-</style>
