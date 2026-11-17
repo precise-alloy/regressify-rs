@@ -19,8 +19,10 @@ import {
   imageRowToAlignedRow,
 } from "../data/report";
 import { CaptureInfo } from "./CaptureInfo";
-import { IconButton, ReportImage } from "./ui";
+import { IconButton, iconButton, ReportImage, segmented, segmentedItem } from "./ui";
 
+// One-screen-pixel white crosshair strokes with a dark outline.
+const guideLine = "absolute bg-[#ffffff] [box-shadow:0_0_0_1px_#000000b3]";
 const modes = [
   ["side", "Side by side", Columns2],
   ["wipe", "Wipe", SquareSplitHorizontal],
@@ -527,9 +529,19 @@ export function ComparisonViewer({
     };
   }, [capture, mode, scale]);
   return (
-    <section ref={viewer} className="comparison-viewer" aria-label="Image comparison">
-      <div ref={toolbar} className="comparison-modes">
-        <fieldset className="segmented mode-segments" aria-label="Comparison mode">
+    <section
+      ref={viewer}
+      className="comparison-viewer flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+      aria-label="Image comparison"
+    >
+      <div
+        ref={toolbar}
+        className="comparison-modes sticky top-0 z-3 mb-2 flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 bg-bg py-[5px] print:hidden"
+      >
+        <fieldset
+          className={`${segmented} flex-wrap max-[601px]:hidden`}
+          aria-label="Comparison mode"
+        >
           {modes.map(([value, label, Icon]) => (
             <button
               key={value}
@@ -537,14 +549,15 @@ export function ComparisonViewer({
               aria-pressed={mode === value}
               disabled={!available(value)}
               onClick={() => onMode(value)}
+              className={`inline-flex items-center justify-center gap-1.5 rounded-[3px] [border:0] bg-transparent px-2.5 py-[7px] text-[13px] text-muted max-[1201px]:p-[7px] ${segmentedItem}`}
             >
-              <Icon size={15} />
+              <Icon size={15} className="max-[1201px]:hidden" />
               <span>{label}</span>
             </button>
           ))}
         </fieldset>
         <select
-          className="mode-select"
+          className="hidden rounded-[4px] border border-border bg-surface px-3 py-[9px] text-foreground max-[601px]:block max-[601px]:min-w-0 max-[601px]:flex-1"
           aria-label="Comparison mode"
           value={mode}
           onChange={(event) => onMode(event.target.value)}
@@ -555,7 +568,7 @@ export function ComparisonViewer({
             </option>
           ))}
         </select>
-        <div className="zoom-controls">
+        <div className="flex items-center gap-1">
           <IconButton
             label="Zoom out"
             disabled={scale <= 0.25}
@@ -563,7 +576,7 @@ export function ComparisonViewer({
           >
             <Minus size={16} />
           </IconButton>
-          <output className="mono zoom-value" aria-label="Zoom level">
+          <output className="mono w-14 shrink-0 text-center text-[13px]" aria-label="Zoom level">
             {Math.round(scale * 1000) / 10}%
           </output>
           <IconButton
@@ -598,7 +611,7 @@ export function ComparisonViewer({
             <Focus size={17} />
           </IconButton>
         </div>
-        <div className="image-downloads">
+        <div className="flex items-center gap-1">
           {(
             [
               ["reference", capture.reference],
@@ -610,14 +623,17 @@ export function ComparisonViewer({
               path && (
                 <a
                   key={label}
-                  className="icon-button"
+                  className={`${iconButton()} relative`}
                   href={`/${path}`}
                   download={`${capture.id}-${label}.png`}
                   title={`Download ${label}`}
                   aria-label={`Download ${label}`}
                 >
                   <Download size={16} />
-                  <span className="download-letter" aria-hidden="true">
+                  <span
+                    className="absolute right-0 bottom-0 [font:8px_var(--font-mono)]"
+                    aria-hidden="true"
+                  >
                     {label[0]?.toUpperCase()}
                   </span>
                 </a>
@@ -634,7 +650,7 @@ export function ComparisonViewer({
             .map((lane) => ({ label: lane.label, ...lane.size }))}
         />
         {(mode === "wipe" || mode === "overlay") && (
-          <label className="blend-control">
+          <label className="flex items-center gap-2.5 py-1.5 text-[13px] text-muted max-[601px]:flex-1">
             <span>{mode === "wipe" ? "Wipe" : "Opacity"}</span>
             <input
               type="range"
@@ -642,15 +658,17 @@ export function ComparisonViewer({
               max="100"
               value={blend}
               aria-label={mode === "wipe" ? "Wipe position" : "Test image opacity"}
+              className="w-[120px] accent-accent max-[601px]:min-w-[60px] max-[601px]:flex-1"
               onChange={(event) => setBlend(Number(event.target.value))}
             />
-            <output className="mono">{blend}%</output>
+            <output className="mono w-[34px] text-[12px]">{blend}%</output>
           </label>
         )}
       </div>
+      {/* `zoom-canvas`, `mode-*`, and `is-panning` are test hooks. */}
       <section
         ref={canvas}
-        className={`zoom-canvas mode-${mode}${panning ? " is-panning" : ""}`}
+        className={`zoom-canvas mode-${mode} grid min-h-0 min-w-0 flex-1 gap-3 overflow-hidden select-none ${panning ? "is-panning cursor-grabbing" : "cursor-grab"}`}
         aria-label="Zoomable comparison images"
         aria-keyshortcuts="+ - 0 1 W"
         // biome-ignore lint/a11y/noNoninteractiveTabindex: This image region owns scoped zoom and pan keys while retaining native scrolling.
@@ -822,9 +840,11 @@ export function ComparisonViewer({
               ? crosshair.positions[index]
               : null;
           return (
-            <div key={lane.label} className="image-viewport">
+            // The viewport positions the crosshair outside the native scroller so the
+            // guides cannot extend its scroll range.
+            <div key={lane.label} className="relative min-h-0 min-w-0 overflow-hidden">
               <section
-                className={`image-pane${mode === "side" ? " comparison-lane" : ""}`}
+                className={`image-pane group/lane size-full min-h-0 min-w-0 overflow-auto overscroll-contain border border-border [scrollbar-gutter:stable] ${mode === "side" ? "comparison-lane has-[.comparison-crosshair]:cursor-crosshair" : ""}`}
                 aria-label={`${lane.label} image viewport`}
                 // biome-ignore lint/a11y/noNoninteractiveTabindex: Native scroll panes support scoped keyboard zoom and pan.
                 tabIndex={0}
@@ -840,7 +860,7 @@ export function ComparisonViewer({
                 onPointerCancel={clearCrosshair}
               >
                 <div
-                  className="comparison-stage"
+                  className="comparison-stage [overflow-anchor:none]"
                   style={{
                     width: padding ? size.width * scale + padding.left + padding.right : undefined,
                     paddingLeft: padding?.left,
@@ -850,7 +870,7 @@ export function ComparisonViewer({
                   }}
                 >
                   <div
-                    className="image-surface"
+                    className={`image-surface relative mx-auto overflow-clip bg-canvas [background-image:linear-gradient(45deg,#7d938610_25%,transparent_25%),linear-gradient(-45deg,#7d938610_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#7d938610_75%),linear-gradient(-45deg,transparent_75%,#7d938610_75%)] [background-position:0_0,0_10px,10px_-10px,-10px_0] [background-size:20px_20px] select-none ${panning ? "cursor-grabbing" : "cursor-grab"} ${mode === "side" ? "group-has-[.comparison-crosshair]/lane:cursor-crosshair" : ""}`}
                     style={{
                       width: size.width * scale,
                       height: size.height * scale,
@@ -858,7 +878,7 @@ export function ComparisonViewer({
                   >
                     <div
                       ref={index === 0 ? world : undefined}
-                      className="image-world"
+                      className="image-world absolute top-0 left-0 shrink-0 [&>div]:shrink-0"
                       style={{
                         width: size.width,
                         height: size.height,
@@ -867,28 +887,30 @@ export function ComparisonViewer({
                       }}
                     >
                       {mode === "side" ? (
-                        <div className="comparison-image" style={lane.size}>
+                        <div className="comparison-image relative" style={lane.size}>
                           <ReportImage
                             path={lane.path}
                             alt={`${lane.label}: ${capture.label}`}
                             width={lane.size.width}
                             height={lane.size.height}
                             eager
+                            className="pointer-events-none size-full max-w-none object-contain object-[top_left] select-none"
                           />
                         </div>
                       ) : mode === "wipe" || mode === "overlay" ? (
                         <>
-                          <div className="image-layer" style={referenceSize}>
+                          <div className="absolute top-0 left-0" style={referenceSize}>
                             <ReportImage
                               path={capture.reference}
                               alt={`Reference: ${capture.label}`}
                               width={referenceSize.width}
                               height={referenceSize.height}
                               eager
+                              className="pointer-events-none size-full max-w-none object-contain object-[top_left] select-none"
                             />
                           </div>
                           <div
-                            className="image-layer"
+                            className="absolute top-0 left-0"
                             style={{
                               ...size,
                               opacity: mode === "overlay" ? blend / 100 : 1,
@@ -902,11 +924,15 @@ export function ComparisonViewer({
                                 width={testSize.width}
                                 height={testSize.height}
                                 eager
+                                className="pointer-events-none size-full max-w-none object-contain object-[top_left] select-none"
                               />
                             </div>
                           </div>
                           {mode === "wipe" && (
-                            <div className="wipe-divider" style={{ left: `${blend}%` }} />
+                            <div
+                              className="absolute top-0 bottom-0 w-[3px] bg-[#008f74] [box-shadow:0_0_0_1px_#ffffffa0]"
+                              style={{ left: `${blend}%` }}
+                            />
                           )}
                         </>
                       ) : (
@@ -916,6 +942,7 @@ export function ComparisonViewer({
                           width={size.width}
                           height={size.height}
                           eager
+                          className="pointer-events-none size-full max-w-none object-contain object-[top_left] select-none"
                         />
                       )}
                     </div>
@@ -923,7 +950,7 @@ export function ComparisonViewer({
                 </div>
                 {guide && (
                   <span
-                    className="comparison-crosshair"
+                    className="comparison-crosshair pointer-events-none absolute top-0 left-0 z-1 overflow-clip [transform-origin:top_left]"
                     aria-hidden="true"
                     style={{
                       left: guide.left,
@@ -932,8 +959,14 @@ export function ComparisonViewer({
                       height: guide.height,
                     }}
                   >
-                    <span className="crosshair-horizontal" style={{ top: guide.y }} />
-                    <span className="crosshair-vertical" style={{ left: guide.x }} />
+                    <span
+                      className={`crosshair-horizontal left-0 h-px w-full [transform:translateY(-50%)] ${guideLine}`}
+                      style={{ top: guide.y }}
+                    />
+                    <span
+                      className={`crosshair-vertical top-0 h-full w-px [transform:translateX(-50%)] ${guideLine}`}
+                      style={{ left: guide.x }}
+                    />
                   </span>
                 )}
               </section>

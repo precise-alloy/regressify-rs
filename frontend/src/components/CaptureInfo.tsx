@@ -15,7 +15,11 @@ import {
 import { ExternalLink, Info, X } from "lucide-react";
 import { useId, useState } from "react";
 import { type Capture, formatMismatch, safePageUrl } from "../data/report";
-import { IconButton } from "./ui";
+import { IconButton, iconButton } from "./ui";
+
+// Metadata terms and values.
+const term = "mb-[7px] text-[13px] text-muted";
+const value = "m-0 [overflow-wrap:anywhere]";
 
 export function CaptureInfo({
   capture,
@@ -61,7 +65,7 @@ export function CaptureInfo({
     <>
       <button
         type="button"
-        className="icon-button"
+        className={iconButton()}
         ref={refs.setReference}
         aria-label="Capture information"
         {...getReferenceProps({
@@ -79,20 +83,25 @@ export function CaptureInfo({
             open
             ref={refs.setFloating}
             style={floatingStyles}
-            className="info-popover"
+            className="z-50 m-0 max-h-[min(640px,calc(100dvh-24px))] w-[min(460px,calc(100vw-24px))] overflow-y-auto overscroll-contain rounded-[6px] border border-border bg-surface p-4 text-foreground select-text [box-shadow:0_8px_32px_#00000026]"
             aria-labelledby={titleId}
             {...getFloatingProps()}
           >
-            <div className="info-heading">
-              <h2 id={titleId}>Capture information</h2>
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h2 id={titleId} className="text-[15px] font-semibold">
+                Capture information
+              </h2>
               <IconButton label="Close capture information" onClick={close}>
                 <X size={16} />
               </IconButton>
             </div>
-            <dl className="capture-metadata">
+            {/* `capture-metadata` is a test hook. */}
+            <dl className="capture-metadata m-0 grid grid-cols-2 gap-x-5 gap-y-3.5 text-[14px] max-[601px]:grid-cols-[minmax(0,1fr)] max-[601px]:gap-4">
               <div>
-                <dt>Difference</dt>
-                <dd className={`mono ${capture.status === "fail" ? "text-fail" : "text-pass"}`}>
+                <dt className={term}>Difference</dt>
+                <dd
+                  className={`mono ${value} ${capture.status === "fail" ? "text-fail" : "text-pass"}`}
+                >
                   {capture.mismatch === null
                     ? "Not compared"
                     : `${formatMismatch(capture.mismatch)}%`}
@@ -100,46 +109,48 @@ export function CaptureInfo({
               </div>
               {capture.mismatchPixels !== undefined && (
                 <div>
-                  <dt>Mismatched pixels</dt>
-                  <dd className="mono">{capture.mismatchPixels.toLocaleString("en")}</dd>
+                  <dt className={term}>Mismatched pixels</dt>
+                  <dd className={`mono ${value}`}>{capture.mismatchPixels.toLocaleString("en")}</dd>
                 </div>
               )}
               <div>
-                <dt>Threshold</dt>
-                <dd className="mono">{capture.threshold}%</dd>
+                <dt className={term}>Threshold</dt>
+                <dd className={`mono ${value}`}>{capture.threshold}%</dd>
               </div>
               <div>
-                <dt>Suite</dt>
-                <dd title={suiteId}>{suiteName}</dd>
+                <dt className={term}>Suite</dt>
+                <dd title={suiteId} className={value}>
+                  {suiteName}
+                </dd>
               </div>
               <div>
-                <dt>Scenario</dt>
-                <dd>{capture.scenario || "Unspecified"}</dd>
+                <dt className={term}>Scenario</dt>
+                <dd className={value}>{capture.scenario || "Unspecified"}</dd>
               </div>
               <div>
-                <dt>Capture</dt>
-                <dd className="mono">{capture.id}</dd>
+                <dt className={term}>Capture</dt>
+                <dd className={`mono ${value}`}>{capture.id}</dd>
               </div>
               <div>
-                <dt>Run</dt>
-                <dd className="mono">{runId || "Unknown"}</dd>
+                <dt className={term}>Run</dt>
+                <dd className={`mono ${value}`}>{runId || "Unknown"}</dd>
               </div>
               <div>
-                <dt>Selector</dt>
-                <dd className="mono">{capture.selector || "Document"}</dd>
+                <dt className={term}>Selector</dt>
+                <dd className={`mono ${value}`}>{capture.selector || "Document"}</dd>
               </div>
               {dimensions.map((size) => (
                 <div key={size.label}>
-                  <dt>{size.label} size</dt>
-                  <dd className="mono">
+                  <dt className={term}>{size.label} size</dt>
+                  <dd className={`mono ${value}`}>
                     {size.width} x {size.height}
                   </dd>
                 </div>
               ))}
               {capture.dimensions && !capture.dimensions.same && (
-                <div className="metadata-wide">
-                  <dt>Dimension difference</dt>
-                  <dd className="mono">
+                <div className="col-span-full">
+                  <dt className={term}>Dimension difference</dt>
+                  <dd className={`mono ${value}`}>
                     {capture.dimensions.width > 0 ? "+" : ""}
                     {capture.dimensions.width}px width, {capture.dimensions.height > 0 ? "+" : ""}
                     {capture.dimensions.height}px height
@@ -154,10 +165,15 @@ export function CaptureInfo({
               ).map(
                 ([label, url]) =>
                   safePageUrl(url) && (
-                    <div className="metadata-wide" key={label}>
-                      <dt>{label}</dt>
-                      <dd>
-                        <a href={safePageUrl(url)} target="_blank" rel="noopener noreferrer">
+                    <div className="col-span-full" key={label}>
+                      <dt className={term}>{label}</dt>
+                      <dd className={value}>
+                        <a
+                          href={safePageUrl(url)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 text-accent underline"
+                        >
                           {url}
                           <ExternalLink size={13} />
                         </a>
@@ -167,9 +183,14 @@ export function CaptureInfo({
               )}
             </dl>
             {(capture.error || capture.comparisonError) && (
-              <div className="capture-failure" role="alert">
+              <div
+                className="mt-4 border-l-[3px] border-l-error bg-error-soft p-4 text-[12px] text-error"
+                role="alert"
+              >
                 <strong>{capture.error ? "Engine error" : "Comparison failed"}</strong>
-                <pre>{capture.error || capture.comparisonError}</pre>
+                <pre className="mt-2 [font:11px_var(--font-mono)] whitespace-pre-wrap">
+                  {capture.error || capture.comparisonError}
+                </pre>
               </div>
             )}
           </dialog>

@@ -6,6 +6,9 @@ import { IconButton } from "./components/ui";
 import { fetchSiteStatus, type SiteStatus } from "./data/landing";
 import { passRate } from "./data/report";
 
+const countLabel = "text-[11px] text-muted";
+const countValue = "m-0 font-mono [overflow-wrap:anywhere]";
+
 function SiteStatusPanel({ url, heading }: { url: string; heading: string }) {
   const [attempt, setAttempt] = useState(0);
   const [result, setResult] = useState<SiteStatus | "loading" | "unavailable">("loading");
@@ -28,15 +31,16 @@ function SiteStatusPanel({ url, heading }: { url: string; heading: string }) {
       label={`Refresh status for ${heading}`}
       disabled={result === "loading"}
       onClick={() => setAttempt((value) => value + 1)}
+      className="ml-auto"
     >
       <RefreshCw size={16} />
     </IconButton>
   );
   if (typeof result === "string") {
     return (
-      <div className="landing-status-message muted" aria-live="polite">
+      <div className="muted flex min-h-[34px] items-center gap-2" aria-live="polite">
         {result === "loading" ? (
-          <LoaderCircle size={17} className="landing-status-spinner" />
+          <LoaderCircle size={17} className="animate-spin motion-reduce:animate-none" />
         ) : (
           <CircleAlert size={17} />
         )}
@@ -46,38 +50,43 @@ function SiteStatusPanel({ url, heading }: { url: string; heading: string }) {
     );
   }
   return (
-    <div className="landing-status-result" aria-live="polite">
-      <div className="landing-status-heading">
+    <div aria-live="polite">
+      <div className="flex min-h-[34px] items-center gap-2">
         {result.total === 0 ? (
-          <span className="muted">No captures</span>
+          <span className="muted flex min-h-[34px] items-center gap-2">No captures</span>
         ) : (
-          <span className={result.failed ? "text-fail" : "text-pass"}>
+          <span
+            className={`flex min-h-[34px] items-center gap-2 ${result.failed ? "text-fail" : "text-pass"}`}
+          >
             {result.failed ? <CircleAlert size={17} /> : <CheckCircle2 size={17} />}
-            <strong>{passRate(result.passed, result.total)}%</strong> passed
+            <strong className="text-[22px] font-semibold">
+              {passRate(result.passed, result.total)}%
+            </strong>{" "}
+            passed
           </span>
         )}
         {refresh}
       </div>
-      <dl className="landing-status-counts">
+      <dl className="my-2.5 grid grid-cols-4 gap-2">
         <div>
-          <dt>Suites</dt>
-          <dd>{result.suites}</dd>
+          <dt className={countLabel}>Suites</dt>
+          <dd className={countValue}>{result.suites}</dd>
         </div>
         <div>
-          <dt>Captures</dt>
-          <dd>{result.total}</dd>
+          <dt className={countLabel}>Captures</dt>
+          <dd className={countValue}>{result.total}</dd>
         </div>
         <div>
-          <dt>Failed</dt>
-          <dd className={result.failed ? "text-fail" : ""}>{result.failed}</dd>
+          <dt className={countLabel}>Failed</dt>
+          <dd className={`${countValue} ${result.failed ? "text-fail" : ""}`}>{result.failed}</dd>
         </div>
         <div>
-          <dt>Errors</dt>
-          <dd className={result.errors ? "text-fail" : ""}>{result.errors}</dd>
+          <dt className={countLabel}>Errors</dt>
+          <dd className={`${countValue} ${result.errors ? "text-fail" : ""}`}>{result.errors}</dd>
         </div>
       </dl>
       <time
-        className="landing-status-date mono muted"
+        className="mono muted text-[10px]"
         dateTime={result.generatedAt}
         title="Report generated at"
       >

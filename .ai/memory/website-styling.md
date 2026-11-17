@@ -1,4 +1,4 @@
-# Website Styling
+# Website and Snapshot Styling
 
 Verified: 2026-11-17 against [tailwind.css](../../website/src/styles/tailwind.css),
 [global.css](../../website/src/styles/global.css),
@@ -45,3 +45,10 @@ Verified: 2026-11-17 against [tailwind.css](../../website/src/styles/tailwind.cs
   changes, such as `border-border` coloring all four sides.
 - In Git Bash, an environment value starting with `/` is rewritten to a Windows
   path; pass route lists without leading slashes.
+- The same method verified the snapshot frontend migration (`frontend/`) against
+  two Vite dev servers (old checkout and working tree) on the synthetic fixture:
+  13 routes, five widths around its breakpoints, both themes, and resting, hover,
+  focus, Settings, suite-menu, and Info states. Sub-pixel `margin-*` on viewer
+  elements in image routes is baseline noise.
+- Tailwind cannot extract a class written directly against a template
+  expression (`print:hidden${x}`) and silently omits it; keep a space before `${`.

@@ -9,7 +9,7 @@ import {
   matchesLog,
 } from "../data/logs";
 import type { ArchiveState, Capture } from "../data/report";
-import { IconButton } from "./ui";
+import { IconButton, segmented, segmentedButton } from "./ui";
 
 const textEncoder = new TextEncoder();
 const availability: Record<ArchiveState, string> = {
@@ -19,6 +19,8 @@ const availability: Record<ArchiveState, string> = {
   legacyUnavailable: "Legacy capture: log not available",
   loadingError: "Capture log could not be loaded",
 };
+
+const logLabel = "flex min-w-0 flex-col gap-1 text-[12px]";
 
 export function CaptureLog({
   capture,
@@ -117,24 +119,26 @@ export function CaptureLog({
     }
   }
   return (
-    <section className="capture-log" aria-label="Capture Log">
-      <div className="log-toolbar">
-        <fieldset className="segmented" aria-label="Log execution">
+    <section className="w-full min-w-0" aria-label="Capture Log">
+      <div className="flex flex-wrap gap-2.5 border-b border-b-border py-3 [align-items:end] print:hidden">
+        <fieldset className={`${segmented} max-[601px]:basis-full`} aria-label="Log execution">
           {(["reference", "test"] as const).map((value) => (
             <button
               type="button"
               key={value}
               aria-pressed={role === value}
+              className={segmentedButton}
               onClick={() => set("logRole", value)}
             >
               {value === "reference" ? "Reference" : "Test"}
             </button>
           ))}
         </fieldset>
-        <label>
+        <label className={logLabel}>
           Severity
           <select
             aria-label="Log severity"
+            className="max-w-full min-h-8 rounded-[4px] border border-border bg-surface px-2 py-1 text-foreground max-[601px]:w-[150px]"
             value={level}
             onChange={(event) => set("logLevel", event.target.value)}
           >
@@ -146,10 +150,11 @@ export function CaptureLog({
             ))}
           </select>
         </label>
-        <label>
+        <label className={logLabel}>
           Stage
           <select
             aria-label="Log stage"
+            className="max-w-full min-h-8 rounded-[4px] border border-border bg-surface px-2 py-1 text-foreground max-[601px]:w-[150px]"
             value={stage}
             onChange={(event) => set("logStage", event.target.value)}
           >
@@ -161,9 +166,10 @@ export function CaptureLog({
             ))}
           </select>
         </label>
-        <label className="log-search">
+        <label className={`${logLabel} flex-[1_1_160px]`}>
           Search
           <input
+            className="max-w-full min-h-8 rounded-[4px] border border-border bg-surface px-2 py-1 text-foreground"
             type="search"
             aria-label="Search capture log"
             value={search}
@@ -193,7 +199,11 @@ export function CaptureLog({
           <Download size={16} />
         </IconButton>
       </div>
-      <div className="log-availability" data-log-state={shownState} role="status">
+      <div
+        className="flex flex-wrap gap-2.5 py-2.5 text-[12px] not-data-[log-state=complete]:text-error"
+        data-log-state={shownState}
+        role="status"
+      >
         <span>{availability[shownState]}</span>
         {execution && (
           <span className="mono">
@@ -214,19 +224,28 @@ export function CaptureLog({
       {loading ? (
         <p role="status">Loading capture log...</p>
       ) : (
-        <ol className="log-records" aria-label="Execution timeline">
+        // `log-records` is a test hook.
+        <ol className="log-records m-0 p-0 [list-style:none]" aria-label="Execution timeline">
           {filtered.map((record) => {
             const timestamp = new Date(record.timestampUtcMs).toISOString();
             return (
-              <li key={`${record.operationId}-${record.sequence}`} data-severity={record.severity}>
-                <time dateTime={timestamp}>{timestamp.slice(11, 23)}</time>
-                <pre>{formatLogRecord(record)}</pre>
+              <li
+                key={`${record.operationId}-${record.sequence}`}
+                data-severity={record.severity}
+                className="group/record grid grid-cols-[100px_minmax(0,1fr)] gap-2.5 border-b border-b-border py-2 max-[601px]:grid-cols-[minmax(0,1fr)] max-[601px]:gap-0.5"
+              >
+                <time dateTime={timestamp} className="font-mono text-[11px] text-muted">
+                  {timestamp.slice(11, 23)}
+                </time>
+                <pre className="m-0 font-mono text-[12px] leading-[1.6] whitespace-pre-wrap [overflow-wrap:anywhere] group-data-[severity=error]/record:text-fail group-data-[severity=warn]/record:text-error">
+                  {formatLogRecord(record)}
+                </pre>
               </li>
             );
           })}
         </ol>
       )}
-      <div className="log-pagination">
+      <div className="flex items-center gap-3 py-3 [justify-content:end]">
         <IconButton
           label="Previous log chunk"
           disabled={index === 0 || loading}

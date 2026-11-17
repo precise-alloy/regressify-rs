@@ -3,6 +3,23 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Snapshot Frontend Tailwind Migration (2026-11-17)
+
+- Resolved: the snapshot frontend's React components now use Tailwind utilities
+  ([styling notes](frontend/README.md#styling)); `src/styles.css` dropped from
+  2,131 to about 455 lines and keeps only tokens, element defaults, and the
+  classes shared with the [Rust landing renderer](src/desktop/landing.rs) and
+  Markdown subheadings. Computed styles of every element matched the previous
+  dev build across 13 routes, five widths, both themes, and resting, hover,
+  focus, Settings, suite-menu, and Info states (only sub-pixel viewer margins,
+  which also vary between baseline runs, differ).
+- Not covered by the computed-style comparison: the landing status widget and
+  viewer interactions the harness does not open (panning, wipe drag, crosshair).
+  They were converted rule by rule and are covered by the browser tests.
+- Observed: `comparison images are centered without labels and oversized images
+  stay reachable` failed once on desktop before the migration and passed in later
+  runs, so it may be timing-sensitive.
+
 ## Website Tailwind Adoption (2026-11-17)
 
 - Resolved: the website's components, layouts, and pages now use Tailwind CSS v4

@@ -169,6 +169,38 @@ The tests expect the supplied synthetic workspace, not arbitrary user reports.
 - [hosting](hosting): Azure/Netlify fallback, security, and cache policies.
 - [tests](tests): browser workflows and a synthetic screenshot page.
 
+## Styling
+
+Components are styled with Tailwind CSS v4 utilities. [src/styles.css](src/styles.css)
+holds the fonts, the light/dark palette variables (mirrored by the critical palette
+in [index.html](index.html)), element defaults in `@layer base`, and in
+`@layer components` only the classes that markup outside React also uses: the
+landing page pre-rendered by [landing.rs](../src/desktop/landing.rs) and safe
+Markdown inside `.report-subheading`. Keep those class names in sync with the
+renderer. Shared class lists for primitives (icon buttons, segmented controls,
+buttons, status dots) are exported from [ui.tsx](src/components/ui.tsx).
+
+- **Palette utilities.** `@theme inline` maps the variables to `bg-surface`,
+  `bg-subtle`, `text-foreground`, `text-muted`, `border-border`, `text-accent`,
+  `bg-accent-soft`, `text-pass`, `text-fail`, `bg-error-soft`, `bg-canvas`, and so on,
+  so a theme switch changes only the variables.
+- **Hooks.** Semantic classes that tests or scripts select by (for example
+  `.comparison-lane`, `.image-pane`, `.capture-card`, `.results-table`,
+  `.review-scroll`) stay on their elements without styles. Check `tests/` and
+  `querySelector`/`closest` calls before removing one.
+- **Variants.** `hover:` is a plain `:hover` (Tailwind's default requires
+  `@media (hover: hover)`). Write `max-width: 760px` as `max-[761px]:`, because
+  Tailwind's `max-*` variants exclude their value. Name nested groups
+  (`group/card`, `group-hover/card:`).
+- **Class extraction.** Leave a space before `${...}` in class template literals:
+  Tailwind cannot extract a class written directly against an expression, such
+  as `print:hidden${extra}`, and silently omits it.
+- **Exact equivalents.** Use `[border:0]`, `[outline:0]`, `[list-style:none]`, and
+  `[box-shadow:...]` when the intent is the CSS shorthand; `border-0`, `outline-0`,
+  `list-none`, and `shadow-*` leave a solid style, keep the list position, or add
+  ring layers. Use `rounded-[50%]` for circles, `text-[13px]` when only the size
+  changes, and `[transition:...]` when the timing should stay `ease`.
+
 ## Landing Pages
 
 The desktop [landing renderer](../src/desktop/landing.rs) pre-renders headings,

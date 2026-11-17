@@ -58,8 +58,8 @@ assistant's private memory store. Keep this directory out of ignore rules.
   sampled progress warnings, and local cancellation semantics.
 - [Cloudflare deployment](deployment-cloudflare.md): static-asset uploads, scoped
   SPA rewrites, provider limits, and authorized live verification.
-- [Website styling](website-styling.md): token-only Tailwind theme, cascade
-  layers, utility ordering pitfalls, and computed-style conversion checks.
+- [Website and snapshot styling](website-styling.md): Tailwind themes, cascade
+  layers, utility pitfalls, and computed-style conversion checks.
 - [Snapshot frontend](snapshot-frontend.md): query-versioned SPA assets, build/PR workflow,
   schema boundaries, and production-fixture browser checks.
 - [Desktop publishing](desktop-publishing.md): managed landing apps, named tokens,
