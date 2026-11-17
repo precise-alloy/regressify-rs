@@ -5,6 +5,26 @@ export const siteColumns = [
   ['total_bytes', 'Size (MiB)'], ['duration_ms', 'Duration'],
 ] as const;
 export type SiteColumn = typeof siteColumns[number][0];
+// Tailwind classes for markup built here (src/lib is a Tailwind source). Below
+// 768px the table keeps Site, Deployed, and details; the rest stays in details.
+const focusRing = 'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary';
+const cellBase = 'border-t border-t-border align-middle [overflow-wrap:anywhere]';
+const cellClass = `${cellBase} p-md max-[768px]:px-sm`;
+const metricCell = `${cellClass} text-right font-mono tabular-nums`;
+const hiddenOnPhone = new Set<SiteColumn>(['file_count', 'total_bytes', 'duration_ms']);
+export const adminClasses = {
+  row: 'hover:bg-list-hover',
+  rowIndex: `${metricCell} text-muted-foreground max-[768px]:hidden`,
+  urlCell: cellClass,
+  metricCell: (key: SiteColumn) => (hiddenOnPhone.has(key) ? `${metricCell} max-[768px]:hidden` : metricCell),
+  detailsCell: `${cellBase} w-[3.5rem] p-xs text-center`,
+  urlLink: `line-clamp-2 no-underline hover:underline ${focusRing}`,
+  strong: 'text-inherit',
+  term: 'text-muted-foreground [overflow-wrap:anywhere]',
+  description: 'm-0 min-w-0 [overflow-wrap:anywhere] tabular-nums',
+  descriptionJson: 'm-0 min-w-0 [overflow-wrap:anywhere] tabular-nums whitespace-pre-wrap font-mono',
+  detailLink: focusRing,
+} as const;
 const counts = new Intl.NumberFormat('de-DE');
 const sizes = new Intl.NumberFormat('en-US', { useGrouping: false, minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
@@ -170,8 +190,9 @@ export function mountAdmin(): void {
     const fragment = document.createDocumentFragment();
     for (const [index, site] of selected.entries()) {
       const row = document.createElement('tr');
+      row.className = adminClasses.row;
       const number = row.insertCell();
-      number.className = 'row-index metric';
+      number.className = adminClasses.rowIndex;
       number.textContent = String(index + 1);
       for (const [key] of siteColumns) {
         const cell = row.insertCell();
@@ -179,9 +200,11 @@ export function mountAdmin(): void {
         const value = site[key];
         cell.textContent = formatSiteValue(key, value);
         if (key === 'url') {
+          cell.className = adminClasses.urlCell;
           const url = safeSiteUrl(site.url);
           if (url) {
             const link = document.createElement('a');
+            link.className = adminClasses.urlLink;
             link.href = url.href;
             link.target = '_blank';
             link.rel = 'noopener noreferrer';
@@ -191,7 +214,7 @@ export function mountAdmin(): void {
           }
           cell.dir = 'ltr';
         } else {
-          cell.className = 'metric';
+          cell.className = adminClasses.metricCell(key);
           if (key === 'datetime' && typeof value === 'string') cell.title = new Date(value).toLocaleString();
           const range = ranges.get(key);
           if (range && typeof value === 'number') {
@@ -199,6 +222,7 @@ export function mountAdmin(): void {
             cell.style.color = style.color;
             if (style.bold) {
               const strong = document.createElement('strong');
+              strong.className = adminClasses.strong;
               strong.textContent = cell.textContent;
               cell.replaceChildren(strong);
             }
@@ -206,7 +230,7 @@ export function mountAdmin(): void {
         }
       }
       const actions = row.insertCell();
-      actions.className = 'details-column';
+      actions.className = adminClasses.detailsCell;
       const button = detailsTemplate.content.firstElementChild!.cloneNode(true) as HTMLButtonElement;
       button.dataset.siteDetails = String(index);
       button.setAttribute('aria-label', `Deployment details for ${site.url}`);
@@ -233,15 +257,18 @@ export function mountAdmin(): void {
     const fragment = document.createDocumentFragment();
     for (const [key, label, value] of siteDetailEntries(site)) {
       const term = document.createElement('dt');
+      term.className = adminClasses.term;
       term.textContent = label;
       const description = document.createElement('dd');
+      description.className = adminClasses.description;
       description.textContent = formatSiteDetailValue(key, value);
-      if (value !== null && typeof value === 'object') description.className = 'detail-json';
+      if (value !== null && typeof value === 'object') description.className = adminClasses.descriptionJson;
       if (key === 'url') {
         description.dir = 'ltr';
         const url = safeSiteUrl(site.url);
         if (url) {
           const link = document.createElement('a');
+          link.className = adminClasses.detailLink;
           link.href = url.href;
           link.target = '_blank';
           link.rel = 'noopener noreferrer';

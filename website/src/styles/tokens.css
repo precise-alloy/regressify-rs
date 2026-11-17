@@ -147,6 +147,9 @@
 
   --duration-fast: 120ms;
 
+  /* Web-only: the widest page column (.page-container and `max-w-page`). */
+  --page-width: 1080px;
+
   /*
    * Sticky header height (Header.astro): 2px gradient + 48px bar + 1px border.
   * The mobile navigation overlays content without adding another header row.

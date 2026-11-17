@@ -15,11 +15,11 @@ const { title, description, date, updated, author } = Astro.props;
 ---
 
 <BaseLayout title={title} description={description} type="article">
-  <article class="container post">
-    <header class="post-header">
-      <a href="/blog/" class="back">Blog</a>
-      <h1>{title}</h1>
-      <p class="meta">
+  <article class="page-container max-w-[calc(72ch+2*var(--space-xl))] py-xxl">
+    <header class="mb-xl grid gap-sm">
+      <a href="/blog/" class="text-(length:--text-sm) text-muted-foreground">Blog</a>
+      <h1 class="text-3xl leading-[1.2]">{title}</h1>
+      <p class="text-(length:--text-sm) text-muted-foreground">
         <time datetime={date.toISOString()}>{formatDate(date)}</time>
         {author && <span> · {author}</span>}
         {
@@ -38,31 +38,3 @@ const { title, description, date, updated, author } = Astro.props;
   </article>
   <ImageZoom />
 </BaseLayout>
-
-<style>
-  .post {
-    max-width: calc(72ch + 2 * var(--space-xl));
-    padding-block: var(--space-xxl);
-  }
-
-  .post-header {
-    display: grid;
-    gap: var(--space-sm);
-    margin-bottom: var(--space-xl);
-  }
-
-  .back {
-    font-size: var(--text-sm);
-    color: var(--muted-foreground);
-  }
-
-  h1 {
-    font-size: var(--text-3xl);
-    line-height: 1.2;
-  }
-
-  .meta {
-    color: var(--muted-foreground);
-    font-size: var(--text-sm);
-  }
-</style>

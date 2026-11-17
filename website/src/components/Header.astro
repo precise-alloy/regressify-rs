@@ -9,21 +9,28 @@ import { HEADER_LINKS, SITE } from '../config/site';
 import { isActivePath } from '../lib/nav';
 
 const isActive = (href: string) => isActivePath(Astro.url.pathname, href);
+
+// Underline tabs with the desktop's 2px active indicator.
+const tabClass =
+  'inline-flex min-h-[36px] shrink-0 items-center whitespace-nowrap border-b-(length:--tab-underline-width) border-b-transparent px-0 text-(length:--text-sm) text-tab-foreground no-underline hover:text-tab-active-foreground aria-[current=page]:border-b-tab-underline aria-[current=page]:text-tab-active-foreground';
+const mobileLinkClass =
+  'flex min-h-[44px] items-center rounded-sm px-md py-sm text-(length:--text-sm) text-inherit no-underline [overflow-wrap:anywhere] hover:bg-accent hover:text-accent-foreground aria-[current=page]:bg-accent aria-[current=page]:text-accent-foreground';
 ---
 
-<header class="site-header">
-  <div class="container bar">
+{/* The ::before is the desktop title bar's 2px brand gradient stripe. */}
+<header class="sticky top-0 z-5 border-b border-b-title-bar-border bg-title-bar before:block before:h-[2px] before:bg-(image:--brand-gradient)">
+  <div class="page-container flex h-[48px] flex-nowrap items-center gap-x-sm sm:gap-x-xl">
     <Brand />
-    <nav aria-label="Main" class="tabs">
+    <nav aria-label="Main" class="hidden min-w-0 flex-1 gap-lg self-stretch overflow-x-auto sm:flex">
       {
         HEADER_LINKS.map((link) => (
-          <a href={link.href} class="tab" aria-current={isActive(link.href) ? 'page' : undefined}>
+          <a href={link.href} class={tabClass} aria-current={isActive(link.href) ? 'page' : undefined}>
             {link.label}
           </a>
         ))
       }
     </nav>
-    <div class="actions">
+    <div class="ml-auto flex shrink-0 items-center gap-xs sm:gap-sm">
       {
         SITE.repoUrl && (
           <Button variant="ghost" size="sm" icon href={SITE.repoUrl} aria-label="Regressify source on GitHub" title="Source on GitHub">
@@ -32,15 +39,21 @@ const isActive = (href: string) => isActivePath(Astro.url.pathname, href);
         )
       }
       <ThemeToggle />
-      <details class="mobile-nav">
-        <summary aria-label="Navigation menu" title="Navigation menu">
-          <Icon name="menu" class="menu-open" size={18} />
-          <Icon name="x" class="menu-close" size={18} />
+      {/* `mobile-nav` is the script hook. */}
+      <details class="mobile-nav group/menu relative flex-[0_0_32px] sm:hidden">
+        <summary
+          aria-label="Navigation menu"
+          title="Navigation menu"
+          class="grid size-control-md cursor-pointer place-items-center [list-style:none] rounded-md text-button-ghost-foreground hover:bg-button-ghost-hover [&::-webkit-details-marker]:hidden">
+          <Icon name="menu" class="group-open/menu:hidden" size={18} />
+          <Icon name="x" class="hidden group-open/menu:block" size={18} />
         </summary>
-        <nav aria-label="Main" class="mobile-links">
+        <nav
+          aria-label="Main"
+          class="absolute top-[calc(100%+8px)] right-0 max-h-[calc(100dvh-var(--header-height)-16px)] w-[min(20rem,calc(100vw-32px))] overflow-y-auto rounded-md border border-border bg-popover p-xs text-popover-foreground [box-shadow:var(--shadow-md)]">
           {
             HEADER_LINKS.map((link) => (
-              <a href={link.href} aria-current={isActive(link.href) ? 'page' : undefined}>
+              <a href={link.href} class={mobileLinkClass} aria-current={isActive(link.href) ? 'page' : undefined}>
                 {link.label}
               </a>
             ))
@@ -75,151 +88,3 @@ const isActive = (href: string) => isActivePath(Astro.url.pathname, href);
     });
   }
 </script>
-
-<style>
-  .site-header {
-    position: sticky;
-    top: 0;
-    z-index: 5;
-    background: var(--title-bar);
-    border-bottom: var(--border-width) solid var(--title-bar-border);
-  }
-
-  .site-header::before {
-    content: '';
-    display: block;
-    height: 2px;
-    background: var(--brand-gradient);
-  }
-
-  .bar {
-    display: flex;
-    flex-wrap: nowrap;
-    align-items: center;
-    column-gap: var(--space-sm);
-    height: 48px;
-  }
-
-  .tabs {
-    display: none;
-    align-self: stretch;
-    gap: var(--space-lg);
-    flex: 1;
-    min-width: 0;
-    overflow-x: auto;
-  }
-
-  .tab {
-    display: inline-flex;
-    align-items: center;
-    padding-inline: 0;
-    min-height: 36px;
-    color: var(--tab-foreground);
-    font-size: var(--text-sm);
-    text-decoration: none;
-    border-bottom: var(--tab-underline-width) solid transparent;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-
-  .tab:hover {
-    color: var(--tab-active-foreground);
-  }
-
-  .tab[aria-current='page'] {
-    color: var(--tab-active-foreground);
-    border-bottom-color: var(--tab-underline);
-  }
-
-  .actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-xs);
-    margin-left: auto;
-    flex-shrink: 0;
-  }
-
-  .mobile-nav {
-    position: relative;
-    flex: 0 0 32px;
-  }
-
-  .mobile-nav summary {
-    display: grid;
-    place-items: center;
-    width: 32px;
-    height: 32px;
-    border-radius: var(--radius-md);
-    color: var(--button-ghost-foreground);
-    cursor: pointer;
-    list-style: none;
-  }
-
-  .mobile-nav summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .mobile-nav summary:hover {
-    background: var(--button-ghost-hover);
-  }
-
-  .mobile-nav :global(.menu-close),
-  .mobile-nav[open] :global(.menu-open) {
-    display: none;
-  }
-
-  .mobile-nav[open] :global(.menu-close) {
-    display: block;
-  }
-
-  .mobile-links {
-    position: absolute;
-    top: calc(100% + 8px);
-    right: 0;
-    width: min(20rem, calc(100vw - 32px));
-    max-height: calc(100dvh - var(--header-height) - 16px);
-    overflow-y: auto;
-    padding: var(--space-xs);
-    border: var(--border-width) solid var(--border);
-    border-radius: var(--radius-md);
-    background: var(--popover);
-    color: var(--popover-foreground);
-    box-shadow: var(--shadow-md);
-  }
-
-  .mobile-links a {
-    display: flex;
-    align-items: center;
-    min-height: 44px;
-    padding: var(--space-sm) var(--space-md);
-    border-radius: var(--radius-sm);
-    color: inherit;
-    font-size: var(--text-sm);
-    text-decoration: none;
-    overflow-wrap: anywhere;
-  }
-
-  .mobile-links a:hover,
-  .mobile-links a[aria-current='page'] {
-    background: var(--accent);
-    color: var(--accent-foreground);
-  }
-
-  @media (min-width: 640px) {
-    .bar {
-      column-gap: var(--space-xl);
-    }
-
-    .tabs {
-      display: flex;
-    }
-
-    .actions {
-      gap: var(--space-sm);
-    }
-
-    .mobile-nav {
-      display: none;
-    }
-  }
-</style>

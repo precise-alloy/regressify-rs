@@ -150,11 +150,18 @@ html:not(.js) .requires-js {
   background: var(--selection);
 }
 
-/* Same focus shape as the rest of the site (global.css). */
-:focus-visible {
-  outline: 2px solid transparent;
-  outline-offset: 2px;
-  box-shadow: 0 0 0 3px var(--focus-indicator);
+/*
+ * Same focus shape as the rest of the site (global.css). It sits in the `base`
+ * layer, as on landing pages: after Starlight's layers, so it beats them, and
+ * before Tailwind's utilities, so a component's focus or selected-state
+ * utility (the theme toggle's outline) still wins.
+ */
+@layer base {
+  :focus-visible {
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 3px var(--focus-indicator);
+  }
 }
 
 /*
@@ -188,6 +195,58 @@ html:not(.js) .requires-js {
 .sl-menu-button:hover,
 .sl-menu-button:has(~ :popover-open) {
   background-color: var(--button-ghost-hover);
+}
+
+/*
+ * The docs header bar (components/starlight/Header.astro). From 50rem it uses
+ * Starlight's header grid: the first column runs to the content column's left
+ * edge so the search box lines up with the page content, as in the Astro docs.
+ * Copied from Starlight's Header.astro (0.42.7), which the override replaces;
+ * the custom properties it reads are set by Starlight's PageFrame and Page.
+ */
+.sl-header {
+  display: flex;
+  gap: var(--sl-nav-gap);
+  justify-content: space-between;
+  align-items: center;
+  height: 100%;
+}
+
+@media (min-width: 50rem) {
+  :root[data-has-sidebar] {
+    --__sidebar-pad: calc(2 * var(--sl-nav-pad-x));
+  }
+
+  :root:not([data-has-toc]) {
+    --__toc-width: 0rem;
+  }
+
+  .sl-header {
+    --__sidebar-width: max(0rem, var(--sl-content-inline-start, 0rem) - var(--sl-nav-pad-x));
+    --__main-column-fr: calc(
+      (
+          100% + var(--__sidebar-pad, 0rem) - var(--__toc-width, var(--sl-sidebar-width)) -
+            (2 * var(--__toc-width, var(--sl-nav-pad-x))) - var(--sl-content-inline-start, 0rem) -
+            var(--sl-content-width)
+        ) / 2
+    );
+    display: grid;
+    /*
+     * Starlight's first track is minmax(<sidebar width>, auto), a hard minimum.
+     * Just above 50rem the site links and controls in the third track are wider
+     * than Starlight's, so that minimum pushed them past the right gutter.
+     * Making the sidebar width the track's maximum instead keeps the search
+     * aligned whenever there is room and lets the first track give way when
+     * there is not (the grid fills fixed maximums before the 1fr track).
+     */
+    grid-template-columns:
+      minmax(auto, calc(var(--__sidebar-width) + max(0rem, var(--__main-column-fr) - var(--sl-nav-gap))))
+      1fr
+      auto;
+    /* Rows fill the bar height (no align-content: center as in Starlight) so
+       the tab underline sits on the header's bottom edge like the site header. */
+    align-items: center;
+  }
 }
 
 /* ---- Search ---- */

@@ -1,0 +1,210 @@
+/*
+ * Tailwind CSS entry, shared by the landing pages (through global.css) and the
+ * Starlight docs (through `customCss` in astro.config.mjs).
+ *
+ * Layer order: Starlight's styles live in `@layer starlight.*`; listing
+ * `starlight` first keeps utilities above it on docs pages. On landing pages
+ * global.css puts its element rules in `base` and its shared classes in
+ * `components`, so a utility always beats them. Unlayered CSS (tokens.css and
+ * starlight.css) still beats every layer.
+ *
+ * Only Tailwind's utilities are imported, without its default theme or its
+ * Preflight reset: global.css stays the reset on landing pages and Starlight
+ * keeps its own on docs pages.
+ */
+@layer starlight, base, components, utilities;
+
+/*
+ * Automatic source detection is off: it would scan the Markdown content and
+ * every other file in the project, generating utilities for prose words that
+ * happen to match a class name. Utilities are only written in components,
+ * layouts, pages, and the TypeScript that builds markup.
+ */
+@import 'tailwindcss/utilities.css' layer(utilities) source(none);
+@source '../components';
+@source '../layouts';
+@source '../pages';
+@source '../lib';
+
+/*
+ * The theme exposes only the design tokens in tokens.css, so every utility
+ * value comes from the desktop theme (for example `bg-muted`, `p-lg`,
+ * `text-sm`, `rounded-md`). Anything else needs an explicit arbitrary value.
+ *
+ * `reference` emits no CSS variables and `inline` makes each utility use the
+ * token directly (`.p-lg { padding: var(--space-lg) }`). tokens.css stays the
+ * single source of truth, light-dark() colors switch with the theme, and the
+ * entries that share a token's name (--font-sans, --text-sm, --radius-md, ...)
+ * never redeclare it.
+ *
+ * When tokens.css gains or renames a token, update the matching entry here.
+ */
+@theme inline reference {
+  /* Breakpoints used by the site (the header switches at 640px). */
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+
+  /* Surfaces and text */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover-ring: var(--popover-ring);
+  --color-navigator: var(--navigator);
+  --color-title-bar: var(--title-bar);
+  --color-title-bar-border: var(--title-bar-border);
+  --color-status-bar: var(--status-bar);
+  --color-overlay: var(--overlay);
+  --color-selection: var(--selection);
+
+  /* Lines and focus */
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-focus-ring: var(--focus-ring);
+  --color-focus-indicator: var(--focus-indicator);
+
+  /* Roles */
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-active: var(--primary-active);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-active: var(--secondary-active);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+
+  /* Navigation */
+  --color-tab-foreground: var(--tab-foreground);
+  --color-tab-active-foreground: var(--tab-active-foreground);
+  --color-tab-underline: var(--tab-underline);
+  --color-list-hover: var(--list-hover);
+  --color-list-active: var(--list-active);
+  --color-list-active-border: var(--list-active-border);
+  --color-link: var(--link);
+  --color-link-hover: var(--link-hover);
+
+  /* Buttons */
+  --color-button: var(--button);
+  --color-button-hover: var(--button-hover);
+  --color-button-active: var(--button-active);
+  --color-button-foreground: var(--button-foreground);
+  --color-button-border: var(--button-border);
+  --color-button-ghost-hover: var(--button-ghost-hover);
+  --color-button-ghost-selected: var(--button-ghost-selected);
+  --color-button-ghost-foreground: var(--button-ghost-foreground);
+
+  /* Brand gradient stops */
+  --color-brand-start: var(--brand-gradient-start);
+  --color-brand-mid: var(--brand-gradient-mid);
+  --color-brand-end: var(--brand-gradient-end);
+
+  /* Typography */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --text-xs: var(--text-xs);
+  --text-xs--line-height: var(--leading-xs);
+  --text-sm: var(--text-sm);
+  --text-sm--line-height: var(--leading-sm);
+  --text-md: var(--text-md);
+  --text-md--line-height: var(--leading-md);
+  --text-lg: var(--text-lg);
+  --text-lg--line-height: var(--leading-lg);
+  --text-xl: var(--text-xl);
+  --text-xl--line-height: var(--leading-xl);
+  /* The display sizes have no line-height token; set one with `leading-*`. */
+  --text-2xl: var(--text-2xl);
+  --text-3xl: var(--text-3xl);
+  --text-4xl: var(--text-4xl);
+  --text-mono: var(--text-mono);
+  --text-mono--line-height: var(--leading-sm);
+  --leading-xs: var(--leading-xs);
+  --leading-sm: var(--leading-sm);
+  --leading-md: var(--leading-md);
+  --leading-lg: var(--leading-lg);
+  --leading-xl: var(--leading-xl);
+  --font-weight-normal: var(--weight-normal);
+  --font-weight-medium: var(--weight-medium);
+  --font-weight-semibold: var(--weight-semibold);
+
+  /* Shape and elevation */
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --radius-full: var(--radius-full);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+
+  /* Spacing (4px grid) and control heights, e.g. `gap-sm`, `h-control-md`. */
+  --spacing-0: 0px;
+  --spacing-xxs: var(--space-xxs);
+  --spacing-xs: var(--space-xs);
+  --spacing-sm: var(--space-sm);
+  --spacing-md: var(--space-md);
+  --spacing-lg: var(--space-lg);
+  --spacing-xl: var(--space-xl);
+  --spacing-xxl: var(--space-xxl);
+  --spacing-control-xs: var(--control-xs);
+  --spacing-control-sm: var(--control-sm);
+  --spacing-control-md: var(--control-md);
+  --spacing-control-lg: var(--control-lg);
+
+  /* Measures for `max-w-*`. */
+  --container-page: var(--page-width);
+  --container-prose: 72ch;
+
+  --default-transition-duration: var(--duration-fast);
+}
+
+/*
+ * Prefer the light-dark() color utilities above; they switch with the theme on
+ * their own. When `dark:` is still needed, it follows the same rule as
+ * tokens.css: the resolved [data-theme] that ThemeScript sets, else (landing
+ * pages without JavaScript) the system preference. Tailwind's default would
+ * only follow the system preference and ignore the saved theme.
+ */
+@custom-variant dark {
+  &:where([data-theme='dark'], [data-theme='dark'] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme]), :root:not([data-theme]) *) {
+      @slot;
+    }
+  }
+}
+
+/*
+ * Plain :hover, as the site's CSS always used. Tailwind's default wraps hover
+ * in `@media (hover: hover)`, which would drop hover styles on devices that
+ * report no hover capability.
+ */
+@custom-variant hover (&:hover);
+
+/*
+ * `font: inherit` for controls (browsers give buttons their own font) written as
+ * longhands. Tailwind sorts an arbitrary `[font:inherit]` after `text-*`,
+ * `font-*`, and `leading-*`, so the shorthand would reset them.
+ */
+@utility font-inherit {
+  font-family: inherit;
+  font-style: inherit;
+  font-variant: inherit;
+  font-stretch: inherit;
+  font-size-adjust: inherit;
+  font-kerning: inherit;
+  font-optical-sizing: inherit;
+  font-feature-settings: inherit;
+  font-variation-settings: inherit;
+}
