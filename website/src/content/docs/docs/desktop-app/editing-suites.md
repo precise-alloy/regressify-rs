@@ -4,7 +4,7 @@ description: Create, rename, and edit suites with the Source and Fields editors,
 sidebar:
   label: Edit suites
   order: 3
-lastUpdated: 2026-10-27
+lastUpdated: 2026-11-16
 ---
 
 :::tip
@@ -84,6 +84,9 @@ capture fails.
 
 **Image simplification**, also in the **Capture** group, pixelates large images before each screenshot so image-heavy
 captures get much smaller. See [Simplify images](/docs/desktop-app/simplify-images/).
+
+**Replacement profile** and **Url replacements**, in the **Page setup** group, point a suite at another environment or
+domain. See [Switch environments and domains](/docs/desktop-app/environments-and-domains/).
 
 ## Add actions
 

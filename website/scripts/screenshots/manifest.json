@@ -678,5 +678,51 @@
         "key": "Deploy the same reports anyway"
       }
     ]
+  },
+  {
+    "file": "replacement-profiles",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "common/_replacement-profiles.yaml@0"
+      },
+      {
+        "n": 2,
+        "key": "rect:386,330,272,56"
+      },
+      {
+        "n": 3,
+        "key": "rect:386,414,272,56"
+      }
+    ],
+    "crop": "0,86,1000,676"
+  },
+  {
+    "file": "suite-replacement-profile",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "Advanced"
+      },
+      {
+        "n": 2,
+        "key": "Page setup@0"
+      },
+      {
+        "n": 3,
+        "key": "rect:339,756,528,66"
+      }
+    ],
+    "crop": "320,86,1112,770"
+  },
+  {
+    "file": "run-replacement-profile",
+    "callouts": [
+      {
+        "n": 1,
+        "key": "rect:327,611,474,58"
+      }
+    ],
+    "crop": "320,150,1112,560"
   }
 ]

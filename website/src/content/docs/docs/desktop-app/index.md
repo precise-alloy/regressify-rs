@@ -4,7 +4,7 @@ description: Install Regressify Desktop, open a workspace, edit suites, run visu
 sidebar:
   label: Overview
   order: 0
-lastUpdated: 2026-10-27
+lastUpdated: 2026-11-16
 # Old single-page links such as #run-settings redirect to their new page
 # (src/lib/docs-redirects.ts), so no heading on this page may use one of those
 # ids. Kept as a YAML comment so it is not rendered into the public HTML.
@@ -27,6 +27,8 @@ On macOS, use `Cmd` where this guide says `Ctrl`, except `Ctrl+Space`. Click any
    navigator, and check suite status on Overview.
 1. [Edit suites](/docs/desktop-app/editing-suites/): create, rename, and edit suites with the Source and Fields editors,
    add actions, and save safely.
+1. [Switch environments and domains](/docs/desktop-app/environments-and-domains/): compare production with staging and
+   test sites that span several domains using URL replacement profiles.
 1. [Run tests](/docs/desktop-app/running-tests/): capture references, run visual tests, choose run settings, and follow
    progress and logs.
 1. [Review results](/docs/desktop-app/reviewing-results/): compare captures with references, inspect capture details,

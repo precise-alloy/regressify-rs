@@ -3,7 +3,7 @@ title: Publish reports
 description: Deploy reports to Azure Static Web Apps, Netlify, or Cloudflare Workers, manage tokens, and build landing apps.
 sidebar:
   label: Publish reports
-  order: 8
+  order: 9
 lastUpdated: 2026-11-16
 # The DO_NOT_TRACK paragraph applies to every deployment, so it sits before the
 # subsections rather than under Landing apps. (A YAML comment is not rendered.)

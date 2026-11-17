@@ -36,6 +36,9 @@ Windows only. Captures, the demo workspace, and the app-data snapshot live in `$
 
 - GPUI split panes ignore synthetic drags, so fixtures must fit the default pane sizes; long suite lists clip their last rows.
 - Select pickers do not open through UI Automation; keep the default choice (Azure for targets) or open them with a real click.
+- **Workspace files** rows expose no patterns, and Fields group headers expose only ExpandCollapse, which `uinvoke` can only expand; use a real `click` for both. Expanding **Workspace files** shrinks the suite list, so lower suite rows report rectangles that are hidden; collapse it before clicking a suite.
+- **Hide navigator** then **Show navigator** restores a narrower navigator and shifts every crop. Use `stop` and `start` to get the default layout back.
+- The Help Center suite reaches the fixture server as `localhost`, a second host, through `common/_replacement-profiles.yaml`; the store suites use `127.0.0.1`.
 - Read the manifest as UTF-8: labels such as `Update 1 · Add 1` contain non-ASCII characters.
 - Without a public URL, the Deploy dialog says the site was not read. That is expected with synthetic state.
 

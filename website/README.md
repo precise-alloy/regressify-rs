@@ -80,7 +80,7 @@ draft: false # Optional; drafts appear only in `bun run dev`.
 
 Each page starts at `##`; the title is the page's only h1. Keep heading text stable once published, because its id is the anchor that other pages and external sites link to.
 
-**Sidebar.** Groups are defined in the `sidebar` option of [astro.config.mjs](astro.config.mjs). **Start here** lists pages by slug, in order. **Desktop app** autogenerates from every page in `src/content/docs/docs/desktop-app/`, ordered by `sidebar.order` (Overview is 0, then Install 1 through Troubleshooting 11). A new page in that folder appears automatically; give it a unique `sidebar.order` and add it to the **In this guide** list on the Overview page. A new top-level section needs its own folder and sidebar group.
+**Sidebar.** Groups are defined in the `sidebar` option of [astro.config.mjs](astro.config.mjs). **Start here** lists pages by slug, in order. **Desktop app** autogenerates from every page in `src/content/docs/docs/desktop-app/`, ordered by `sidebar.order` (Overview is 0, then Install 1 through Troubleshooting 12). A new page in that folder appears automatically; give it a unique `sidebar.order` and add it to the **In this guide** list on the Overview page. A new top-level section needs its own folder and sidebar group.
 
 **Asides.** Starlight asides work in plain Markdown: `:::note`, `:::tip`, `:::caution`, `:::danger`. Desktop pages that list `Ctrl` shortcuts repeat a one-line macOS `:::tip`, and pages with screenshots add "Click any screenshot to view it full screen." to that tip (or open with a tip of their own), because readers often land on a section page directly.
 
@@ -138,6 +138,8 @@ The desktop app pages in `src/content/docs/docs/desktop-app/` are a user-facing 
 | Problems from any of these sections                     | `troubleshooting.md`          |
 
 The **Simplify images** page (`desktop-app/simplify-images.md`) adapts the image simplification settings in the Editing section of [docs/desktop.md](../docs/desktop.md), "Image simplification" in [docs/commands.md](../docs/commands.md), and the `imageSimplification` settings in [docs/create-test-suite.md](../docs/create-test-suite.md) and [docs/create-scenario.md](../docs/create-scenario.md); update it when those settings or their behavior change.
+
+The **Switch environments and domains** page (`desktop-app/environments-and-domains.md`) adapts "Replacement profiles" in [docs/commands.md](../docs/commands.md) and the `replacementProfile` and `urlReplacements` settings in [docs/create-test-suite.md](../docs/create-test-suite.md); update it when profile selection, rule behavior, or the matching desktop fields change.
 
 ### Desktop Screenshots
 

@@ -3,7 +3,7 @@ title: Appearance and commands
 description: Switch between light and dark themes and run any command from the command search.
 sidebar:
   label: Appearance and commands
-  order: 9
+  order: 10
 lastUpdated: 2026-10-27
 ---
 
