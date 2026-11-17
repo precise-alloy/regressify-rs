@@ -3,7 +3,7 @@ title: Simplify images
 description: Pixelate large images before each screenshot to shrink image-heavy captures without hiding changes.
 sidebar:
   label: Simplify images
-  order: 6
+  order: 7
 lastUpdated: 2026-10-27
 ---
 

@@ -3,7 +3,7 @@ title: Review results
 description: Compare captures with references, inspect capture details, approve changes, and clean up old test runs.
 sidebar:
   label: Review results
-  order: 5
+  order: 6
 lastUpdated: 2026-10-27
 ---
 

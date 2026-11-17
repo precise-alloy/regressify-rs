@@ -3,8 +3,8 @@ title: Run tests
 description: Capture references, run visual tests, choose run settings, and follow progress and logs.
 sidebar:
   label: Run tests
-  order: 4
-lastUpdated: 2026-10-27
+  order: 5
+lastUpdated: 2026-11-16
 ---
 
 :::tip
@@ -48,6 +48,9 @@ continue**, **Run saved version**, or **Cancel**.
 1. **Browser download** ④: **Auto**, **Always**, or **Never**. With Never, run **Install Chromium** once.
 
 ![The Run settings tab with Run settings, Compare after test, Run name (optional), and Browser download numbered.](../../../../assets/docs/desktop/run-settings.png)
+
+**Replacement profile** applies one URL replacement profile to every suite in the run, replacing each suite's own. Leave
+it empty unless you mean that. See [Switch environments and domains](/docs/desktop-app/environments-and-domains/).
 
 Use the same Regressify version on every QA machine, and recheck baselines when the browser version changes.
 

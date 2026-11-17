@@ -3,7 +3,7 @@ title: Keyboard shortcuts
 description: Every keyboard shortcut in Regressify Desktop, including the Source editor.
 sidebar:
   label: Keyboard shortcuts
-  order: 10
+  order: 11
 lastUpdated: 2026-10-27
 ---
 

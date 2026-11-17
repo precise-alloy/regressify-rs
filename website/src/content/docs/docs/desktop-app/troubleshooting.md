@@ -3,7 +3,7 @@ title: Troubleshooting
 description: Fix common install, run, update, and deployment problems in Regressify Desktop.
 sidebar:
   label: Troubleshooting
-  order: 11
+  order: 12
 lastUpdated: 2026-10-27
 ---
 

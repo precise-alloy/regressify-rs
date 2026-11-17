@@ -3,7 +3,7 @@ title: Use Git
 description: Review, commit, and sync workspace changes with the built-in Git view.
 sidebar:
   label: Git
-  order: 7
+  order: 8
 lastUpdated: 2026-10-27
 ---
 

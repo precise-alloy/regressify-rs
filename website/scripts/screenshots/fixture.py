@@ -5,6 +5,11 @@ Creates <shots>/site/{v1,v2}/*.html, served on http://127.0.0.1:4380/ by
 `python -m http.server 4380 --bind 127.0.0.1 --directory <shots>/site`, and the suites of
 <shots>/northwind-qa (run `regressify init` there first). Reference pages are v1 and test pages
 v2, so every suite has one visible difference to review.
+
+The Help Center suite reaches the same server as `localhost`, a second host, through the
+`{HELP}` placeholder in common/_replacement-profiles.yaml, so the environments-and-domains
+page can show one profile serving two domains. The store suites keep their own
+`urlReplacements`, so screenshots of their Source stay unchanged.
 """
 import os
 import sys
@@ -40,6 +45,7 @@ SUITES = {
     'catalog': ('Catalog', 'Outdoor gear'),
     'search': ('Search', 'Search results'),
 }
+HELP_SUITE = ('help-center', 'Help Center', 'How can we help?')
 
 
 def write(path, text):
@@ -48,9 +54,10 @@ def write(path, text):
         handle.write(text)
 
 
+PAGES = {**{suite: title for suite, (_, title) in SUITES.items()}, HELP_SUITE[0]: HELP_SUITE[2]}
 for version, button, banner, shipping in [('v1', '#2b6cb0', 'none', '$6.00'), ('v2', '#c05621', 'block', 'Free')]:
-    for suite, (_, title) in SUITES.items():
-        write(os.path.join(site, version, f'{suite}.html'),
+    for page, title in PAGES.items():
+        write(os.path.join(site, version, f'{page}.html'),
               PAGE.format(title=title, button=button, banner=banner, shipping=shipping))
 
 for suite, (display, title) in SUITES.items():
@@ -62,5 +69,25 @@ urlReplacements:
 scenarios:
   - url: http://127.0.0.1:4380/v1/{suite}.html
     label: {title}
+""")
+
+# Overwrites the empty default profile that `regressify init` creates.
+write(os.path.join(workspace, 'common', '_replacement-profiles.yaml'), """profiles:
+  default:
+    # Store pages
+    - find: "{STORE}"
+      ref: http://127.0.0.1:4380/v1
+      test: http://127.0.0.1:4380/v2
+    # Help Center pages on a second domain
+    - find: "{HELP}"
+      ref: http://localhost:4380/v1
+      test: http://localhost:4380/v2
+""")
+help_suite, help_display, help_title = HELP_SUITE
+write(os.path.join(workspace, 'visual_tests', f'{help_suite}.tests.yaml'), f"""displayName: {help_display}
+viewportNames: [desktop]
+scenarios:
+  - url: "{{HELP}}/{help_suite}.html"
+    label: {help_title}
 """)
 print(f'Fixture written under {root}')
