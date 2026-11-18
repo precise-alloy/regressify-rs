@@ -70,7 +70,7 @@ export default function ImagePage() {
       >
         <div className="flex items-center gap-4 max-[601px]:flex-col max-[601px]:items-start max-[601px]:gap-0.5">
           <Link
-            className="back-link inline-flex shrink-0 items-center gap-1.5 text-[13px] text-muted hover:text-accent"
+            className="back-link link inline-flex shrink-0 items-center gap-1.5 text-[13px]"
             to={`${suitePath(summary.id)}${backSearch}`}
           >
             <ArrowLeft size={14} />

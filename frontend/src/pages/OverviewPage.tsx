@@ -276,7 +276,7 @@ export function OverviewPage() {
                   <td className="border-b border-b-border bg-surface px-3 py-[15px] group-hover/row:bg-subtle max-[761px]:min-h-[44px] max-[761px]:min-w-0 max-[761px]:items-center max-[761px]:justify-between max-[761px]:gap-3 max-[761px]:px-3 pl-[var(--suite-cell-padding)] max-[761px]:block max-[761px]:bg-subtle max-[761px]:py-3">
                     <div className="flex min-w-0 items-center gap-2">
                       <Link
-                        className="suite-name inline-flex min-w-0 items-center gap-[var(--suite-name-gap)] text-[15px] font-medium hover:text-accent max-[601px]:text-[14px]"
+                        className="suite-name link inline-flex min-w-0 items-center gap-[var(--suite-name-gap)] text-[15px] font-medium max-[601px]:text-[14px]"
                         to={suitePath(suite.id)}
                       >
                         <span className={statusDot(suite.failed > 0)} />

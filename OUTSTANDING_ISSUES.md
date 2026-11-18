@@ -3,6 +3,21 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Link Styles (2026-11-18)
+
+- Resolved #18: snapshot and landing text links (breadcrumbs, back link, suite
+  names, footer, capture URLs, landing site links, Markdown) share default,
+  hover, and visited colors with an underline and pointer cursor, each at least
+  4.5:1 on its surfaces. The `text links show` browser test and `landing.spec.ts`
+  check colors, underline, and cursor on every converted link; `:visited` is
+  checked through its declared rule (see the test).
+- Resolved #19: desktop external links (About, deployed site URL, capture
+  Reference/Test URLs) use `design::ExternalLink` with the snapshot report's
+  link, hover, and visited colors; a URL turns visited only after it opened
+  successfully this session. The in-app `outdated` filter keeps neutral colors. Visited state is not
+  persisted. `external_links_open_` and the palette contrast test cover it; the
+  native rendering was not inspected in a screenshot.
+
 ## Snapshot Frontend Tailwind Migration (2026-11-17)
 
 - Resolved: the snapshot frontend's React components now use Tailwind utilities

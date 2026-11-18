@@ -60,6 +60,11 @@
   --border: #dde3e1;
   --accent: #087f67;
   --accent-soft: #e1f3ec;
+  /* Text links; each keeps >= 4.5:1 on bg, surface, subtle, and accent-soft.
+     The desktop app uses the same colors (src/desktop/ui/design.rs). */
+  --link: #07775f;
+  --link-hover: #05594a;
+  --link-visited: #6b3fb8;
   --pass: #0b765d;
   --fail: #bd3445;
   --fail-soft: #fceef0;
@@ -83,6 +88,9 @@
   --border: #35403d;
   --accent: #63d6b3;
   --accent-soft: #203e34;
+  --link: #63d6b3;
+  --link-hover: #9ee9d1;
+  --link-visited: #c4a7ff;
   --pass: #6ed5ad;
   --fail: #ff909c;
   --fail-soft: #41282f;
@@ -254,9 +262,27 @@
     margin-top: 12px;
     max-width: 720px;
   }
+  /*
+   * Text links: distinct default, hover, and visited colors, always underlined
+   * so color is not the only cue. React and the landing renderer
+   * (src/desktop/landing.rs) add `link`; Markdown links cannot carry a class.
+   * Browsers let `:visited` change only colors. Hover comes after visited so a
+   * visited link still reacts. Controls that happen to be links (cards,
+   * navigation rows, icon buttons) keep their own styles.
+   */
+  .link,
   .report-subheading a {
-    color: var(--accent);
-    text-decoration: underline;
+    color: var(--link);
+    text-decoration-line: underline;
+    cursor: pointer;
+  }
+  .link:visited,
+  .report-subheading a:visited {
+    color: var(--link-visited);
+  }
+  .link:hover,
+  .report-subheading a:hover {
+    color: var(--link-hover);
   }
   .report-subheading ul,
   .report-subheading ol {
@@ -294,17 +320,12 @@
     font-size: 19px;
     font-weight: 600;
   }
-  .landing-site :where(h2) a:hover {
-    color: var(--accent);
-    text-decoration: underline;
-  }
   .landing-subheading {
     margin-top: 8px;
   }
   .landing-url {
     display: inline-block;
     max-width: 100%;
-    color: var(--accent);
     margin-top: 12px;
     font-size: 12px;
   }

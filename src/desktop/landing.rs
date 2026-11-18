@@ -94,7 +94,7 @@ impl LandingApp {
         for site in &self.sites {
             let url = escape_html(&site.url);
             let heading = escape_html(&site.heading);
-            sites.push_str(&format!(r#"<article class="landing-site"><div class="landing-site-copy"><h2><a href="{url}" target="_blank" rel="noopener noreferrer">{heading}</a></h2><div class="report-subheading landing-subheading">{subheading}</div><a class="landing-url mono" href="{url}" target="_blank" rel="noopener noreferrer">{url}</a></div><div class="landing-site-status" data-regressify-status="{url}" data-site-heading="{heading}" role="region" aria-label="Status: {heading}"><p class="muted">Status not loaded</p></div></article>"#, subheading = markdown(&site.subheading)));
+            sites.push_str(&format!(r#"<article class="landing-site"><div class="landing-site-copy"><h2><a class="link" href="{url}" target="_blank" rel="noopener noreferrer">{heading}</a></h2><div class="report-subheading landing-subheading">{subheading}</div><a class="landing-url mono link" href="{url}" target="_blank" rel="noopener noreferrer">{url}</a></div><div class="landing-site-status" data-regressify-status="{url}" data-site-heading="{heading}" role="region" aria-label="Status: {heading}"><p class="muted">Status not loaded</p></div></article>"#, subheading = markdown(&site.subheading)));
         }
         if self.sites.is_empty() {
             sites.push_str("<p class=\"landing-empty muted\">No sites</p>");
@@ -799,6 +799,9 @@ mod tests {
             "data-regressify-status=\"https://someone-else.example/suites/shop?tag=a&amp;other=b\"",
             "data-regressify-landing",
             "_snapshot/assets/icon.svg?v=",
+            // Site heading and URL are text links styled by the shared `.link` rule.
+            "<h2><a class=\"link\" href=\"https://someone-else.example/suites/shop?tag=a&amp;other=b\"",
+            "<a class=\"landing-url mono link\" href=",
         ] {
             assert!(html.contains(expected), "Missing {expected}");
         }

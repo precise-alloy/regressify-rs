@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import AxeBuilder from "@axe-core/playwright";
-import { expect, type Page, type Request, test } from "@playwright/test";
+import { expect, type Locator, type Page, type Request, test } from "@playwright/test";
 import { PNG } from "pngjs";
 import { browserExecutable } from "../scripts/create-fixture";
 import { getAssetVersion } from "../scripts/version-assets";
@@ -777,6 +777,98 @@ test("pass-rate bars distinguish failing suites in light and dark themes", async
     }
     await page.locator(".results-table-wrap").evaluate((element) => element.scrollTo(0, 0));
     await screenshot(page, info.project.name, `pass-rates-${theme.toLowerCase()}`);
+  }
+});
+
+const linkColors = {
+  Light: { link: "rgb(7, 119, 95)", hover: "rgb(5, 89, 74)", visited: "#6b3fb8" },
+  Dark: { link: "rgb(99, 214, 179)", hover: "rgb(158, 233, 209)", visited: "#c4a7ff" },
+} as const;
+
+async function expectTextLink(page: Page, link: Locator, theme: keyof typeof linkColors) {
+  await expect(link).toHaveCSS("cursor", "pointer");
+  await expect(link).toHaveCSS("text-decoration-line", "underline");
+  await expect(link).toHaveCSS("color", linkColors[theme].link);
+  await link.hover();
+  await expect(link).toHaveCSS("color", linkColors[theme].hover);
+  await page.mouse.move(0, 0);
+}
+
+test("text links show default, hover, and visited colors with a pointer", async ({ page }) => {
+  await page.route("**/_snapshot/data/manifest.json?*", async (route) => {
+    const response = await route.fetch();
+    const manifest = await response.json();
+    manifest.subheading = "**Northstar** / [Release notes](https://notes.invalid/)";
+    await route.fulfill({ response, json: manifest });
+  });
+  const breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
+  const pages = [
+    {
+      path: "/",
+      links: [
+        page.locator(".results-table .suite-name").first(),
+        page.locator(".report-subheading a"),
+        page.locator(".app-footer a"),
+      ],
+    },
+    {
+      path: "/suites/workspace-overview",
+      links: [
+        breadcrumb.getByRole("link", { name: "Overview", exact: true }),
+        page.locator(".app-footer a"),
+      ],
+    },
+    {
+      path: "/suites/workspace-overview/images/overview__desktop.png",
+      links: [page.locator(".back-link"), breadcrumb.getByRole("link").nth(1)],
+      info: true,
+    },
+  ];
+  for (const { path, links, info } of pages) {
+    await page.goto(path);
+    for (const theme of ["Light", "Dark"] as const) {
+      await chooseTheme(page, theme);
+      for (const link of links) await expectTextLink(page, link, theme);
+      if (info) {
+        await page.getByRole("button", { name: "Capture information", exact: true }).click();
+        const dialog = page.getByRole("dialog", { name: "Capture information" });
+        for (const link of await dialog.getByRole("link").all()) {
+          await expect(link).toHaveCSS("cursor", "pointer");
+          await expect(link).toHaveCSS("text-decoration-line", "underline");
+          await expect(link).toHaveCSS("color", linkColors[theme].link);
+        }
+        await expect(dialog.getByRole("link")).toHaveCount(2);
+        await dialog.getByRole("button", { name: "Close capture information" }).click();
+        await expect(dialog).toHaveCount(0);
+      }
+      // Browsers hide `:visited` from scripts and automated Chromium never renders
+      // it, so check the declared rule and the theme's value instead.
+      const visited = await page.evaluate(() => {
+        const find = (rules: CSSRuleList): string | null => {
+          for (const rule of Array.from(rules)) {
+            if ("cssRules" in rule) {
+              const nested = find((rule as CSSGroupingRule).cssRules);
+              if (nested) return nested;
+            }
+            if (
+              rule instanceof CSSStyleRule &&
+              rule.selectorText.split(",").some((selector) => selector.trim() === ".link:visited")
+            )
+              return rule.style.getPropertyValue("color");
+          }
+          return null;
+        };
+        const declared = Array.from(document.styleSheets)
+          .map((sheet) => find(sheet.cssRules))
+          .find(Boolean);
+        const value = getComputedStyle(document.documentElement).getPropertyValue("--link-visited");
+        return { declared, value: value.trim() };
+      });
+      expect(visited).toEqual({
+        declared: "var(--link-visited)",
+        value: linkColors[theme].visited,
+      });
+    }
   }
 });
 

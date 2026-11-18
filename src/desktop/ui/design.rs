@@ -299,6 +299,163 @@ pub(super) fn apply_preference(
     );
 }
 
+/// External URLs opened from [`ExternalLink`] in this session. Kept in memory
+/// only: published and captured page URLs can carry tokens or credentials, so
+/// they are never written to preferences.
+#[derive(Default)]
+struct VisitedLinks(std::collections::HashSet<SharedString>);
+
+impl Global for VisitedLinks {}
+
+pub(super) fn link_visited(url: &str, cx: &App) -> bool {
+    cx.try_global::<VisitedLinks>()
+        .is_some_and(|visited| visited.0.contains(url))
+}
+
+/// Records a successfully opened URL and repaints so its links turn visited.
+/// Custom `ExternalLink::on_open` handlers call this once their opener succeeds.
+pub(super) fn mark_link_visited(url: impl Into<SharedString>, cx: &mut App) {
+    if cx.default_global::<VisitedLinks>().0.insert(url.into()) {
+        cx.refresh_windows();
+    }
+}
+
+/// Text link colors, shared with the snapshot report (frontend/src/styles.css)
+/// so links read as links in the neutral palette, where the stock link color
+/// matches body text. Each keeps at least 4.5:1 on the window and muted
+/// surfaces (`both_palettes_keep_text_readable_and_keyboard_focus_visible`).
+pub(super) struct LinkColors {
+    pub(super) link: Hsla,
+    pub(super) hover: Hsla,
+    pub(super) visited: Hsla,
+}
+
+pub(super) fn link_colors(dark: bool) -> LinkColors {
+    let [link, hover, visited] = if dark {
+        [0x63d6b3, 0x9ee9d1, 0xc4a7ff]
+    } else {
+        [0x07775f, 0x05594a, 0x6b3fb8]
+    }
+    .map(|color| rgb(color).into());
+    LinkColors {
+        link,
+        hover,
+        visited,
+    }
+}
+
+/// The resting color an [`ExternalLink`] overrides: the visited color once its
+/// URL was opened this session, otherwise none (the theme's link color).
+pub(super) fn resting_link_color(url: Option<&str>, cx: &App) -> Option<Hsla> {
+    url.filter(|url| link_visited(url, cx))
+        .map(|_| link_colors(cx.theme().mode.is_dark()).visited)
+}
+
+type OpenLink = Box<dyn Fn(&str, &mut Window, &mut App)>;
+
+/// Text link to an external page: Kit's link button (underline, pointing-hand
+/// cursor, theme link and hover colors) plus a visited color once this session
+/// opened the URL. Without a URL it renders disabled. The default opener is
+/// `App::open_url`, which reports no failure, so the URL counts as visited at
+/// once. `on_open` replaces it for callers that report failures; they call
+/// [`mark_link_visited`] only after opening succeeds.
+#[derive(IntoElement)]
+pub(super) struct ExternalLink {
+    id: ElementId,
+    url: Option<SharedString>,
+    label: Option<SharedString>,
+    accessibility_label: Option<SharedString>,
+    tooltip: Option<SharedString>,
+    on_open: Option<OpenLink>,
+    style: StyleRefinement,
+    children: Vec<AnyElement>,
+}
+
+impl ExternalLink {
+    pub(super) fn new(id: impl Into<ElementId>, url: Option<impl Into<SharedString>>) -> Self {
+        Self {
+            id: id.into(),
+            url: url.map(Into::into),
+            label: None,
+            accessibility_label: None,
+            tooltip: None,
+            on_open: None,
+            style: StyleRefinement::default(),
+            children: Vec::new(),
+        }
+    }
+
+    pub(super) fn label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub(super) fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
+    }
+
+    pub(super) fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(tooltip.into());
+        self
+    }
+
+    pub(super) fn on_open(mut self, open: impl Fn(&str, &mut Window, &mut App) + 'static) -> Self {
+        self.on_open = Some(Box::new(open));
+        self
+    }
+}
+
+impl Styled for ExternalLink {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
+impl ParentElement for ExternalLink {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.children.extend(elements);
+    }
+}
+
+impl RenderOnce for ExternalLink {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let resting = resting_link_color(self.url.as_deref(), cx);
+        let mut button = Button::new(self.id)
+            .link()
+            .disabled(self.url.is_none())
+            .children(self.children);
+        if let Some(label) = self.label {
+            button = button.label(label);
+        }
+        if let Some(label) = self.accessibility_label {
+            button = button.accessibility_label(label);
+        }
+        if let Some(tooltip) = self.tooltip {
+            button = button.tooltip(tooltip);
+        }
+        button.style().refine(&self.style);
+        // Kit's Button registers its variant colors and its separate hover/active
+        // styles first, then refines the base style with the caller's (Kit 0.8.0
+        // `Button::render`, `.refine_style(&instance_style)`). This text color
+        // therefore replaces only the resting color; hover and active keep the
+        // theme's link colors.
+        if let Some(color) = resting {
+            button = button.text_color(color);
+        }
+        let on_open = self.on_open;
+        button.when_some(self.url, |button, url| {
+            button.on_click(move |_, window, cx| match &on_open {
+                Some(open) => open(&url, window, cx),
+                None => {
+                    cx.open_url(&url);
+                    mark_link_visited(url.clone(), cx);
+                }
+            })
+        })
+    }
+}
+
 pub(super) fn apply_theme(dark: bool, window: Option<&mut Window>, cx: &mut App) {
     Theme::change(
         if dark {
@@ -323,6 +480,12 @@ pub(super) fn apply_theme(dark: bool, window: Option<&mut Window>, cx: &mut App)
     ] {
         *color = readable_color(*color, &[muted]);
     }
+    // Plain `.link()` buttons are reserved for external pages (`ExternalLink`);
+    // in-app text actions use Kit's Text variant so they keep neutral colors.
+    let links = link_colors(dark);
+    colors.link = links.link;
+    colors.link_hover = links.hover;
+    colors.link_active = links.hover;
     // Keep the stock visible tint while making contrast independent of the parent surface.
     colors.button = colors.background.blend(colors.button);
     colors.button_hover = colors.background.blend(colors.button_hover);
@@ -536,6 +699,12 @@ mod tests {
                     ("body", theme.foreground, theme.background),
                     ("secondary", theme.muted_foreground, theme.muted),
                     ("selection", theme.accent_foreground, theme.accent),
+                    ("link", theme.link, theme.background),
+                    ("link on muted", theme.link, theme.muted),
+                    ("link hover", theme.link_hover, theme.background),
+                    ("link hover on muted", theme.link_hover, theme.muted),
+                    ("visited link", super::link_colors(dark).visited, theme.background),
+                    ("visited link on muted", super::link_colors(dark).visited, theme.muted),
                     (
                         "primary button",
                         theme.button_primary_foreground,
