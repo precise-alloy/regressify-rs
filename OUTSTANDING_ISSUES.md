@@ -122,6 +122,11 @@ are historical evidence, not open implementation tasks.
   `BudgetRetry::last_spread`, so the next batch starts from one suite; the cache is
   pruned only when opened, so one deployment can exceed 4 GiB; and no test drives
   `generate_and_publish` through a refusal, regeneration, and publication.
+- Open: `live_create_update_and_delete_temporary_worker` fetches the published
+  assets once, right after publication and without the client's retries. A fresh
+  workers.dev hostname intermittently answers "unavailable" or stale bytes there
+  (1 of 4 runs on unmodified code, 2026-11-16), so a failure needs a rerun before it
+  is read as a regression. Cleanup was confirmed after each failure.
 - Resolved in source: Cloudflare uploads that need image optimization publish a
   site state rewritten for the optimized files instead of none
   (`optimized_uploads_publish_` covers it). Replace rebuilds every selected suite,

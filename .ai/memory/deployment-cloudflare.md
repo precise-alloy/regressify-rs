@@ -1,6 +1,6 @@
 # Cloudflare Deployment
 
-Verified: 2026-11-13
+Verified: 2026-11-16
 
 - [CloudflareClient](../../src/desktop/deployment/cloudflare.rs) uses Workers Static
   Assets directly: MIME-aware manifest, missing-content raw/Base64 uploads,
@@ -56,6 +56,22 @@ Verified: 2026-11-13
   changed-content update, cached redeployment, exact public bytes/MIME (including
   WebVTT and unknown-header omission), and confirmed deletion. It never targets
   a configured Worker and cleans up after verification errors.
+- Hardening ported from the sibling `tuyen-cli` Workers deploy (2026-11-16):
+  Base64 hashing in 3072-byte chunks (no second copy of each asset), jittered
+  retry backoff, upload progress by completion count (throttled for per-asset
+  uploads), one `compile_exclusion` for every exclusion glob (`private/` and
+  `/private` used to compile but never match), and `error_chain` causes in API
+  errors. Live-checked: a missing Worker is HTTP 404/code 10007 on both the legacy
+  `workers/scripts/{name}/subdomain` and the newer `workers/workers/{name}`
+  endpoints, and the `Cloudflare-Workers-Script-Api-Date` header changed nothing
+  observable, so it was not adopted. Not ported: Individual Workers Editor token
+  fallback (403/10000 then `GET workers/workers/{name}`), custom-domain URL
+  discovery, `.assetsignore` variants and wrangler-config exclusions (only
+  generated report trees are staged), and the upload-time file-identity check
+  (hash revalidation covers it).
+- The temporary-Worker live test is intermittently flaky on a fresh workers.dev
+  hostname ("Published test asset is unavailable" or stale bytes), also on code
+  without these changes (1 of 4 runs, 2026-11-16): its own fetches have no retries.
 - Access (verified 2026-10-20): `credentials: "omit"` stripped `CF_Authorization`
   from same-origin report JSON, so Access redirected it to its cross-origin sign-in
   (a browser CORS error) while `crossorigin` HTML/JS still loaded.

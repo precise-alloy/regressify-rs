@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -88,7 +91,7 @@ impl CloudflareTarget {
             "Cloudflare compatibility date must be a valid YYYY-MM-DD date"
         );
         for pattern in &self.exclude {
-            glob::Pattern::new(pattern).context("Invalid Cloudflare exclusion glob")?;
+            compile_exclusion(pattern)?;
         }
         Ok(())
     }
@@ -171,6 +174,9 @@ struct ApiError {
     code: u64,
     #[serde(default)]
     message: String,
+    /// Nested causes, kept untyped so an unexpected shape cannot hide the top-level error.
+    #[serde(default)]
+    error_chain: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -332,7 +338,9 @@ impl CloudflareClient {
             match result {
                 Ok(value) => return Ok(value),
                 Err(error) if error.retryable && attempt + 1 < attempts => {
-                    let delay = error.retry_after.unwrap_or(self.backoff * (1 << attempt));
+                    let delay = error
+                        .retry_after
+                        .unwrap_or_else(|| jittered_backoff(self.backoff, attempt));
                     super::diagnostics::retry(
                         super::DeploymentProvider::CloudflareWorkers,
                         endpoint,
@@ -452,8 +460,8 @@ impl CloudflareClient {
                     let directory = directory.canonicalize()?;
                     let patterns = exclude
                         .iter()
-                        .map(|pattern| glob::Pattern::new(pattern))
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                        .map(|pattern| compile_exclusion(pattern))
+                        .collect::<Result<Vec<_>>>()?;
                     let policy = |name: &str| {
                         if patterns
                             .iter()
@@ -731,11 +739,13 @@ impl CloudflareClient {
             "Cloudflare upload limits cannot accommodate a server bucket"
         );
         let memory = Arc::new(tokio::sync::Semaphore::new(byte_budget));
+        let completed = Arc::new(AtomicUsize::new(0));
         let total = buckets.len();
-        let completion = stream::iter(buckets.into_iter().zip(sizes).enumerate())
-            .map(|(index, (hashes, size))| {
+        let completion = stream::iter(buckets.into_iter().zip(sizes))
+            .map(|(hashes, size)| {
                 let manifest = manifest.clone();
                 let memory = memory.clone();
+                let completed = completed.clone();
                 let authorization = authorization.clone();
                 async move {
                     let permit = memory.acquire_many_owned(size.max(1) as u32).await?;
@@ -794,11 +804,11 @@ impl CloudflareClient {
                             true,
                         )
                         .await?;
-                    super::phase(&format!(
-                        "Cloudflare accepted asset batch {}/{}",
-                        index + 1,
-                        total
-                    ));
+                    // Uploads finish out of order, so count completions rather than start order.
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if reports_upload_progress(single, done, total) {
+                        super::phase(&format!("Cloudflare accepted asset batch {done}/{total}"));
+                    }
                     Ok::<_, anyhow::Error>(result.jwt.map(zeroize::Zeroizing::new))
                 }
             })
@@ -918,6 +928,27 @@ fn upload_timeout(bytes: u64) -> Duration {
             .saturating_add(bytes.div_ceil(64 * 1024))
             .min(30 * 60),
     )
+}
+
+/// Whether to report the `done`th of `total` completed uploads. Per-asset uploads can number in
+/// the thousands, and every report is a diagnostic record and progress event, so those are
+/// reported only occasionally; the few multipart batches are always reported.
+fn reports_upload_progress(single: bool, done: usize, total: usize) -> bool {
+    !single || total <= 8 || done == 1 || done == total || done.is_multiple_of(25)
+}
+
+/// Exponential backoff plus up to 25% jitter, so concurrent uploads that failed together
+/// do not retry together. A base too short to jitter (as in tests) is returned unchanged.
+fn jittered_backoff(base: Duration, attempt: u64) -> Duration {
+    let scaled = base.saturating_mul(1_u32 << attempt.min(10));
+    let max_jitter_ms = u64::try_from(scaled.as_millis() / 4).unwrap_or(u64::MAX);
+    if max_jitter_ms == 0 {
+        return scaled;
+    }
+    let random = uuid::Uuid::new_v4().as_u64_pair().0;
+    scaled.saturating_add(Duration::from_millis(
+        random % max_jitter_ms.saturating_add(1),
+    ))
 }
 
 fn publication_error(error: anyhow::Error) -> anyhow::Error {
@@ -1136,34 +1167,67 @@ async fn api_response<Value: DeserializeOwned>(
             .map_err(|_| ApiFailure::new("Cloudflare returned a malformed API result", false));
     }
     let errors = envelope.errors.unwrap_or_default();
-    let codes = errors
+    // Cloudflare nests the specific cause (for example, which part of a token is invalid)
+    // under a generic top-level code in `error_chain`.
+    let reasons = errors
         .iter()
         .take(8)
-        .map(|error| error.code.to_string())
+        .flat_map(|error| {
+            std::iter::once((Some(error.code), error.message.as_str())).chain(
+                error
+                    .error_chain
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(4)
+                    .map(|cause| {
+                        (
+                            cause["code"].as_u64(),
+                            cause["message"].as_str().unwrap_or_default(),
+                        )
+                    }),
+            )
+        })
+        .collect::<Vec<_>>();
+    let codes = reasons
+        .iter()
+        .filter_map(|(code, _)| code.map(|code| code.to_string()))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut detail = errors
+    // Redact every credential used by this request, including the completion JWT in publication metadata.
+    let redact = |message: &str| {
+        let mut message = message.to_owned();
+        for secret in secrets.iter().copied().filter(|secret| !secret.is_empty()) {
+            message = message.replace(secret, "[redacted]");
+        }
+        for authorization in authorizations {
+            if let Some(token) = authorization
+                .to_str()
+                .ok()
+                .and_then(|value| value.strip_prefix("Bearer "))
+            {
+                message = message.replace(token, "[redacted]");
+            }
+        }
+        // Trim only after redaction so a credential ending in a period cannot be left partly visible.
+        message
+            .trim_end_matches(|c: char| c == '.' || c.is_whitespace())
+            .to_owned()
+    };
+    let mut detail = reasons
         .iter()
-        .take(8)
-        .map(|error| error.message.as_str())
+        .map(|(_, message)| redact(message))
+        .filter(|message| !message.is_empty())
         .collect::<Vec<_>>()
         .join("; ");
-    // Redact every credential used by this request, including the completion JWT in publication metadata.
-    for secret in secrets.iter().copied().filter(|secret| !secret.is_empty()) {
-        detail = detail.replace(secret, "[redacted]");
-    }
-    for authorization in authorizations {
-        if let Some(token) = authorization
-            .to_str()
-            .ok()
-            .and_then(|value| value.strip_prefix("Bearer "))
-        {
-            detail = detail.replace(token, "[redacted]");
-        }
-    }
     if let Some(authorization) = authorizations.first() {
         detail = super::diagnostics::sanitize(&detail, authorization);
     }
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {detail}")
+    };
     let hint = match status.as_u16() {
         401 | 403 => "Check the API token's Workers Scripts Write permission and selected account",
         404 => "Check the Account ID and Worker name",
@@ -1171,9 +1235,11 @@ async fn api_response<Value: DeserializeOwned>(
         429 => "Cloudflare rate limit reached",
         _ => "Check the Worker's deployment history and Cloudflare account limits",
     };
+    // Truncated details already end in an ellipsis.
+    let stop = if detail.ends_with('.') { "" } else { "." };
     Err(ApiFailure {
         message: format!(
-            "Cloudflare request failed (HTTP {}; codes: {codes}; request ID: {ray}): {detail}. {hint}",
+            "Cloudflare request failed (HTTP {}; codes: {codes}; request ID: {ray}){detail}{stop} {hint}",
             status.as_u16()
         ),
         retryable: status.is_server_error() || matches!(status.as_u16(), 408 | 429),
@@ -1462,7 +1528,7 @@ impl Manifest {
         );
         let patterns = excludes
             .iter()
-            .map(|pattern| glob::Pattern::new(pattern).context("Invalid Cloudflare exclusion glob"))
+            .map(|pattern| compile_exclusion(pattern))
             .collect::<Result<Vec<_>>>()?;
         let mut last_update = Instant::now();
         for entry in walkdir::WalkDir::new(&manifest.root)
@@ -1608,8 +1674,8 @@ impl Manifest {
     fn keep(&mut self, kept: &super::KeptFiles, excludes: &[String]) -> Result<()> {
         let patterns = excludes
             .iter()
-            .map(|pattern| glob::Pattern::new(pattern))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .map(|pattern| compile_exclusion(pattern))
+            .collect::<Result<Vec<_>>>()?;
         for (path, file) in kept {
             ensure!(
                 !excluded_path(&patterns, path),
@@ -1735,7 +1801,7 @@ fn read_file(path: &Path, expected: u64) -> Result<Vec<u8>> {
             .is_file(),
         "Cloudflare deployment requires regular files"
     );
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(usize::try_from(expected).unwrap_or(0));
     file.take(expected + 1)
         .read_to_end(&mut bytes)
         .with_context(|| {
@@ -1749,6 +1815,30 @@ fn read_file(path: &Path, expected: u64) -> Result<Vec<u8>> {
         "Cloudflare deployment file changed after hashing"
     );
     Ok(bytes)
+}
+
+/// Compiles an exclusion glob against the staged tree's `/`-separated relative paths. A leading
+/// `./` or `/` and a trailing `/` (as in `private/`) would otherwise compile but never match, so
+/// the files meant to stay private would be published; they are stripped, and forms that can
+/// never match (backslashes, empty, `.` or `..` segments) are rejected instead.
+pub(super) fn compile_exclusion(pattern: &str) -> Result<glob::Pattern> {
+    let mut normalized = pattern;
+    while let Some(rest) = normalized
+        .strip_prefix("./")
+        .or_else(|| normalized.strip_prefix('/'))
+    {
+        normalized = rest;
+    }
+    normalized = normalized.trim_end_matches('/');
+    ensure!(
+        !normalized.contains('\\')
+            && !normalized
+                .split('/')
+                .any(|segment| matches!(segment, "" | "." | "..")),
+        "Invalid Cloudflare exclusion glob {pattern:?}; use '/'-separated paths relative to the report root"
+    );
+    glob::Pattern::new(normalized)
+        .with_context(|| format!("Invalid Cloudflare exclusion glob {pattern:?}"))
 }
 
 /// Whether `path` or any directory above it matches an exclusion; staging prunes excluded
@@ -1841,7 +1931,14 @@ fn hash_with_content_type(bytes: &[u8], path: &str, mime: &str) -> String {
         .unwrap_or_default();
     // MIME changes must invalidate cached response headers even when file bytes are unchanged.
     let mut digest = Sha256::new();
-    digest.update(STANDARD.encode(bytes));
+    // 3072 is a multiple of 3, so chunks encode without padding and the digest matches the
+    // whole-file Base64 without allocating it (a 25 MiB asset would need 33 MiB per hash).
+    let mut encoded = String::with_capacity(4096);
+    for chunk in bytes.chunks(3072) {
+        encoded.clear();
+        STANDARD.encode_string(chunk, &mut encoded);
+        digest.update(encoded.as_bytes());
+    }
     digest.update(extension);
     digest.update(b"\0");
     digest.update(mime);
@@ -2370,6 +2467,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn chunked_base64_hashes_match_whole_buffer_encoding_at_chunk_boundaries() {
+        let mime = mime_type("bundle.js");
+        for length in [0, 1, 2, 3, 4, 3070, 3071, 3072, 3073, 3074, 6144, 6145] {
+            let bytes = (0..length)
+                .map(|index| (index * 37 % 251) as u8)
+                .collect::<Vec<_>>();
+            let mut expected = Sha256::new();
+            expected.update(STANDARD.encode(&bytes));
+            expected.update(b"js\0");
+            expected.update(mime);
+            assert_eq!(
+                asset_hash(&bytes, "bundle.js"),
+                format!("{:x}", expected.finalize())[..32],
+                "length {length}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn single_asset_uploads_use_raw_bytes_and_keep_earlier_completion_tokens() -> Result<()> {
         let root = tempfile::tempdir()?;
@@ -2464,6 +2580,43 @@ mod tests {
         assert_eq!(upload_timeout(0), Duration::from_secs(180));
         assert_eq!(upload_timeout(64 * 1024), Duration::from_secs(181));
         assert_eq!(upload_timeout(u64::MAX), Duration::from_secs(1800));
+    }
+
+    #[test]
+    fn retry_backoff_jitters_within_its_window_and_stays_exact_when_too_short() {
+        assert_eq!(jittered_backoff(Duration::ZERO, 3), Duration::ZERO);
+        assert_eq!(
+            jittered_backoff(Duration::from_millis(1), 1),
+            Duration::from_millis(2)
+        );
+        for attempt in 0..5 {
+            let minimum = Duration::from_secs(1) * (1 << attempt);
+            let maximum = minimum + minimum / 4;
+            let delays = (0..32)
+                .map(|_| jittered_backoff(Duration::from_secs(1), attempt))
+                .collect::<Vec<_>>();
+            assert!(
+                delays
+                    .iter()
+                    .all(|delay| (minimum..=maximum).contains(delay))
+            );
+            assert!(delays.iter().any(|delay| *delay != delays[0]), "{delays:?}");
+        }
+        assert_eq!(
+            jittered_backoff(Duration::MAX, 10),
+            Duration::MAX,
+            "a huge delay saturates instead of overflowing"
+        );
+    }
+
+    #[test]
+    fn upload_progress_is_always_reported_for_batches_and_sparse_for_single_assets() {
+        assert!((1..=40).all(|done| reports_upload_progress(false, done, 40)));
+        assert!((1..=8).all(|done| reports_upload_progress(true, done, 8)));
+        let reported = (1..=120)
+            .filter(|done| reports_upload_progress(true, *done, 120))
+            .collect::<Vec<_>>();
+        assert_eq!(reported, [1, 25, 50, 75, 100, 120]);
     }
 
     #[tokio::test]
@@ -3012,6 +3165,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_errors_report_redacted_nested_causes_without_doubled_punctuation() -> Result<()> {
+        let secret = "nested-cause-secret-token";
+        for (chain, expected) in [
+            (
+                json!([
+                    {"code":9109,"message":format!("Invalid token {secret}.")},
+                    {"code":null,"message":"Second cause"},
+                    "not an object",
+                ]),
+                "codes: 10000, 9109; request ID: ray-1): Generic failure; Invalid token [redacted]; Second cause. Check the API",
+            ),
+            (
+                json!("unexpected shape"),
+                "codes: 10000; request ID: ray-1): Generic failure. Check the API",
+            ),
+            (
+                json!(null),
+                "codes: 10000; request ID: ray-1): Generic failure. Check the API",
+            ),
+        ] {
+            let site = crate::test::browser_tests::Site::new(move |request| {
+                let body = json!({
+                    "success":false,
+                    "errors":[{"code":10000,"message":"Generic failure.","error_chain":chain.clone()}],
+                })
+                .to_string();
+                let _ = request.respond(
+                    tiny_http::Response::from_string(body)
+                        .with_status_code(403)
+                        .with_header(tiny_http::Header::from_bytes("cf-ray", "ray-1").unwrap()),
+                );
+            })?;
+            let client = client(&site.origin);
+            let url = client.endpoint.join("test")?;
+            let authorization = bearer(secret)?;
+            let message = client
+                .request::<WorkerRoute>(
+                    || {
+                        Ok(client
+                            .client
+                            .get(url.clone())
+                            .header(AUTHORIZATION, authorization.clone()))
+                    },
+                    false,
+                )
+                .await
+                .err()
+                .context("Expected failure")?
+                .to_string();
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains(secret), "{message}");
+            assert!(!message.contains(".."), "{message}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn deployment_deadline_stops_waiting_for_provider_headers() -> Result<()> {
         let requests = Arc::new(AtomicUsize::new(0));
         let captured = requests.clone();
@@ -3318,6 +3528,78 @@ mod tests {
         assert!(excluded_path(&patterns, "assets/app.js.map"));
         assert!(!excluded_path(&patterns, "_snapshot/data/suites/one.json"));
         assert!(!excluded_path(&patterns, "_snapshot/images/logs/a.png"));
+    }
+
+    #[test]
+    fn exclusion_globs_are_normalized_or_rejected_instead_of_silently_matching_nothing()
+    -> Result<()> {
+        for pattern in [
+            "private",
+            "private/",
+            "/private",
+            "./private/",
+            "//./private//",
+        ] {
+            let patterns = [compile_exclusion(pattern)?];
+            assert!(excluded_path(&patterns, "private/key.json"), "{pattern}");
+            assert!(excluded_path(&patterns, "private"), "{pattern}");
+            assert!(!excluded_path(&patterns, "public/private.txt"), "{pattern}");
+        }
+        assert!(excluded_path(
+            &[compile_exclusion("/secret.txt")?],
+            "secret.txt"
+        ));
+        assert!(excluded_path(
+            &[compile_exclusion("./*.map")?],
+            "assets/app.js.map"
+        ));
+        for pattern in ["", "/", "./", ".", "..", "a//b", "a/../b", r"a\b", "["] {
+            let error = format!("{:#}", compile_exclusion(pattern).unwrap_err());
+            assert!(
+                error.contains("Invalid Cloudflare exclusion glob"),
+                "{pattern:?}: {error}"
+            );
+        }
+
+        let mut settings = CloudflareTarget {
+            exclude: vec!["private/".into()],
+            ..target()
+        };
+        settings.validate()?;
+        settings.exclude = vec![r"private\key".into()];
+        assert!(settings.validate().is_err());
+
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("index.html"), "report")?;
+        std::fs::write(root.path().join("secret.txt"), "secret")?;
+        std::fs::create_dir(root.path().join("private"))?;
+        std::fs::write(root.path().join("private").join("key.json"), "secret")?;
+        let manifest = Manifest::create_bounded(
+            root.path(),
+            deadline(),
+            MAX_FILES,
+            u64::MAX,
+            MAX_FILE_BYTES,
+            &["private/".into(), "/secret.txt".into()],
+        )?;
+        assert_eq!(
+            manifest.files.keys().collect::<Vec<_>>(),
+            ["/index.html"],
+            "slash-decorated exclusions must still keep private files out of the upload"
+        );
+        assert!(
+            Manifest::create_bounded(
+                root.path(),
+                deadline(),
+                MAX_FILES,
+                u64::MAX,
+                MAX_FILE_BYTES,
+                &[r"private\key.json".into()]
+            )
+            .is_err(),
+            "an exclusion that cannot match must fail instead of publishing the file"
+        );
+        Ok(())
     }
 
     #[tokio::test]

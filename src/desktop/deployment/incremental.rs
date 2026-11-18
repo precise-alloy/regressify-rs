@@ -1197,8 +1197,8 @@ fn build_state(
             cloudflare
                 .exclude
                 .iter()
-                .map(|pattern| glob::Pattern::new(pattern))
-                .collect::<std::result::Result<Vec<_>, _>>()
+                .map(|pattern| super::cloudflare::compile_exclusion(pattern))
+                .collect::<Result<Vec<_>>>()
         })
         .transpose()?
         .unwrap_or_default();
