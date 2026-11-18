@@ -60,8 +60,12 @@ Verified: 2026-11-16
   Base64 hashing in 3072-byte chunks (no second copy of each asset), jittered
   retry backoff, upload progress by completion count (throttled for per-asset
   uploads), one `compile_exclusion` for every exclusion glob (`private/` and
-  `/private` used to compile but never match), and `error_chain` causes in API
-  errors. Live-checked: a missing Worker is HTTP 404/code 10007 on both the legacy
+  `/private` used to compile but never match; backslashes, `.`/`..`/empty segments
+  and drive-qualified `C:/...` still can't match, so they are rejected), and
+  `error_chain` causes in API errors (kept as raw text because `serde_json::Value`
+  fails past 128 levels, which discarded the confirmed 403; verified against a
+  100,000-deep chain; top-level messages are listed before causes so a long cause
+  cannot displace them). Live-checked: a missing Worker is HTTP 404/code 10007 on both the legacy
   `workers/scripts/{name}/subdomain` and the newer `workers/workers/{name}`
   endpoints, and the `Cloudflare-Workers-Script-Api-Date` header changed nothing
   observable, so it was not adopted. Not ported: Individual Workers Editor token
