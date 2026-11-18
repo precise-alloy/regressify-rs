@@ -174,9 +174,35 @@ struct ApiError {
     code: u64,
     #[serde(default)]
     message: String,
-    /// Nested causes, kept untyped so an unexpected shape cannot hide the top-level error.
+    /// Nested causes, kept as unparsed text: `serde_json::Value` rejects nesting past 128 levels,
+    /// which would otherwise discard the whole envelope and the confirmed top-level rejection.
     #[serde(default)]
-    error_chain: serde_json::Value,
+    error_chain: Option<Box<serde_json::value::RawValue>>,
+}
+
+impl ApiError {
+    /// Best-effort nested causes. An unexpected shape drops only the part that cannot be read.
+    fn causes(&self) -> Vec<(Option<u64>, String)> {
+        let Some(chain) = &self.error_chain else {
+            return Vec::new();
+        };
+        let Ok(items) = serde_json::from_str::<Vec<Box<serde_json::value::RawValue>>>(chain.get())
+        else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .take(4)
+            .map(|item| {
+                let cause = serde_json::from_str::<serde_json::Value>(item.get())
+                    .unwrap_or(serde_json::Value::Null);
+                (
+                    cause["code"].as_u64(),
+                    cause["message"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    }
 }
 
 #[derive(Deserialize)]
@@ -1168,26 +1194,13 @@ async fn api_response<Value: DeserializeOwned>(
     }
     let errors = envelope.errors.unwrap_or_default();
     // Cloudflare nests the specific cause (for example, which part of a token is invalid)
-    // under a generic top-level code in `error_chain`.
-    let reasons = errors
-        .iter()
-        .take(8)
-        .flat_map(|error| {
-            std::iter::once((Some(error.code), error.message.as_str())).chain(
-                error
-                    .error_chain
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .take(4)
-                    .map(|cause| {
-                        (
-                            cause["code"].as_u64(),
-                            cause["message"].as_str().unwrap_or_default(),
-                        )
-                    }),
-            )
-        })
+    // under a generic top-level code in `error_chain`. Causes follow every top-level message so
+    // a long cause cannot push a later top-level error out of the bounded detail.
+    let taken = errors.iter().take(8);
+    let reasons = taken
+        .clone()
+        .map(|error| (Some(error.code), error.message.clone()))
+        .chain(taken.flat_map(ApiError::causes))
         .collect::<Vec<_>>();
     let codes = reasons
         .iter()
@@ -1820,7 +1833,8 @@ fn read_file(path: &Path, expected: u64) -> Result<Vec<u8>> {
 /// Compiles an exclusion glob against the staged tree's `/`-separated relative paths. A leading
 /// `./` or `/` and a trailing `/` (as in `private/`) would otherwise compile but never match, so
 /// the files meant to stay private would be published; they are stripped, and forms that can
-/// never match (backslashes, empty, `.` or `..` segments) are rejected instead.
+/// never match (backslashes, empty, `.` or `..` segments, a drive-qualified first segment such
+/// as `C:/report/private`) are rejected instead.
 pub(super) fn compile_exclusion(pattern: &str) -> Result<glob::Pattern> {
     let mut normalized = pattern;
     while let Some(rest) = normalized
@@ -1830,6 +1844,13 @@ pub(super) fn compile_exclusion(pattern: &str) -> Result<glob::Pattern> {
         normalized = rest;
     }
     normalized = normalized.trim_end_matches('/');
+    let drive = normalized.split('/').next().is_some_and(
+        |first| matches!(first.as_bytes(), [letter, b':'] if letter.is_ascii_alphabetic()),
+    );
+    ensure!(
+        !drive,
+        "Invalid Cloudflare exclusion glob {pattern:?}; use '/'-separated paths relative to the report root, not drive-qualified paths"
+    );
     ensure!(
         !normalized.contains('\\')
             && !normalized
@@ -2620,6 +2641,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_progress_counts_completions_when_batches_finish_out_of_order() -> Result<()> {
+        use crate::diagnostics::{
+            journal::JournalReader,
+            record::{Field, FieldValue, OperationKind, Outcome},
+            runtime,
+        };
+        let root = tempfile::tempdir()?;
+        std::fs::write(root.path().join("index.html"), "report")?;
+        std::fs::write(root.path().join("style.css"), "body {}")?;
+        let manifest = Arc::new(Manifest::create(
+            root.path(),
+            Instant::now() + Duration::from_secs(30),
+        )?);
+        let hashes = manifest.contents.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(hashes.len(), 2);
+        let buckets = hashes.iter().map(|hash| vec![hash.clone()]).collect();
+        let token = format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(
+                br#"{"wrangler_single_asset_uploads":true,"edge_kv_upload_concurrency":2}"#
+            )
+        );
+        // The first bucket's response is held until the second has been served and had time to
+        // be counted. Handlers run serially, so the held response is sent from its own thread.
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Mutex::new(Some(gate));
+        let first = hashes[0].clone();
+        let site = crate::test::browser_tests::Site::new(move |request| {
+            let held = request.url().ends_with(&first);
+            let body = json!({"success":true,"result":if held {json!({"jwt":"completion"})} else {json!({})}})
+                .to_string();
+            if held {
+                let gate = gate.lock().unwrap().take().unwrap();
+                std::thread::spawn(move || {
+                    let _ = gate.recv_timeout(Duration::from_secs(10));
+                    std::thread::sleep(Duration::from_millis(300));
+                    let _ = request.respond(tiny_http::Response::from_string(body));
+                });
+            } else {
+                let _ = request.respond(tiny_http::Response::from_string(body));
+                let _ = release.send(());
+            }
+        })?;
+        let workspace = tempfile::tempdir()?;
+        let operation = runtime::Operation::start(
+            workspace.path(),
+            OperationKind::Deployment,
+            None,
+            None,
+            None,
+        );
+        let upload = runtime::scope(Some(operation.context()), async {
+            client(&site.origin)
+                .upload_assets_bounded(manifest, buckets, "account", bearer(&token)?, 2, 1024)
+                .await
+        })
+        .await;
+        let reference = operation.finish(Outcome::Success).await;
+        assert_eq!(upload?.as_str(), "completion");
+        let mut progress = Vec::new();
+        JournalReader::open(workspace.path(), &reference.operation_id)?.visit(|record| {
+            if let Some(FieldValue::Identity(identity)) = record.fields.get(&Field::Artifact)
+                && identity
+                    .as_str()
+                    .starts_with("Cloudflare accepted asset batch")
+            {
+                progress.push(identity.as_str().to_owned());
+            }
+        })?;
+        assert_eq!(
+            progress,
+            [
+                "Cloudflare accepted asset batch 1/2",
+                "Cloudflare accepted asset batch 2/2"
+            ],
+            "progress must count completions, not the position of the bucket that finished"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn missing_worker_is_created_and_its_public_route_is_enabled() -> Result<()> {
         let root = tempfile::tempdir()?;
         std::fs::write(root.path().join("index.html"), "report")?;
@@ -3185,39 +3287,104 @@ mod tests {
                 "codes: 10000; request ID: ray-1): Generic failure. Check the API",
             ),
         ] {
-            let site = crate::test::browser_tests::Site::new(move |request| {
-                let body = json!({
-                    "success":false,
-                    "errors":[{"code":10000,"message":"Generic failure.","error_chain":chain.clone()}],
-                })
-                .to_string();
-                let _ = request.respond(
-                    tiny_http::Response::from_string(body)
-                        .with_status_code(403)
-                        .with_header(tiny_http::Header::from_bytes("cf-ray", "ray-1").unwrap()),
-                );
-            })?;
-            let client = client(&site.origin);
-            let url = client.endpoint.join("test")?;
-            let authorization = bearer(secret)?;
-            let message = client
-                .request::<WorkerRoute>(
-                    || {
-                        Ok(client
-                            .client
-                            .get(url.clone())
-                            .header(AUTHORIZATION, authorization.clone()))
-                    },
-                    false,
-                )
-                .await
-                .err()
-                .context("Expected failure")?
-                .to_string();
+            let body = json!({
+                "success":false,
+                "errors":[{"code":10000,"message":"Generic failure.","error_chain":chain}],
+            })
+            .to_string();
+            let message = forbidden_error(body, secret).await?.to_string();
             assert!(message.contains(expected), "{message}");
             assert!(!message.contains(secret), "{message}");
             assert!(!message.contains(".."), "{message}");
         }
+        Ok(())
+    }
+
+    /// Answers one request with a 403 carrying `body` and returns the client's error.
+    async fn forbidden_error(body: String, secret: &str) -> Result<anyhow::Error> {
+        let site = crate::test::browser_tests::Site::new(move |request| {
+            let _ = request.respond(
+                tiny_http::Response::from_string(body.clone())
+                    .with_status_code(403)
+                    .with_header(tiny_http::Header::from_bytes("cf-ray", "ray-1").unwrap()),
+            );
+        })?;
+        let client = client(&site.origin);
+        let url = client.endpoint.join("test")?;
+        let authorization = bearer(secret)?;
+        client
+            .request::<WorkerRoute>(
+                || {
+                    Ok(client
+                        .client
+                        .get(url.clone())
+                        .header(AUTHORIZATION, authorization.clone()))
+                },
+                false,
+            )
+            .await
+            .err()
+            .context("Expected failure")
+    }
+
+    #[tokio::test]
+    async fn api_errors_stay_confirmed_rejections_when_the_error_chain_is_too_deep_to_parse()
+    -> Result<()> {
+        let deep = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        for (chain, expected) in [
+            (
+                deep(200),
+                "codes: 10000; request ID: ray-1): Generic failure. Check the API",
+            ),
+            (
+                // Far beyond serde_json's recursion limit, and must not overflow the stack.
+                deep(100_000),
+                "codes: 10000; request ID: ray-1): Generic failure. Check the API",
+            ),
+            (
+                // Only the unparseable cause is dropped; its siblings still explain the failure.
+                format!(
+                    r#"[{{"code":9109,"message":"Invalid token"}},{},{{"code":9110,"message":"Third cause"}}]"#,
+                    deep(200)
+                ),
+                "codes: 10000, 9109, 9110; request ID: ray-1): Generic failure; Invalid token; Third cause. Check the API",
+            ),
+        ] {
+            let body = format!(
+                r#"{{"success":false,"errors":[{{"code":10000,"message":"Generic failure.","error_chain":{chain}}}]}}"#
+            );
+            let error = forbidden_error(body, "deep-chain-secret").await?;
+            let message = error.to_string();
+            assert!(message.contains(expected), "{message}");
+            assert!(
+                error
+                    .downcast_ref::<ApiFailure>()
+                    .is_some_and(|failure| failure.rejected),
+                "{message}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn long_causes_do_not_push_later_top_level_messages_out_of_the_detail_budget()
+    -> Result<()> {
+        let body = json!({
+            "success":false,
+            "errors":[
+                {"code":10000,"message":"First failure","error_chain":[{"code":9109,"message":"c".repeat(3000)}]},
+                {"code":10001,"message":"Second failure"},
+            ],
+        })
+        .to_string();
+        let message = forbidden_error(body, "budget-secret").await?.to_string();
+        assert!(
+            message.contains(
+                "codes: 10000, 10001, 9109; request ID: ray-1): First failure; Second failure; ccc"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("... Check the API"), "{message}");
         Ok(())
     }
 
@@ -3560,6 +3727,19 @@ mod tests {
                 "{pattern:?}: {error}"
             );
         }
+        // A drive-qualified path can never match the staged tree's relative paths.
+        for pattern in ["C:/report/private", "c:/x", "/C:/x", "./d:/x", "C:", "Z:/"] {
+            let error = format!("{:#}", compile_exclusion(pattern).unwrap_err());
+            assert!(
+                error.contains("Invalid Cloudflare exclusion glob")
+                    && error.contains("drive-qualified"),
+                "{pattern:?}: {error}"
+            );
+        }
+        // Only a lone drive designator as the first segment is rejected.
+        for pattern in ["a/C:/x", "C:x", "CC:/x", "1:/x", "*:/x", "private/c:"] {
+            compile_exclusion(pattern).with_context(|| pattern.to_owned())?;
+        }
 
         let mut settings = CloudflareTarget {
             exclude: vec!["private/".into()],
@@ -3567,6 +3747,8 @@ mod tests {
         };
         settings.validate()?;
         settings.exclude = vec![r"private\key".into()];
+        assert!(settings.validate().is_err());
+        settings.exclude = vec!["C:/report/private".into()];
         assert!(settings.validate().is_err());
 
         let root = tempfile::tempdir()?;
