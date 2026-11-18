@@ -610,7 +610,10 @@ The Cloudflare asset-settings control saves HTML handling, not-found handling,
 compatibility date, and excluded paths with each target. Defaults are
 `auto-trailing-slash`, `none`, and `2026-09-25`, with no extra exclusions.
 Excluded paths are an app-relative JSON array of globs, such as
-`["debug/**", "*.map"]`; matching directories are pruned. Keep required report
+`["debug/**", "*.map"]`; matching directories are pruned. A leading `./` or `/` and
+a trailing `/` are ignored, so `private/` and `/private` exclude the `private`
+directory. Backslashes and empty, `.`, or `..` segments cannot match report paths,
+so they are rejected instead of silently publishing the files. Keep required report
 JSON, images, scripts, and `index.html` included. Private environment files,
 `.dev.vars` variants, `.git`, `.wrangler`, and `node_modules` are always excluded.
 An unsupported `.assetsignore` file or included Pages `_worker.js` code causes
