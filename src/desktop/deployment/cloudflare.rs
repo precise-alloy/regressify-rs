@@ -2029,7 +2029,7 @@ mod tests {
     use serde_json::json;
     use std::sync::{
         Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     const TOKEN: &str = "synthetic-cloudflare-token";
@@ -2650,12 +2650,13 @@ mod tests {
         let root = tempfile::tempdir()?;
         std::fs::write(root.path().join("index.html"), "report")?;
         std::fs::write(root.path().join("style.css"), "body {}")?;
+        std::fs::write(root.path().join("app.js"), "run()")?;
         let manifest = Arc::new(Manifest::create(
             root.path(),
             Instant::now() + Duration::from_secs(30),
         )?);
         let hashes = manifest.contents.keys().cloned().collect::<Vec<_>>();
-        assert_eq!(hashes.len(), 2);
+        assert_eq!(hashes.len(), 3);
         let buckets = hashes.iter().map(|hash| vec![hash.clone()]).collect();
         let token = format!(
             "header.{}.signature",
@@ -2663,25 +2664,33 @@ mod tests {
                 br#"{"wrangler_single_asset_uploads":true,"edge_kv_upload_concurrency":2}"#
             )
         );
-        // The first bucket's response is held until the second has been served and had time to
-        // be counted. Handlers run serially, so the held response is sent from its own thread.
+        // Two uploads run at once and the first one's response is held. The client creates the
+        // third upload only after the second has finished and been counted, so the third request
+        // is the client's own signal to release the first: the second always completes first,
+        // with no sleeping, and a start-order count would report it as 2/3.
         let (release, gate) = std::sync::mpsc::channel::<()>();
-        let gate = std::sync::Mutex::new(Some(gate));
-        let first = hashes[0].clone();
+        let gate = Mutex::new(Some(gate));
+        let released = Arc::new(AtomicBool::new(false));
+        let signaled = released.clone();
+        let (first, last) = (hashes[0].clone(), hashes[2].clone());
         let site = crate::test::browser_tests::Site::new(move |request| {
-            let held = request.url().ends_with(&first);
-            let body = json!({"success":true,"result":if held {json!({"jwt":"completion"})} else {json!({})}})
-                .to_string();
-            if held {
+            let url = request.url().to_owned();
+            if url.ends_with(&first) {
+                // Handlers run serially, so the held response is sent from its own thread.
                 let gate = gate.lock().unwrap().take().unwrap();
+                let signaled = signaled.clone();
                 std::thread::spawn(move || {
-                    let _ = gate.recv_timeout(Duration::from_secs(10));
-                    std::thread::sleep(Duration::from_millis(300));
+                    let released = gate.recv_timeout(Duration::from_secs(30)).is_ok();
+                    signaled.store(released, Ordering::SeqCst);
+                    let body = json!({"success":true,"result":{"jwt":"completion"}}).to_string();
                     let _ = request.respond(tiny_http::Response::from_string(body));
                 });
             } else {
+                let body = json!({"success":true,"result":{}}).to_string();
                 let _ = request.respond(tiny_http::Response::from_string(body));
-                let _ = release.send(());
+                if url.ends_with(&last) {
+                    let _ = release.send(());
+                }
             }
         })?;
         let workspace = tempfile::tempdir()?;
@@ -2700,6 +2709,10 @@ mod tests {
         .await;
         let reference = operation.finish(Outcome::Success).await;
         assert_eq!(upload?.as_str(), "completion");
+        assert!(
+            released.load(Ordering::SeqCst),
+            "the third upload never started while the first response was still held"
+        );
         let mut progress = Vec::new();
         JournalReader::open(workspace.path(), &reference.operation_id)?.visit(|record| {
             if let Some(FieldValue::Identity(identity)) = record.fields.get(&Field::Artifact)
@@ -2713,8 +2726,9 @@ mod tests {
         assert_eq!(
             progress,
             [
-                "Cloudflare accepted asset batch 1/2",
-                "Cloudflare accepted asset batch 2/2"
+                "Cloudflare accepted asset batch 1/3",
+                "Cloudflare accepted asset batch 2/3",
+                "Cloudflare accepted asset batch 3/3"
             ],
             "progress must count completions, not the position of the bucket that finished"
         );
