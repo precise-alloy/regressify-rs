@@ -25,6 +25,18 @@ test("landing prerender contains safe Markdown, links and branding without JavaS
     page.getByRole("link", { name: "Commerce storefront", exact: true }),
   ).toHaveAttribute("href", "https://commerce.report.test/suites/shop");
   await expect(page.locator(".brand img")).toBeVisible();
+  // Site headings and URLs share the report's text link style (light theme here).
+  for (const link of [
+    page.locator(".landing-site h2 a").first(),
+    page.locator(".landing-url").first(),
+  ]) {
+    await expect(link).toHaveCSS("cursor", "pointer");
+    await expect(link).toHaveCSS("text-decoration-line", "underline");
+    await expect(link).toHaveCSS("color", "rgb(7, 119, 95)");
+    await link.hover();
+    await expect(link).toHaveCSS("color", "rgb(5, 89, 74)");
+    await page.mouse.move(0, 0);
+  }
   await expect(page.locator(":root")).toHaveCSS("scrollbar-gutter", "stable");
   await expect(page.locator(":root")).not.toHaveCSS("scrollbar-color", "auto");
   expect(

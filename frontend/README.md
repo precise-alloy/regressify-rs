@@ -195,6 +195,13 @@ buttons, status dots) are exported from [ui.tsx](src/components/ui.tsx).
 - **Class extraction.** Leave a space before `${...}` in class template literals:
   Tailwind cannot extract a class written directly against an expression, such
   as `print:hidden${extra}`, and silently omits it.
+- **Text links.** Links that open a page or URL as text (breadcrumbs, back link,
+  suite names, footer, capture URLs, landing site links) use the `link` class:
+  `--link`, `--link-hover`, and `--link-visited` colors, an underline, and a
+  pointer cursor. Markdown links in `.report-subheading` get the same rule.
+  Controls that happen to be links (cards, navigation rows, icon buttons) keep
+  their own styles. The `text links show` browser test explains how `:visited`
+  is checked.
 - **Exact equivalents.** Use `[border:0]`, `[outline:0]`, `[list-style:none]`, and
   `[box-shadow:...]` when the intent is the CSS shorthand; `border-0`, `outline-0`,
   `list-none`, and `shadow-*` leave a solid style, keep the list position, or add

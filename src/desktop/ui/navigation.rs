@@ -1173,8 +1173,12 @@ impl Workbench {
                         )
                         .when(outdated > 0, |row| {
                             row.child("·").child(
+                                // An in-app filter, not a page: Kit's Text variant keeps the
+                                // pointer and neutral color, the underline marks it clickable,
+                                // and link colors stay reserved for external pages.
                                 Button::new("suite-site-outdated")
-                                    .link()
+                                    .text()
+                                    .underline()
                                     .xsmall()
                                     .label(format!("{outdated} outdated"))
                                     .tooltip("Show only suites with newer local results")

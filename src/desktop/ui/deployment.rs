@@ -1408,7 +1408,7 @@ impl Workbench {
                         }),
                 );
                 if let Some(url) = selected.and_then(|target| target.published_url.clone()) {
-                    let open_url = url.clone();
+                    let deployment = panel.clone();
                     body = body.child(
                         div()
                             .id("deploy-published-url")
@@ -1417,23 +1417,24 @@ impl Workbench {
                             .gap_2()
                             .min_w_0()
                             .child(
-                                Button::new("deploy-open-published")
-                                    .link()
-                                    .flex_initial()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .label(url.clone())
-                                    .tooltip(url.clone())
-                                    .accessibility_label("Open deployed site")
-                                    .on_click(window.listener_for(&view, move |this, _, _, cx| {
-                                        if let Err(error) = open::that_detached(&open_url) {
-                                            this.deployment.update(cx, |state, cx| {
-                                                state.status =
-                                                    format!("Cannot open deployed site: {error}");
-                                                cx.notify();
-                                            });
-                                        }
-                                    })),
+                                design::ExternalLink::new(
+                                    "deploy-open-published",
+                                    Some(url.clone()),
+                                )
+                                .flex_initial()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .label(url.clone())
+                                .tooltip(url.clone())
+                                .accessibility_label("Open deployed site")
+                                .on_open(move |url, _, cx| match open::that_detached(url) {
+                                    Ok(()) => design::mark_link_visited(url.to_string(), cx),
+                                    Err(error) => deployment.update(cx, |state, cx| {
+                                        state.status =
+                                            format!("Cannot open deployed site: {error}");
+                                        cx.notify();
+                                    }),
+                                }),
                             )
                             .child(design::CopyText::new(
                                 "deploy-copy-published",

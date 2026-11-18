@@ -1,9 +1,10 @@
 # Website and Snapshot Styling
 
-Verified: 2026-11-17 against [tailwind.css](../../website/src/styles/tailwind.css),
+Verified: 2026-11-18 against [tailwind.css](../../website/src/styles/tailwind.css),
 [global.css](../../website/src/styles/global.css),
-[starlight.css](../../website/src/styles/starlight.css), and the
-[styling notes](../../website/README.md#styling).
+[starlight.css](../../website/src/styles/starlight.css), the
+[website styling notes](../../website/README.md#styling), and the
+[snapshot styling notes](../../frontend/README.md#styling).
 
 ## Facts
 
@@ -52,3 +53,8 @@ Verified: 2026-11-17 against [tailwind.css](../../website/src/styles/tailwind.cs
   elements in image routes is baseline noise.
 - Tailwind cannot extract a class written directly against a template
   expression (`print:hidden${x}`) and silently omits it; keep a space before `${`.
+- Playwright's Chromium (default or persistent context, headless) never renders
+  `:visited`, even for a link to the current page, and computed styles always
+  report the unvisited color. Assert the declared `:visited` rule via CSSOM, as
+  the `text links show` test in
+  [report.spec.ts](../../frontend/tests/report.spec.ts) does (checked 2026-11-18).

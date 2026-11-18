@@ -375,13 +375,13 @@ function Shell() {
                 aria-label="Breadcrumb"
                 className="flex min-w-0 items-center gap-2 text-[12px] text-muted max-[601px]:gap-1.5 max-[601px]:text-[11px]"
               >
-                <Link to="/" className="hover:text-accent">
+                <Link to="/" className="link">
                   Overview
                 </Link>
                 {match && (
                   <>
                     <ChevronRight size={14} />
-                    <Link to={suitePath(match.params.suiteId || "")} className="hover:text-accent">
+                    <Link to={suitePath(match.params.suiteId || "")} className="link">
                       {suiteName}
                     </Link>
                     {imageMatch && (
@@ -430,7 +430,9 @@ function Shell() {
             {!imageMatch && (
               <footer className="app-footer">
                 <span>
-                  <a href="https://regressify.eshn.dev/">Regressify</a>
+                  <a href="https://regressify.eshn.dev/" className="link">
+                    Regressify
+                  </a>
                   {manifest.regressifyVersion && ` ${manifest.regressifyVersion}`}
                 </span>
                 <span>Visual regression report</span>

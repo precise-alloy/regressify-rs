@@ -553,11 +553,12 @@ impl Workbench {
                 )
                 .child(
                     div().flex().items_center().gap_1().child("Website:").child(
-                        Button::new("about-website")
-                            .ghost()
-                            .label("https://regressify.eshn.dev/")
-                            .accessibility_label("https://regressify.eshn.dev/")
-                            .on_click(|_, _, cx| cx.open_url("https://regressify.eshn.dev/")),
+                        design::ExternalLink::new(
+                            "about-website",
+                            Some("https://regressify.eshn.dev/"),
+                        )
+                        .label("https://regressify.eshn.dev/")
+                        .accessibility_label("https://regressify.eshn.dev/"),
                     ),
                 )
                 .child(
@@ -578,20 +579,16 @@ impl Workbench {
                 )
                 .child(
                     div().flex().items_center().gap_1().child("License:").child(
-                        Button::new("about-license")
-                            .ghost()
+                        design::ExternalLink::new("about-license", Some(LICENSE_URL))
                             .label(LICENSE)
-                            .accessibility_label(LICENSE)
-                            .on_click(|_, _, cx| cx.open_url(LICENSE_URL)),
+                            .accessibility_label(LICENSE),
                     ),
                 )
                 .child(
                     div().flex().items_center().gap_1().child("Source:").child(
-                        Button::new("about-source")
-                            .ghost()
+                        design::ExternalLink::new("about-source", Some(SOURCE_URL))
                             .label(SOURCE_URL)
-                            .accessibility_label(SOURCE_URL)
-                            .on_click(|_, _, cx| cx.open_url(SOURCE_URL)),
+                            .accessibility_label(SOURCE_URL),
                     ),
                 )
                 .footer(

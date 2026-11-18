@@ -15229,3 +15229,117 @@ async fn new_suite_keyboard_shortcut_opens_the_file_dialog(cx: &mut TestAppConte
             .exists()
     );
 }
+
+#[gpui_kit::test]
+fn external_links_open_their_url_and_remember_visits_for_the_session(cx: &mut TestAppContext) {
+    use super::design::{link_colors, link_visited, mark_link_visited, resting_link_color};
+    use gpui_kit::{Context, IntoElement, ParentElement, Render, Styled, Window, div};
+    use std::{cell::RefCell, rc::Rc};
+
+    const DOCS: &str = "https://docs.invalid/";
+    const FAILED: &str = "https://failed.invalid/";
+    const REPORT: &str = "https://report.invalid/?token=synthetic";
+
+    struct Links {
+        reported: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Render for Links {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let failed = self.reported.clone();
+            let opened = self.reported.clone();
+            div()
+                .flex()
+                .flex_col()
+                .child(super::design::ExternalLink::new("link-default", Some(DOCS)).label("Docs"))
+                .child(
+                    // A failing opener reports the URL but never marks it visited.
+                    super::design::ExternalLink::new("link-failed", Some(FAILED))
+                        .label("Failed")
+                        .on_open(move |url, _, _| failed.borrow_mut().push(url.to_string())),
+                )
+                .child(
+                    super::design::ExternalLink::new("link-custom", Some(REPORT))
+                        .label("Report")
+                        .on_open(move |url, _, cx| {
+                            opened.borrow_mut().push(url.to_string());
+                            mark_link_visited(url.to_string(), cx);
+                        }),
+                )
+                .child(
+                    super::design::ExternalLink::new("link-missing", None::<&str>)
+                        .label("Unavailable"),
+                )
+        }
+    }
+
+    cx.update(gpui_kit::init);
+    cx.update(|cx| super::design::apply_theme(false, None, cx));
+    let reported = Rc::new(RefCell::new(Vec::new()));
+    let (handle, _) = cx
+        .update(|cx| {
+            let reported = reported.clone();
+            gpui_kit::open_window(WindowOptions::default(), cx, move |_, cx| {
+                cx.new(|_| Links { reported })
+            })
+        })
+        .unwrap();
+    cx.update(|cx| {
+        for url in [DOCS, FAILED, REPORT] {
+            assert!(!link_visited(url, cx));
+            assert_eq!(resting_link_color(Some(url), cx), None);
+        }
+    });
+
+    // Without an opener the link uses the platform URL handler, which reports no
+    // failure, so the URL is visited at once.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("link-default", cx)
+    })
+    .unwrap();
+    assert_eq!(cx.opened_url().as_deref(), Some(DOCS));
+    cx.update(|cx| {
+        assert!(link_visited(DOCS, cx));
+        assert_eq!(
+            resting_link_color(Some(DOCS), cx),
+            Some(link_colors(false).visited)
+        );
+    });
+
+    // A custom opener replaces the platform handler; a failed open stays unvisited.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("link-failed", cx)
+    })
+    .unwrap();
+    assert_eq!(reported.borrow().as_slice(), [FAILED]);
+    cx.update(|cx| {
+        assert!(!link_visited(FAILED, cx));
+        assert_eq!(resting_link_color(Some(FAILED), cx), None);
+    });
+
+    // A successful custom open marks the URL itself.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("link-custom", cx)
+    })
+    .unwrap();
+    assert_eq!(reported.borrow().as_slice(), [FAILED, REPORT]);
+    assert_eq!(cx.opened_url().as_deref(), Some(DOCS));
+    cx.update(|cx| assert!(link_visited(REPORT, cx)));
+
+    // A link without a URL is disabled and records nothing.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("link-missing", cx)
+    })
+    .unwrap();
+    assert_eq!(reported.borrow().len(), 2);
+    cx.update(|cx| assert_eq!(resting_link_color(None, cx), None));
+
+    // The visited color follows the theme.
+    cx.update(|cx| {
+        super::design::apply_theme(true, None, cx);
+        assert_eq!(
+            resting_link_color(Some(DOCS), cx),
+            Some(link_colors(true).visited)
+        );
+    });
+}

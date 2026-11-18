@@ -1311,14 +1311,17 @@ impl ResultsPanel {
     }
 
     fn open_browser(&mut self, url: reqwest::Url, window: &mut Window, cx: &mut Context<Self>) {
+        let visited = url.to_string();
         let task = cx
             .background_executor()
             .spawn(async move { webbrowser::open(url.as_str()) });
         cx.spawn_in(window, async move |view, cx| {
             let result = task.await;
             let _ = view.update_in(cx, |this, _, cx| {
-                if let Err(error) = result {
-                    this.status = format!("Cannot open browser: {error}");
+                match result {
+                    // Links to this URL turn visited only once it really opened.
+                    Ok(()) => design::mark_link_visited(visited, cx),
+                    Err(error) => this.status = format!("Cannot open browser: {error}"),
                 }
                 cx.notify();
             });
@@ -2260,7 +2263,7 @@ impl ResultsPanel {
                     .icon(gpui_kit::assets::IconName::Info)
                     .accessibility_label("Scenario information"),
             )
-            .content(move |_, window, cx| {
+            .content(move |_, window, _| {
                 let difference = pair.diff.as_ref();
                 let dimensions = difference.and_then(|diff| diff.dimension_difference.as_ref());
                 let percentage = difference
@@ -2325,7 +2328,6 @@ impl ResultsPanel {
                             .map(|url| url.as_str().to_string())
                             .unwrap_or_else(|| "Unavailable".into())
                     };
-                    let link_url = url.clone();
                     let copy_url = url.clone();
                     let panel = panel.clone();
                     let label = div()
@@ -2346,44 +2348,44 @@ impl ResultsPanel {
                         .gap_1()
                         .min_w_0()
                         .child(
-                            Button::new(("capture-info-url", index))
-                                .ghost()
-                                .flex_shrink_1()
-                                .min_w_0()
-                                .justify_start()
-                                .text_left()
-                                .cursor(if url.is_some() {
-                                    CursorStyle::PointingHand
-                                } else {
-                                    CursorStyle::Arrow
-                                })
-                                .accessibility_label(format!("Open {kind} URL"))
-                                .tooltip(
-                                    url.as_ref()
-                                        .map(|url| url.as_str())
-                                        .unwrap_or("URL unavailable")
-                                        .to_string(),
-                                )
-                                .disabled(url.is_none())
-                                .child(
-                                    div()
-                                        .id(("capture-info-url-value", index))
-                                        .role(Role::Status)
-                                        .aria_label(value.clone())
-                                        .test_support()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(cx.theme().primary)
-                                        .underline()
-                                        .child(value),
-                                )
-                                .on_click(move |_, window, cx| {
-                                    if let Some(url) = &link_url {
-                                        let _ = panel.update(cx, |this, cx| {
-                                            this.open_browser(url.clone(), window, cx)
-                                        });
-                                    }
-                                }),
+                            design::ExternalLink::new(
+                                ("capture-info-url", index),
+                                url.as_ref().map(|url| url.as_str().to_string()),
+                            )
+                            // Keep the Medium control frame (height and inset) so the
+                            // URL lines up with its label and the Copy button.
+                            .h_8()
+                            .px_2p5()
+                            .flex_shrink_1()
+                            .min_w_0()
+                            .justify_start()
+                            .text_left()
+                            .accessibility_label(format!("Open {kind} URL"))
+                            .tooltip(
+                                url.as_ref()
+                                    .map(|url| url.as_str())
+                                    .unwrap_or("URL unavailable")
+                                    .to_string(),
+                            )
+                            // The link supplies color, underline, and cursor; an
+                            // unavailable URL renders as disabled text.
+                            .child(
+                                div()
+                                    .id(("capture-info-url-value", index))
+                                    .role(Role::Status)
+                                    .aria_label(value.clone())
+                                    .test_support()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(value),
+                            )
+                            .on_open(move |url, window, cx| {
+                                // The link only renders a URL that already parsed.
+                                if let Ok(url) = reqwest::Url::parse(url) {
+                                    let _ = panel
+                                        .update(cx, |this, cx| this.open_browser(url, window, cx));
+                                }
+                            }),
                         )
                         .child(
                             Button::new(("capture-info-copy-url", index))
