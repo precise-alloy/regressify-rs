@@ -32,8 +32,9 @@ are historical evidence, not open implementation tasks.
   viewer interactions the harness does not open (panning, wipe drag, crosshair).
   They were converted rule by rule and are covered by the browser tests.
 - Observed: `comparison images are centered without labels and oversized images
-  stay reachable` failed once on desktop before the migration and passed in later
-  runs, so it may be timing-sensitive.
+  stay reachable` (desktop and mobile) and `image viewer drags three fitted lanes
+  together within their edges` (mobile) each failed once in a full run and passed
+  on reruns, before and after the migration, so they may be timing-sensitive.
 
 ## Website Tailwind Adoption (2026-11-17)
 
