@@ -24,10 +24,11 @@ description: 'Use when interpolating selectors or page data into JavaScript, CSS
    a selector's ability to introduce extra CSS rules. Hide/remove actions use
    native lookup, assign `CSSStyleRule.selectorText`, and insert only the
    serialized rule into the frame's CDP inspector stylesheet (independent of
-   inline style CSP and page-owned adopted sheets), then disable the CSS/DOM
-   domains again so page stylesheet churn cannot overflow shared CDP event
-   waits; config lists still
-   use `escape_css_rule`. In a resolved frame `document` is the action-selector
+   inline style CSP and page-owned adopted sheets). Enable CSS/DOM only on an
+   action-owned CDP connection. An outer timeout can skip async cleanup, but
+   dropping this connection detaches its sessions without enabling events on
+   the scenario connection. Config lists still use `escape_css_rule`.
+   In a resolved frame `document` is the action-selector
    proxy, not a native CSS lookup. Keep screenshot and stylesheet targets in
    the light DOM of `window.document`.
 1. `imageSimplificationExcludeSelectors` reach the page only inside one JSON
@@ -44,6 +45,7 @@ description: 'Use when interpolating selectors or page data into JavaScript, CSS
 cargo test --lib test::actionability::tests
 cargo test --lib test::test_action::tests
 cargo test --lib css_only_selectors_in_ -- --ignored
+cargo test --lib cancelled_inspector_session_does_not_stream_stylesheet_events -- --ignored
 ```
 
 The ignored fixtures require cached Chromium. Test quotes, backslashes,

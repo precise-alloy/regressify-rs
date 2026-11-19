@@ -16,6 +16,10 @@ are historical evidence, not open implementation tasks.
   captures already did; `frame` itself still accepts action selectors.
   The two `css_only_selectors_in_` Chromium regressions reproduce the original
   failures and check the CSS-only boundary.
+- Resolved: timing out an action after `CSS.enable` could leave stylesheet
+  events on the scenario connection. Mask insertion now owns a separate CDP
+  connection. A Chromium fixture cancels a pending command after both domains
+  are enabled, changes a stylesheet, and checks the scenario event stream.
 
 ## Link Styles (2026-11-18)
 

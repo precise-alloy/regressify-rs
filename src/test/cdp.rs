@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Result, anyhow};
 use chromiumoxide::{
-    Browser, Connection,
+    Browser, Command, Connection,
     cdp::browser_protocol::target::SessionId,
     types::{CallId, EventMessage, Message, Method, MethodId},
 };
@@ -48,6 +48,7 @@ impl Drop for ConnectionTask {
 
 #[derive(Clone)]
 pub(super) struct Client {
+    browser_ws: Arc<str>,
     requests: mpsc::Sender<Request>,
     events: broadcast::Sender<Event>,
     _task: Arc<ConnectionTask>,
@@ -55,9 +56,17 @@ pub(super) struct Client {
 
 impl Client {
     pub async fn connect(browser: &Browser) -> Result<Self> {
+        Self::connect_to(Arc::from(browser.websocket_address().as_str())).await
+    }
+
+    pub async fn isolated_connection(&self) -> Result<Self> {
+        Self::connect_to(self.browser_ws.clone()).await
+    }
+
+    async fn connect_to(browser_ws: Arc<str>) -> Result<Self> {
         let mut connection = tokio::time::timeout(
             Duration::from_secs(30),
-            Connection::<Event>::connect(browser.websocket_address()),
+            Connection::<Event>::connect(browser_ws.as_ref()),
         )
         .await??;
         let (requests, mut receiver) = mpsc::channel::<Request>(64);
@@ -97,6 +106,7 @@ impl Client {
             }
         });
         Ok(Self {
+            browser_ws,
             requests,
             events,
             _task: Arc::new(ConnectionTask(task)),
@@ -105,6 +115,16 @@ impl Client {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.events.subscribe()
+    }
+
+    pub async fn execute<C: Command>(&self, session: &str, command: C) -> Result<C::Response> {
+        let std::borrow::Cow::Borrowed(method) = command.identifier() else {
+            anyhow::bail!("CDP command identifier must be static");
+        };
+        let result = self
+            .call(Some(session), method, serde_json::to_value(command)?)
+            .await?;
+        Ok(serde_json::from_value(result)?)
     }
 
     pub async fn call(

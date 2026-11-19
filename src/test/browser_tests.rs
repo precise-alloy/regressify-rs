@@ -1718,14 +1718,18 @@ async fn css_only_selectors_in_hide_and_remove() -> Result<()> {
         }
         let child_url = site.origin.replace("127.0.0.1", "localhost");
         page.evaluate(format!("(async () => {{
-            const child = document.createElement('iframe');
-            child.src = {};
-            const loaded = new Promise(resolve => child.onload = resolve);
-            document.body.append(child);
-            await loaded;
+            for (const [id, url] of [['cross', {}], ['same', location.href]]) {{
+                const child = document.createElement('iframe');
+                child.id = id;
+                child.src = url;
+                const loaded = new Promise(resolve => child.onload = resolve);
+                document.body.append(child);
+                await loaded;
+            }}
         }})()", serde_json::to_string(&child_url)?)).await?;
-        let frame = Some(Frame::Single("css=iframe".into()));
-        for scope in [&frame, &None] {
+        let cross = Some(Frame::Single("css=#cross".into()));
+        let same = Some(Frame::Single("css=#same".into()));
+        for scope in [&cross, &same, &None] {
             let target = runtime.target(scope, Duration::from_secs(5)).await?;
             let unmasked: bool = target.evaluate(r#"getComputedStyle(document.querySelector('main')).display !== 'none'
                 && getComputedStyle(document.querySelector('h2')).display !== 'none'
