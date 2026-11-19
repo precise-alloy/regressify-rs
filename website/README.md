@@ -232,7 +232,9 @@ live `/downloads/latest.txt`, checks out the corresponding release tag, builds
 its catalog, and runs the same deploy script. For older releases without the
 catalog builder it uses the release CLI's legacy export, after verifying the CLI
 against the feed's SHA-256. The update feed and MCP catalog stay on the deployed
-release; website and Worker code can change.
+release; website and Worker code can change. Test new authoring guidance in
+the Rust catalog tests. The Worker tests compare what MCP clients receive
+with the supplied release catalog, not with wording from `master`.
 
 Both workflows use the `website-production` GitHub environment on their `deploy`
 job, with `https://regressify.eshn.dev` as its URL. GitHub displays this link in

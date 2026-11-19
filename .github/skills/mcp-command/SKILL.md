@@ -12,7 +12,7 @@ description: 'Use when changing hosted MCP authoring or troubleshooting guides, 
 ## Procedure and Invariants
 
 1. The CLI has no MCP generation command. The feature-gated repository-only catalog binary derives content from Rust types; it must not read workspace content, fetch dependencies, start Chromium, or deploy. The official endpoint (https://regressify.eshn.dev/mcp, REGRESSIFY_MCP_URL in init) runs inside the website Worker.
-1. Preserve release-matched catalog generation and the legacy fallback for releases predating the catalog binary. Match catalog versions to the release manifest before deployment; see the [release pipeline](../release-pipeline/SKILL.md). Keep website and MCP test compatibility settings aligned.
+1. Preserve release-matched catalog generation and the legacy fallback for releases predating the catalog binary. Match catalog versions to the release manifest before deployment; see the [release pipeline](../release-pipeline/SKILL.md). Assert required wording in Rust catalog tests; Worker delivery tests compare responses to the supplied catalog, which can predate `master`. Keep website and MCP test compatibility settings aligned.
 1. Derive schemas from real Rust types. Keep viewport schema metadata available without desktop features. Cookie format guidance uses the real runtime parser in tests instead of introducing a second cookie schema.
    Cover local constraints negatively as well as valid examples: positive workspace
    timeouts and nonempty capture selectors must not reject documented zero

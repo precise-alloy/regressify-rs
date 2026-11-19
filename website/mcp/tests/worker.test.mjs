@@ -87,93 +87,48 @@ test("every guide, schema, and example can be retrieved", async () => {
     const result = await client.callTool({ name: "get_example", arguments: { task } });
     assert.equal(result.isError, undefined);
     assert.ok(result.content[0].text.includes(catalog.examples[task].path));
+    assert.ok(result.content[0].text.includes(catalog.examples[task].content.trimEnd()), `Missing example body: ${task}`);
   }
 });
 
-test("resources and prompts contain standalone instructions", async () => {
+test("startup, default guide, resources, and prompts deliver the supplied catalog", async () => {
+  // Website-only deploys run this Worker against the deployed release, not necessarily HEAD.
+  const { instructions, guides } = catalog;
+  assert.equal(client.getInstructions(), instructions);
+  const guide = await client.callTool({ name: "get_authoring_guide", arguments: {} });
+  assert.equal(guide.isError, undefined);
+  assert.ok(guide.content[0].text.includes(guides.overview.content));
+
   const { resources } = await client.listResources();
   assert.equal(resources.length, Object.keys(catalog.guides).length + Object.keys(catalog.schemas).length);
-  for (const resource of resources) {
+  for (const [topic, { content }] of Object.entries(guides)) {
+    const resource = resources.find(({ name }) => name === `guide-${topic}`);
+    assert.ok(resource, `Missing guide resource: ${topic}`);
     const result = await client.readResource({ uri: resource.uri });
-    assert.ok(result.contents[0].text.length > 0);
+    assert.ok(result.contents[0].text.includes(content), `Wrong guide resource: ${topic}`);
+  }
+  for (const [kind, schema] of Object.entries(catalog.schemas)) {
+    const resource = resources.find(({ name }) => name === `schema-${kind}`);
+    assert.ok(resource, `Missing schema resource: ${kind}`);
+    const result = await client.readResource({ uri: resource.uri });
+    assert.deepEqual(JSON.parse(result.contents[0].text), schema);
   }
   const { prompts } = await client.listPrompts();
   assert.equal(prompts[0].name, "author_regressify");
-  const prompt = await client.getPrompt({ name: "author_regressify", arguments: { topic: "actions" } });
-  assert.ok(prompt.messages[0].content.text.includes(catalog.guides.actions.content));
-  assert.ok(prompt.messages[0].content.text.includes("Never send cookies"));
+  for (const [topic, { content }] of Object.entries(guides)) {
+    const prompt = await client.getPrompt({ name: "author_regressify", arguments: { topic } });
+    const text = prompt.messages[0].content.text;
+    assert.ok(text.includes(instructions), `Missing startup instructions in ${topic} prompt`);
+    assert.ok(text.includes(guides.overview.content), `Missing overview in ${topic} prompt`);
+    assert.ok(text.includes(content), `Missing selected guide in ${topic} prompt`);
+  }
 });
 
-test("diagnostic and hook guidance is discoverable without workspace uploads", async () => {
+test("the guide tool advertises diagnostics and recipes", async () => {
   const { tools } = await client.listTools();
   const guide = tools.find((tool) => tool.name === "get_authoring_guide");
   assert.match(guide.description, /diagnos/i);
   assert.match(guide.description, /recipes/);
-  for (const topic of ["hooks", "troubleshooting", "recipes"]) {
-    const result = await client.callTool({ name: "get_authoring_guide", arguments: { topic } });
-    assert.equal(result.isError, undefined);
-    assert.ok(result.content[0].text.includes(catalog.guides[topic].content));
-    const prompt = await client.getPrompt({ name: "author_regressify", arguments: { topic } });
-    assert.ok(prompt.messages[0].content.text.includes(catalog.guides[topic].content));
-    assert.ok(prompt.messages[0].content.text.includes("Never send cookies"));
-  }
-  assert.ok(catalog.guides.troubleshooting.content.includes("--log-level debug"));
-  assert.ok(catalog.guides.troubleshooting.content.includes("_diagnostics"));
-  assert.ok(catalog.guides.files.content.includes("AGENTS.md"));
-});
-
-test("consumer memory and suite capture guidance reaches instructions, tools, resources, and prompts", async () => {
-  const guide = await client.callTool({ name: "get_authoring_guide", arguments: {} });
-  const { resources } = await client.listResources();
-  const overview = resources.find((resource) => resource.name === "guide-overview");
-  assert.ok(overview);
-  const resource = await client.readResource({ uri: overview.uri });
-  const prompt = await client.getPrompt({ name: "author_regressify", arguments: { topic: "troubleshooting" } });
-  for (const text of [client.getInstructions(), guide.content[0].text, resource.contents[0].text, prompt.messages[0].content.text]) {
-    for (const instruction of [
-      ".ai/memory/README.md",
-      "consumer project",
-      "Before authoring or troubleshooting",
-      "Before finishing",
-      "failed approaches",
-      "60 lines",
-      "one site and one specific behavior",
-      "Split long or broad notes",
-      "Whenever you create or edit a test suite",
-      "must run",
-      "regressify ref --test-suite <suite-name>",
-      "installed together",
-      "PATH",
-      "all intended screenshots",
-      "exit code zero",
-      "updates successful references",
-      "report the blocker",
-      "first match in DOM order",
-      "Prefer standard CSS selectors",
-      ":visible",
-      "custom dropdowns",
-    ]) {
-      assert.ok(text.includes(instruction), `Missing authoring instruction: ${instruction}`);
-    }
-  }
-});
-
-test("related-state capture guidance reaches startup, tools, resources, and prompts", async () => {
-  const guide = await client.callTool({ name: "get_authoring_guide", arguments: {} });
-  const { resources } = await client.listResources();
-  const overview = resources.find((resource) => resource.name === "guide-overview");
-  assert.ok(overview);
-  const resource = await client.readResource({ uri: overview.uri });
-  const prompt = await client.getPrompt({ name: "author_regressify", arguments: { topic: "actions" } });
-  for (const text of [client.getInstructions(), guide.content[0].text, resource.contents[0].text, prompt.messages[0].content.text]) {
-    const normalized = text.replace(/\s+/g, " ");
-    for (const instruction of ["same larger capture area", "closed/default", "opened/expanded", "viewport", "full page", "before interaction", "header-only"]) {
-      assert.ok(normalized.includes(instruction), `Missing related-state capture instruction: ${instruction}`);
-    }
-  }
-  const example = await client.callTool({ name: "get_example", arguments: { task: "navigation-menus" } });
-  assert.match(example.content[0].text, /selector: viewport/);
-  assert.doesNotMatch(example.content[0].text, /selector: header/);
 });
 
 test("exported script examples are standard browser JavaScript", async () => {
