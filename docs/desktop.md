@@ -1794,20 +1794,44 @@ Each command is one document undo step. They also work on invalid drafts without
 bypassing save validation. Comment toggling uses YAML `#` comments and is disabled
 for strict JSON. Effective, logs, and Git diffs remain read-only.
 
-| Shortcut                      | Source Operation                                                      |
-| ----------------------------- | --------------------------------------------------------------------- |
-| Ctrl+/                        | Toggle YAML line comments                                             |
-| Tab / Shift+Tab               | Indent / outdent selected lines; Tab accepts an open suggestion first |
-| Ctrl+] / Ctrl+[               | Indent / outdent the current or selected lines                        |
-| Alt+Up / Alt+Down             | Move lines up / down                                                  |
-| Shift+Alt+Up / Shift+Alt+Down | Duplicate lines above / below                                         |
-| Ctrl+Shift+K                  | Delete lines                                                          |
-| Ctrl+Z / Ctrl+Shift+Z         | Undo / redo source edits                                              |
+| Shortcut                       | Source Operation                                                      |
+| ------------------------------ | --------------------------------------------------------------------- |
+| Ctrl+/                         | Toggle YAML line comments                                             |
+| Tab / Shift+Tab                | Indent / outdent selected lines; Tab accepts an open suggestion first |
+| Ctrl+] / Ctrl+[                | Indent / outdent the current or selected lines                        |
+| Alt+Up / Alt+Down              | Move lines up / down                                                  |
+| Shift+Alt+Up / Shift+Alt+Down  | Duplicate lines above / below                                         |
+| Ctrl+Shift+K                   | Delete lines                                                          |
+| Ctrl+Enter / Ctrl+Shift+Enter  | Insert an empty line below / above without splitting the current line |
+| Ctrl+L                         | Select the current line; repeat to extend the selection by a line     |
+| Home / Shift+Home              | Move / select to the first non-blank character, then the line start   |
+| Ctrl+C / Ctrl+X (no selection) | Copy / cut the whole current line, including its line ending          |
+| Ctrl+V (after a line copy)     | Paste the copied line above the current line                          |
+| Ctrl+Z / Ctrl+Shift+Z          | Undo / redo source edits                                              |
 
-On macOS, use Cmd instead of Ctrl and Option instead of Alt for these shortcuts.
-Ctrl+Y also redoes source edits on Windows and Linux. Clipboard, text selection,
-navigation, and Find/Replace retain the editor's native behavior. Line shortcuts
-do not act on the source while a search box or another input has focus.
+On macOS, use Cmd instead of Ctrl and Option instead of Alt for these shortcuts;
+Cmd+Left and Ctrl+A also act as Home. Ctrl+Y also redoes source edits on Windows
+and Linux.
+
+Ctrl+Enter and Ctrl+Shift+Enter work from the caret's line, not the whole selection,
+and leave the caret on the new line. A line below is indented as Enter at the end of
+the line would indent it: it adopts a deeper following line, or adds one level after
+`{`, `[`, or `(`. A line above is Enter at the end of the previous line, so it takes
+that line's indentation; on the first line it reuses the current indentation. Home
+alternates between the first non-blank character and the line start; on a blank
+line, or a later row of a wrapped line, it goes to that line's or row's start. With
+several cursors, smart Home first collapses them to the active cursor. Ctrl+L
+selects whole lines, so a following Ctrl+C or Ctrl+X takes them with their line
+endings.
+
+Like VS Code, copying or cutting when no cursor selects text takes the active
+caret's whole line; an unterminated last line gets a line ending so it pastes as a
+line. Pasting that line with nothing selected inserts it above the caret's line and
+keeps the caret on its text; pasting over a selection replaces the selection. Text
+copied from a selection or another application pastes inline. Copying an empty
+document leaves the clipboard unchanged. Other selection commands, arrow-key
+navigation, and Find/Replace retain the editor's native behavior. Line shortcuts do
+not act on the source while a search box or another input has focus.
 
 Source shortcuts, toolbar Undo/Redo, and document commands share one history,
 including accepted Fields edits. Adjacent typing or deletion is grouped; moving

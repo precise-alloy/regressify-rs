@@ -9916,6 +9916,408 @@ fn source_line_commands_use_document_undo_and_redo(cx: &mut TestAppContext) {
     .unwrap();
 }
 
+/// Sets Source text, selection, and focus in its own effect cycle.
+fn place_source(
+    cx: &mut TestAppContext,
+    handle: WindowHandle<Root>,
+    view: &Entity<Workbench>,
+    text: &str,
+    range: std::ops::Range<usize>,
+) {
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |this, cx| {
+            this.select_editor_tab(1, window, cx);
+            this.source.update(cx, |state, cx| {
+                state.set_value(text, window, cx);
+                state.set_selected_range(range, cx);
+                window.focus(&state.focus_handle(cx), cx);
+            });
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+}
+
+/// Presses one key in its own effect cycle, so deferred Source commands finish before asserts.
+fn press_source(cx: &mut TestAppContext, handle: WindowHandle<Root>, key: &str) {
+    cx.update_window(handle.into(), |_, window, cx| window.press(key, cx))
+        .unwrap();
+}
+
+fn source_state(
+    cx: &mut TestAppContext,
+    view: &Entity<Workbench>,
+) -> (String, std::ops::Range<usize>) {
+    cx.update(|cx| {
+        let state = view.read(cx).source.read(cx);
+        (state.value().to_string(), state.selected_range())
+    })
+}
+
+fn clipboard_entry(cx: &mut TestAppContext) -> (String, Option<String>) {
+    cx.update(|cx| {
+        let item = cx.read_from_clipboard().unwrap();
+        (item.text().unwrap(), item.metadata().cloned())
+    })
+}
+
+#[gpui_kit::test]
+fn source_line_clipboard_copies_cuts_and_pastes_whole_lines(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let (handle, view) = editor(cx, directory.path());
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    let key = |name: &str| format!("{modifier}-{name}");
+    let original = "debug: true\nheadless: true\nscenarios: []\n";
+    let pasted = "headless: true\ndebug: true\nheadless: true\nscenarios: []\n";
+
+    // An empty selection copies its whole line, marked for line-wise paste.
+    place_source(cx, handle, &view, original, 15..15);
+    press_source(cx, handle, &key("c"));
+    let (copied, metadata) = clipboard_entry(cx);
+    assert_eq!(copied, "headless: true\n");
+    assert!(metadata.is_some());
+    assert_eq!(source_state(cx, &view).0, original);
+
+    // Pasting a copied line inserts it above the caret's line and keeps the caret column.
+    place_source(cx, handle, &view, original, 3..3);
+    press_source(cx, handle, &key("v"));
+    assert_eq!(source_state(cx, &view), (pasted.into(), 18..18));
+    press_source(cx, handle, &key("z"));
+    assert_eq!(source_state(cx, &view).0, original);
+    press_source(cx, handle, &key("shift-z"));
+    assert_eq!(source_state(cx, &view).0, pasted);
+
+    // A line paste over a selection replaces it, as native paste does.
+    place_source(cx, handle, &view, original, 0..11);
+    press_source(cx, handle, &key("v"));
+    assert_eq!(
+        source_state(cx, &view).0,
+        "headless: true\n\nheadless: true\nscenarios: []\n"
+    );
+
+    // Text copied elsewhere, or from a selection, keeps native inline paste.
+    cx.update(|cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(copied.clone())));
+    place_source(cx, handle, &view, original, 3..3);
+    press_source(cx, handle, &key("v"));
+    assert_eq!(
+        source_state(cx, &view).0,
+        "debheadless: true\nug: true\nheadless: true\nscenarios: []\n"
+    );
+    place_source(cx, handle, &view, original, 0..5);
+    press_source(cx, handle, &key("c"));
+    assert_eq!(clipboard_entry(cx), ("debug".into(), None));
+
+    // Cutting an empty selection removes and copies the whole line as one undo step.
+    place_source(cx, handle, &view, original, 15..15);
+    press_source(cx, handle, &key("x"));
+    assert_eq!(source_state(cx, &view).0, "debug: true\nscenarios: []\n");
+    assert_eq!(
+        clipboard_entry(cx),
+        ("headless: true\n".into(), metadata.clone())
+    );
+    press_source(cx, handle, &key("z"));
+    assert_eq!(source_state(cx, &view).0, original);
+
+    // An unterminated last line is copied with a line ending so it pastes as a line.
+    place_source(cx, handle, &view, "debug: true\r\nheadless: true", 20..20);
+    press_source(cx, handle, &key("c"));
+    assert_eq!(clipboard_entry(cx).0, "headless: true\r\n");
+    place_source(cx, handle, &view, "debug: true\r\nheadless: true", 0..0);
+    press_source(cx, handle, &key("v"));
+    assert_eq!(
+        source_state(cx, &view).0,
+        "headless: true\r\ndebug: true\r\nheadless: true"
+    );
+
+    // An empty document leaves the clipboard alone.
+    cx.update(|cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("kept".into())));
+    place_source(cx, handle, &view, "", 0..0);
+    press_source(cx, handle, &key("c"));
+    press_source(cx, handle, &key("x"));
+    assert_eq!(clipboard_entry(cx), ("kept".into(), None));
+}
+
+#[gpui_kit::test]
+fn source_line_clipboard_keeps_selections_of_additional_cursors(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let (handle, view) = editor(cx, directory.path());
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    let original = "debug: true\nheadless: true\nscenarios: []\n";
+    for (key, expected) in [
+        ("c", original),
+        ("x", ": true\nheadless: true\nscenarios: []\n"),
+    ] {
+        // The active cursor is empty, but an added cursor selects "debug".
+        place_source(cx, handle, &view, original, 15..15);
+        cx.update(|cx| {
+            view.read(cx)
+                .source
+                .clone()
+                .update(cx, |state, cx| state.add_selection(0..5, cx));
+        });
+        assert_eq!(source_state(cx, &view).1, 15..15, "{key}");
+        press_source(cx, handle, &format!("{modifier}-{key}"));
+        assert_eq!(clipboard_entry(cx), ("debug".into(), None), "{key}");
+        assert_eq!(source_state(cx, &view).0, expected, "{key}");
+    }
+}
+
+#[gpui_kit::test]
+fn source_line_clipboard_respects_busy_and_unfocused_editors(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let (handle, view) = editor(cx, directory.path());
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    let original = "debug: true\nheadless: true\nscenarios: []\n";
+    place_source(cx, handle, &view, original, 15..15);
+    cx.update(|cx| {
+        view.update(cx, |this, cx| {
+            this.busy = true;
+            cx.notify();
+        })
+    });
+    // Copying is read-only and still works while busy; edits do not.
+    press_source(cx, handle, &format!("{modifier}-c"));
+    let line = clipboard_entry(cx);
+    assert_eq!(line.0, "headless: true\n");
+    press_source(cx, handle, &format!("{modifier}-x"));
+    press_source(cx, handle, &format!("{modifier}-v"));
+    assert_eq!(source_state(cx, &view).0, original);
+    assert_eq!(clipboard_entry(cx), line);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |this, cx| {
+            this.busy = false;
+            window.focus(&this.search.read(cx).focus_handle(cx), cx);
+            cx.notify();
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    press_source(cx, handle, &format!("{modifier}-v"));
+    assert_eq!(source_state(cx, &view).0, original);
+    assert!(cx.update(|cx| !view.read(cx).session.dirty()));
+}
+
+#[gpui_kit::test]
+fn source_line_navigation_selects_inserts_and_homes_like_vs_code(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let (handle, view) = editor(cx, directory.path());
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    let original = "scenarios:\n  - label: home\n    url: /\n";
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |this, cx| {
+            assert!(this.select_editor_tab(1, window, cx));
+        });
+        let source = view.read(cx).source.clone();
+        let place = |range: std::ops::Range<usize>,
+                     window: &mut gpui_kit::Window,
+                     cx: &mut gpui_kit::App| {
+            source.update(cx, |state, cx| {
+                state.set_value(original, window, cx);
+                state.set_selected_range(range, cx);
+                window.focus(&state.focus_handle(cx), cx);
+            });
+            window.render_frame(cx);
+        };
+        let selection = |cx: &mut gpui_kit::App| {
+            let state = source.read(cx);
+            (state.selected_range(), state.cursor())
+        };
+
+        // Ctrl+L selects the caret's line, then extends by one line per press.
+        place(15..15, window, cx);
+        window.press(&format!("{modifier}-l"), cx);
+        assert_eq!(selection(cx), (11..27, 27));
+        window.press(&format!("{modifier}-l"), cx);
+        assert_eq!(selection(cx), (11..38, 38));
+        window.press(&format!("{modifier}-l"), cx);
+        assert_eq!(selection(cx), (11..38, 38));
+        assert_eq!(source.read(cx).value().as_ref(), original);
+
+        // Ctrl+Enter opens a line below without splitting the current line; like Enter,
+        // it takes the deeper indentation of the following line.
+        place(15..15, window, cx);
+        window.press(&format!("{modifier}-enter"), cx);
+        let below = "scenarios:\n  - label: home\n    \n    url: /\n";
+        assert_eq!(source.read(cx).value().as_ref(), below);
+        assert_eq!(selection(cx), (31..31, 31));
+        window.press(&format!("{modifier}-z"), cx);
+        assert_eq!(source.read(cx).value().as_ref(), original);
+        window.press(&format!("{modifier}-shift-z"), cx);
+        assert_eq!(source.read(cx).value().as_ref(), below);
+
+        // Ctrl+Shift+Enter opens a line above with the current indentation.
+        place(14..14, window, cx);
+        window.press(&format!("{modifier}-shift-enter"), cx);
+        assert_eq!(
+            source.read(cx).value().as_ref(),
+            "scenarios:\n  \n  - label: home\n    url: /\n"
+        );
+        assert_eq!(selection(cx), (13..13, 13));
+    })
+    .unwrap();
+
+    // Smart Home steps after Kit's deferred move, so each key gets its own effect cycle.
+    let source = cx.update(|cx| view.read(cx).source.clone());
+    for (start, key, expected) in [
+        // Home alternates between the first non-blank character and the line start.
+        (Some(35), "home", (31..31, 31)),
+        (None, "home", (27..27, 27)),
+        (None, "home", (31..31, 31)),
+        (Some(29), "home", (31..31, 31)),
+        // Shift+Home keeps the anchor and leaves the caret at the selection start.
+        (Some(35), "shift-home", (31..35, 31)),
+        (None, "shift-home", (27..35, 27)),
+        // Unindented lines keep native Home.
+        (Some(5), "home", (0..0, 0)),
+    ] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            if let Some(start) = start {
+                source.update(cx, |state, cx| {
+                    state.set_value(original, window, cx);
+                    state.set_selected_range(start..start, cx);
+                    window.focus(&state.focus_handle(cx), cx);
+                });
+                window.render_frame(cx);
+            }
+            window.press(key, cx);
+        })
+        .unwrap();
+        cx.update(|cx| {
+            let state = source.read(cx);
+            assert_eq!(
+                (state.selected_range(), state.cursor()),
+                expected,
+                "{key} from {start:?}"
+            );
+        });
+    }
+
+    // Additional cursors collapse first, so stepping over this line's indentation cannot carry
+    // them into later lines.
+    place_source(cx, handle, &view, "b\n    a: 1\n", 9..9);
+    cx.update(|cx| source.update(cx, |state, cx| state.add_selection(0..0, cx)));
+    press_source(cx, handle, "home");
+    assert_eq!(source_state(cx, &view).1, 6..6);
+    cx.update_window(handle.into(), |_, window, cx| window.input("x", cx))
+        .unwrap();
+    assert_eq!(source_state(cx, &view).0, "b\n    xa: 1\n");
+}
+
+#[gpui_kit::test]
+async fn source_line_commands_menu_inserts_lines_by_pointer(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let (handle, view) = editor(cx, directory.path());
+    let original = "debug: true\nheadless: true\nscenarios: []\n";
+    for (label, expected, caret) in [
+        (
+            "Insert Line Below",
+            "debug: true\nheadless: true\n\nscenarios: []\n",
+            27,
+        ),
+        (
+            "Insert Line Above",
+            "debug: true\n\nheadless: true\nscenarios: []\n",
+            12,
+        ),
+    ] {
+        place_source(cx, handle, &view, original, 15..15);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("source-edit-menu", cx)
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(2), |window, _| {
+            window.try_find("popup-menu").is_some()
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            let index = (0_usize..32)
+                .find(|index| {
+                    window
+                        .within("popup-menu")
+                        .try_find(*index)
+                        .is_some_and(|item| item.label() == Some(label))
+                })
+                .unwrap_or_else(|| panic!("{label} is not in the menu"));
+            window.within("popup-menu").click(index, cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(2), |window, cx| {
+            let source = view.read(cx).source.read(cx);
+            source.value().as_ref() == expected
+                && source.selected_range() == (caret..caret)
+                && source.focus_handle(cx).is_focused(window)
+                && view.read(cx).session.dirty()
+        })
+        .await;
+    }
+}
+
+#[gpui_kit::test]
+fn source_line_insert_respects_busy_and_unfocused_editors(cx: &mut TestAppContext) {
+    let directory = tempfile::tempdir().unwrap();
+    let (handle, view) = editor(cx, directory.path());
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    let original = "debug: true\nheadless: true\nscenarios: []\n";
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |this, cx| {
+            assert!(this.select_editor_tab(1, window, cx));
+            this.source.update(cx, |state, cx| {
+                state.set_value(original, window, cx);
+                state.set_selected_range(15..15, cx);
+                window.focus(&state.focus_handle(cx), cx);
+            });
+            this.busy = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        for key in [
+            format!("{modifier}-enter"),
+            format!("{modifier}-shift-enter"),
+        ] {
+            window.press(&key, cx);
+            assert_eq!(view.read(cx).source.read(cx).value().as_ref(), original);
+        }
+        view.update(cx, |this, cx| {
+            this.busy = false;
+            window.focus(&this.search.read(cx).focus_handle(cx), cx);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        for key in [
+            format!("{modifier}-enter"),
+            format!("{modifier}-shift-enter"),
+            format!("{modifier}-l"),
+        ] {
+            window.press(&key, cx);
+            assert_eq!(view.read(cx).source.read(cx).value().as_ref(), original);
+            assert_eq!(view.read(cx).source.read(cx).selected_range(), 15..15);
+        }
+        assert!(!view.read(cx).session.dirty());
+    })
+    .unwrap();
+}
+
 #[gpui_kit::test]
 fn source_line_commands_preserve_native_unicode_crlf_and_reversed_selection(
     cx: &mut TestAppContext,

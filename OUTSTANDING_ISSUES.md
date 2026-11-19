@@ -584,6 +584,17 @@ are historical evidence, not open implementation tasks.
 
 ## Source Editor Review (2026-10-19)
 
+- Resolved (2026-11-19): Ctrl+C/Ctrl+X did nothing without a Source selection
+  (Kit copies only selected text), and Ctrl+V always pasted inline. When no cursor
+  selects text, [Source](src/desktop/ui/source.rs) now copies/cuts the active line
+  with clipboard metadata, and pasting that line inserts it above the caret's line;
+  any selected cursor keeps Kit's native copy. `source_line_clipboard_` native tests
+  failed before the fix, including the additional-cursor selection case.
+- Known limit: Kit 0.8.0 exposes only the active cursor. Line copy/cut/paste with
+  several empty cursors acts on the active one, and smart Home collapses extra
+  cursors first (`source_line_navigation_` failed without that). A reversed Shift+Home
+  selection cannot be re-created through the public API, so with several cursors
+  that one case still steps every cursor by the active line's indentation.
 - Resolved: [Source line commands](src/desktop/ui/source.rs) classified Unicode
   whitespace inconsistently, so uncommenting could slice a UTF-8 character or
   delete a form feed. Commenting and indentation now share ASCII-only indentation
