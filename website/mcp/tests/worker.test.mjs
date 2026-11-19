@@ -149,6 +149,7 @@ test("consumer memory and suite capture guidance reaches instructions, tools, re
       "updates successful references",
       "report the blocker",
       "first match in DOM order",
+      "Prefer standard CSS selectors",
       ":visible",
       "custom dropdowns",
     ]) {

@@ -37,7 +37,9 @@ description: 'Use when changing hosted MCP authoring or troubleshooting guides, 
    and safe repairs without asking clients to upload logs or private data.
    Verify guide and doc-comment claims against runtime source, not user docs:
    selector engines, wait/URL order, lifecycle timing, artifact paths, report
-   fields, and diagnostic record fields have drifted before. Every ```yaml fence
+   fields, and diagnostic record fields have drifted before. Keep startup,
+   overview, actions and managed workspace instructions CSS-first; distinguish
+   action-only fallbacks from CSS-only screenshot and stylesheet targets. Every ```yaml fence
    in a guide must be a complete workspace, suite, viewport, or profile file with
    explicit scenario IDs; catalog tests parse and schema-check each one.
 1. Every action needs a typed synthetic example. Update examples and prose for semantic changes; schema generation alone does not validate dependencies, paths, credentials, capture identity, or live browser behavior.

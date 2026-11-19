@@ -21,8 +21,9 @@ scenarios:
 ```
 
 `hideSelectors` keeps layout space (`visibility: hidden`); `removeSelectors`
-collapses it (`display: none`). Both are plain CSS applied to every document
-before actions, and selectors that match nothing are ignored. The `hide` and
+collapses it (`display: none`). Both lists add inline CSS to the selected tab's
+main document before actions. They do not reach iframes, a strict `style-src`
+can block them, and selectors that match nothing are ignored. The `hide` and
 `remove` actions instead wait for a match and fail when none appears, so use them
 only for elements that always exist at that step. Never hide an element a later
 action must use, and mask only nondeterministic regions such as clocks, ads, or

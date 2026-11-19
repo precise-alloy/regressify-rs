@@ -64,14 +64,14 @@ pub struct TestSuite {
     #[schemars(example = "common/_cookies.yaml")]
     pub cookie_path: Option<String>,
 
-    /// CSS file injected into every page document before actions and capture. Inherits the workspace setting; useCssOverride controls whether it is applied.
+    /// CSS file injected into the selected tab's main document before actions and capture. Inherits the workspace setting; useCssOverride controls whether it is applied.
     #[schemars(example = "common/_override.css")]
     pub css_override_path: Option<String>,
 
     /// Show the browser while capturing (default: false). Always disabled in CI environments without a display.
     pub debug: Option<bool>,
 
-    /// Standard CSS selectors hidden with visibility: hidden (layout kept) in every document before actions and capture; selectors matching nothing are ignored. A list is required, even for one selector.
+    /// Standard CSS selectors hidden with visibility: hidden (layout kept) in the selected tab's main document before actions and capture. Uses inline CSS; unmatched selectors are ignored. A list is required, even for one selector.
     #[schemars(example = vec![".timestamp", ".cookie-banner"])]
     pub hide_selectors: Option<Vec<String>>,
 
@@ -119,7 +119,7 @@ pub struct TestSuite {
     #[schemars(range(min = 0.0), example = 1000)]
     pub post_interaction_wait: Option<f64>,
 
-    /// Standard CSS selectors set to display: none in every document before actions and capture; selectors matching nothing are ignored. A list is required.
+    /// Standard CSS selectors set to display: none in the selected tab's main document before actions and capture. Uses inline CSS; unmatched selectors are ignored. A list is required.
     #[schemars(example = vec![".advertisement"])]
     pub remove_selectors: Option<Vec<String>>,
 
@@ -138,7 +138,7 @@ pub struct TestSuite {
     /// URL replacement rules applied in order after the active replacement profile and workspace rules. When find is set, ref captures replace find with ref and test captures replace find with test; otherwise test captures replace ref with test.
     pub url_replacements: Option<Vec<UrlReplacement>>,
 
-    /// Apply the CSS override file to each page document. hideSelectors and removeSelectors still apply when false. Inherits the workspace setting (default: true).
+    /// Include the override file in the main document's inline stylesheet. hideSelectors and removeSelectors are included even when false. Inherits the workspace setting (default: true).
     pub use_css_override: Option<bool>,
 
     /// Viewport label or list of labels from the viewport file. Matching ignores case; an empty list selects all viewports.
@@ -219,7 +219,7 @@ pub struct TestScenario {
     #[schemars(example = "common/_cookies.yaml")]
     pub cookie_path: Option<String>,
 
-    /// CSS file injected into every page document before actions and capture. Inherits the suite or workspace setting.
+    /// CSS file injected into the selected tab's main document before actions and capture. Inherits the suite or workspace setting.
     #[schemars(example = "common/_override.css")]
     pub css_override_path: Option<String>,
 
@@ -230,7 +230,7 @@ pub struct TestScenario {
     /// Free-text notes about what this scenario covers.
     pub description: Option<String>,
 
-    /// Standard CSS selectors hidden with visibility: hidden (layout kept) in every document before actions and capture. A list is required; replaces inherited hideSelectors.
+    /// Standard CSS selectors hidden with visibility: hidden (layout kept) in the selected tab's main document before actions and capture. Uses inline CSS. A list is required; replaces inherited hideSelectors.
     #[schemars(example = vec![".timestamp"])]
     pub hide_selectors: Option<Vec<String>>,
 
@@ -290,7 +290,7 @@ pub struct TestScenario {
     #[schemars(range(min = 0.0), example = 1000)]
     pub post_interaction_wait: Option<f64>,
 
-    /// Standard CSS selectors set to display: none in every document before actions and capture. A list is required; replaces inherited removeSelectors.
+    /// Standard CSS selectors set to display: none in the selected tab's main document before actions and capture. Uses inline CSS. A list is required; replaces inherited removeSelectors.
     #[schemars(example = vec![".advertisement"])]
     pub remove_selectors: Option<Vec<String>>,
 
@@ -333,7 +333,7 @@ pub struct TestScenario {
     #[schemars(skip)]
     pub reference_url: Option<String>,
 
-    /// Apply the CSS override file to each page document. hideSelectors and removeSelectors still apply when false. Inherits the suite or workspace setting (default: true).
+    /// Include the override file in the main document's inline stylesheet. hideSelectors and removeSelectors are included even when false. Inherits the suite or workspace setting (default: true).
     pub use_css_override: Option<bool>,
 
     /// Viewport label or list of labels from the viewport file. Replaces inherited selection; an empty list selects all viewports.

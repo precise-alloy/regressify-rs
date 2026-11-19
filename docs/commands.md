@@ -313,7 +313,9 @@ Both entry points also maintain a dedicated `## Regressify CMP` section in the
 workspace root's `AGENTS.md`. They create the file when missing, append the section
 when absent, or replace outdated section content. The instructions direct agents to
 use `regressify-mcp`, starting with `get_authoring_guide` and consulting
-`get_schema` and `get_example` before authoring tests or configuration.
+`get_schema` and `get_example` before authoring tests or configuration. Both the
+managed guidance and MCP prefer stable standard CSS selectors verified against
+the reference and test environments; see [action selector guidance](create-action.md#actions).
 
 The generated instructions and MCP overview also require agents to read relevant
 notes in the consumer project's `.ai/memory/` before authoring or troubleshooting,

@@ -267,12 +267,14 @@ browser developer tools, with authorization.
 
 ## Common Failures
 
-- Element not found or not actionable: confirm the URL, tab, frame, and
-  selector against the live page, then act on the condition. Selectors use the
+- Element not found or not actionable: check the URL, tab and frame, then test
+  each part of the selector. A heading can be attached in a hidden container
+  before it appears in the visible results. Verify a stable standard CSS
+  selector in both environments; a match count alone is not readiness. Actions use the
   first DOM match: when a responsive page keeps both a hidden mobile copy and a
   visible desktop copy of a link or button in the DOM, an unscoped selector can
   match the hidden copy first and fail with `element was not visible`
-  (`display_none`). Scope the selector to the active container, append
+  (`display_none`). Scope to the active container first. If needed, append
   `:visible` or `>> visible=true` on action/wait/`readySelector` selectors, and
   restrict viewport-specific steps with `viewportNames`. Wait for the URL and a
   destination element after navigation, add `switchTab: new` after links that

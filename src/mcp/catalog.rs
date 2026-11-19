@@ -266,9 +266,12 @@ pub(super) fn build() -> Result<Value> {
             "recipes for complete common-page patterns. Use topic troubleshooting for failed tests, ",
             "reports, logs, or setup issues, and topic hooks before writing injected browser scripts. ",
             "Use get_schema for exact fields and get_example for synthetic templates. ",
-            "Selectors resolve to the first match in DOM order: when responsive pages keep hidden mobile ",
-            "and desktop duplicates in the DOM, scope selectors to the active container, use :visible or ",
-            ">> visible=true in action/wait/readySelector selectors, and restrict viewport-specific steps ",
+            "Prefer standard CSS selectors with stable page hooks. Verify the intended match on both ",
+            "reference and test pages at the configured viewports. Use Playwright extensions only when ",
+            "CSS cannot reliably identify the target in a field that supports them. ",
+            "Single-element actions use the first match in DOM order: when responsive pages keep hidden mobile ",
+            "and desktop duplicates, scope to the active container first; if needed use :visible or ",
+            ">> visible=true in action/wait/readySelector selectors. Restrict viewport-specific steps ",
             "with viewportNames. Screenshot, hide, and remove selectors accept standard CSS only. ",
             "select requires a native <select> element and check/uncheck require native checkbox or radio ",
             "inputs; use click for custom dropdowns, switches, tabs, or visually hidden native inputs. ",
@@ -665,6 +668,7 @@ mod tests {
         assert!(!troubleshooting.contains("/tests/<run-id>"));
         let actions = catalog["guides"]["actions"]["content"].as_str().unwrap();
         for contract in [
+            "Prefer standard CSS selectors",
             "text=",
             "xpath=",
             ":visible",
@@ -1038,6 +1042,17 @@ mod tests {
         }
 
         let catalog = build().unwrap();
+        for kind in ["workspace", "suite", "scenario"] {
+            for name in ["hideSelectors", "removeSelectors"] {
+                let help = catalog["schemas"][kind]["properties"][name]["description"]
+                    .as_str()
+                    .unwrap();
+                assert!(
+                    help.contains("main document") && help.contains("inline"),
+                    "{kind}.{name}: {help}"
+                );
+            }
+        }
         for (kind, root) in catalog["schemas"].as_object().unwrap() {
             for schema in std::iter::once(root).chain(
                 root["$defs"]

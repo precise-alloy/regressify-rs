@@ -38,7 +38,7 @@ may lack automatic desktop setup; compare CLI and server versions when diagnosin
 - `common/_replacement-profiles.yaml` or `.yml`: object with `profiles`,
   mapping names to ordered replacement-rule lists. Initialized as
   `profiles: {default: []}`.
-- `common/_override.css`: browser CSS injected into every page document before
+- `common/_override.css`: browser CSS injected into the selected tab's main document before
   actions and capture when `useCssOverride` is true; override with
   `cssOverridePath`. See `get_example(task="css-override")`.
 - `common/_on-ready.js`: browser-side JavaScript run once per page document
@@ -118,10 +118,11 @@ uses the runtime parser, not an independently maintained JSON Schema here.
 CSS overrides are ordinary CSS, not YAML. Hide only approved nondeterministic
 regions; do not conceal the behavior under test. `hideSelectors` and
 `removeSelectors` are appended to this CSS as `visibility: hidden` and
-`display: none` rules, even when `useCssOverride` is false. Ready JavaScript
+`display: none` rules, even when `useCssOverride` is false. The inline stylesheet
+does not reach iframes and can be blocked by the page's style policy. Ready JavaScript
 executes in the page, with DOM APIs and `window.__REGRESSIFY__` /
 `window.regressify` context. The context includes the scenario's identity, URL,
-and `requiredLogin` flag. CSS/ready hooks apply once for each document,
+and `requiredLogin` flag. CSS/ready hooks apply once for each selected main document,
 including subsequent navigation, before the next action or capture. A script may
 return a promise. Errors fail the capture; do not assume a failed script was
 applied.

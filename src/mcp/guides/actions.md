@@ -18,32 +18,41 @@ topic combines actions into complete scenarios for common page patterns.
 
 ## Selector Syntax
 
+Prefer standard CSS selectors. Start with a stable ID, test attribute or named
+component class; scope it to an ancestor you actually observed. Check the match
+count, identity and visibility on both reference and test pages at the intended
+viewports. Avoid generated class hashes, positional selectors and assumed
+landmarks such as `main`. If a wait must check wording, use a stable CSS target
+plus `text` or `containsText`, e.g. `{wait: "#results-title", text: Products}`.
+
 Element selectors in interactive actions, `scroll`, selector `wait`,
-`readySelector`, and `frame` accept CSS plus Playwright-style engines:
+`readySelector`, and `frame` accept Playwright-style fallbacks when CSS cannot
+reliably identify the target:
 `text=Sign in`, `xpath=//main//button`, `button:has-text("Sign in")`,
 `:visible`, and `>>` chains such as `css=#cart >> text=Checkout` or
 `a[href="/pricing"] >> visible=true`. CSS and text matching search open shadow
 roots; closed shadow roots are unreachable. The first match in DOM order is used.
 When a responsive page renders both a hidden mobile copy and a visible desktop
 copy of a link or button, an unscoped selector can match the hidden copy first
-and fail with `element was not visible` (`display_none`). Scope the selector to
-the active container, append `:visible` or `>> visible=true`, and filter
-viewport-specific actions with `viewportNames`.
+and fail with `element was not visible` (`display_none`). Scope to the active
+container first. If needed, append `:visible` or `>> visible=true`, and filter
+viewport-specific actions with `viewportNames`. `:text-is("Products")` is
+case-sensitive and matches an immediate text run, not the combined text of
+arbitrarily nested markup. `:has-text()` instead matches substrings including
+descendants and can match an unintended ancestor.
 
 `hide` and `remove` actions, `hideSelectors`, `removeSelectors`, and screenshot
 selectors (`selector`, `selectors`, `save.selector`) become CSS rules or
 `document.querySelector` calls, so they accept standard CSS only (no `text=`,
-`:has-text()`, `:visible`, or `>>`). A `text=` target can pass the `hide`
-existence check yet produce an ignored CSS rule. Scenario `selector` and
+`:has-text()`, `:visible`, or `>>`). Do not mix engines inside `:is()` or
+`:where()`; native CSS can silently ignore an unsupported alternative.
+A document stylesheet does not reach into shadow roots. Scenario `selector` and
 `selectors` search only the selected tab's main document, not iframes or shadow
 roots; `save.selector` searches the selected tab's main document, or the target
 `frame` when `frame` is set on `save`. In screenshot selectors, `viewport`
 means the visible viewport, not an element.
 
-Prefer stable hooks such as `[data-testid=...]`, IDs, form names, or accessible
-labels over layout paths like `div:nth-child(3)`. Inspect the real page before
-writing a selector; never copy one from an example without verifying it. Quote
-YAML selectors that begin with `#`; unquoted, YAML reads them as comments.
+Quote YAML selectors that begin with `#`; unquoted, YAML reads them as comments.
 
 ## Action Reference
 
@@ -135,10 +144,14 @@ YAML selectors that begin with `#`; unquoted, YAML reads them as comments.
 
 Finding an element uses `elementTimeout`; visibility, stability, coverage, and
 enabled checks use `actionabilityTimeout`. `hide`, `remove`, and `scroll` only
-wait for the element to exist, but fail when it never appears, so use
+wait for the element to exist, but fail when it never appears. A pseudo-element
+alone (such as `.badge::after`) cannot satisfy an element lookup. Use
 `hideSelectors` or `removeSelectors` for elements that may be absent. Action
-CSS rules apply to the current document only; configured selector lists apply
-to every document. Never hide an element that a later action must use.
+CSS rules match all qualifying elements in the selected document, even under
+a strict `style-src` policy or after the page replaces its theme sheets.
+Configured selector lists instead use the selected
+tab's main-document CSS hook; inline-style restrictions can block that hook.
+Never hide an element that a later action must use.
 
 ## Waiting and Navigation
 

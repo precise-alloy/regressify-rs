@@ -58,7 +58,7 @@ pub struct WorkspaceConfig {
     /// Default cookie YAML or JSON file loaded before navigation.
     #[schemars(example = "common/_cookies.yaml")]
     pub cookie_path: Option<String>,
-    /// Default CSS override file injected into every page document before actions and capture.
+    /// Default CSS override file injected into the selected tab's main document before actions and capture.
     #[schemars(example = "common/_override.css")]
     pub css_override_path: Option<String>,
     /// Show the browser while capturing (default: false). Always disabled in CI environments without a display.
@@ -68,7 +68,7 @@ pub struct WorkspaceConfig {
     pub delay: Option<f64>,
     /// Complete finite and pause infinite CSS/Web Animations before actions and before each capture. Default: true.
     pub freeze_animations: Option<bool>,
-    /// Standard CSS selectors hidden in every document while preserving layout space; selectors matching nothing are ignored. Supply a list, even for one selector.
+    /// Standard CSS selectors hidden in the selected tab's main document, preserving layout space. Uses inline CSS; unmatched selectors are ignored. Supply a list, even for one selector.
     #[schemars(example = vec![".timestamp"])]
     pub hide_selectors: Option<Vec<String>>,
     /// Ignore HTTPS certificate errors (default: false).
@@ -106,7 +106,7 @@ pub struct WorkspaceConfig {
     /// Milliseconds to wait after actions, before the final captures only. Non-negative; default: 1000.
     #[schemars(range(min = 0.0), example = 1000)]
     pub post_interaction_wait: Option<f64>,
-    /// Standard CSS selectors set to display: none in every document; selectors matching nothing are ignored. Supply a list, even for one selector.
+    /// Standard CSS selectors set to display: none in the selected tab's main document. Uses inline CSS; unmatched selectors are ignored. Supply a list, even for one selector.
     #[schemars(example = vec![".advertisement"])]
     pub remove_selectors: Option<Vec<String>>,
     /// Login requirement flag exposed to ready scripts. Does not log in automatically (default: false).
@@ -125,7 +125,7 @@ pub struct WorkspaceConfig {
     pub state: Option<Needs>,
     /// URL replacement rules applied in order. Each entry requires ref and test; find, regex, and flags are optional.
     pub url_replacements: Option<Vec<UrlReplacement>>,
-    /// Apply the CSS override file to each page document (default: true). hideSelectors and removeSelectors still apply when false.
+    /// Include the override file in the main document's inline stylesheet (default: true). hideSelectors and removeSelectors are included even when false.
     pub use_css_override: Option<bool>,
     /// Viewport label or list of labels. Matching ignores case; omit or use an empty list to capture all configured viewports.
     #[schemars(example = vec!["phone", "desktop"])]

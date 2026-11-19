@@ -652,6 +652,37 @@ impl Target {
         })
     }
 
+    /// Keep action masks in the inspected document, independent of both inline
+    /// style CSP and the application's own adoptedStyleSheets list.
+    pub(super) async fn add_inspector_style_rule(&self, rule: String) -> Result<()> {
+        use chromiumoxide::cdp::browser_protocol::{css, dom};
+
+        let added: Result<()> = async {
+            self.execute(dom::EnableParams::default()).await?;
+            self.execute(css::EnableParams::default()).await?;
+            // Without `force`, Chromium reuses the inspector sheet for this document.
+            let sheet = self
+                .execute(css::CreateStyleSheetParams::new(self.realm.frame.clone()))
+                .await?;
+            self.execute(css::AddRuleParams::new(
+                sheet.result.style_sheet_id,
+                rule,
+                css::SourceRange::new(0, 0, 0, 0),
+            ))
+            .await?;
+            Ok(())
+        }
+        .await;
+        // The rule outlives these domains. Leaving them enabled would stream every
+        // page stylesheet change into the shared event bus, where a CSS-in-JS burst
+        // can overflow dialog, tab, navigation, and network waits.
+        let css_disabled = self.execute(css::DisableParams::default()).await;
+        let dom_disabled = self.execute(dom::DisableParams::default()).await;
+        added
+            .and(css_disabled.map(drop))
+            .and(dom_disabled.map(drop))
+    }
+
     pub(super) fn input_connection(&self) -> (Client, String) {
         (
             self.runtime.client.clone(),
