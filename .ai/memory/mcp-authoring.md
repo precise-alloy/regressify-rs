@@ -12,6 +12,8 @@ Verified: 2026-11-19
   [catalog builder](../../src/bin/mcp_catalog.rs) uses Rust types and guides
   without reading a consumer workspace; [the website](../../website/mcp) owns
   the Worker. Deployments match the catalog to the published release manifest.
+  [Worker delivery tests](../../website/mcp/tests/worker.test.mjs) therefore
+  compare with the supplied catalog; test new wording in the catalog builder.
 - [The catalog](../../src/mcp/catalog.rs) derives six schemas from real Rust
   types, embeds nine guides (including `recipes`), and includes synthetic
   examples. The overview lists every example task name by category, and the
