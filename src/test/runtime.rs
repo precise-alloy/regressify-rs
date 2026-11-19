@@ -631,56 +631,62 @@ impl Target {
         &self,
         command: CommandType,
     ) -> Result<Response<CommandType::Response>> {
-        let method = command.identifier();
-        let params = serde_json::to_value(&command)?;
-        let session = if method.starts_with("Input.") {
+        let session = if command.identifier().starts_with("Input.") {
             self.runtime.main_session.clone()
         } else {
             self.runtime.context(&self.realm).await?.0
         };
-        let method: &'static str = match method {
-            std::borrow::Cow::Borrowed(method) => method,
-            std::borrow::Cow::Owned(_) => bail!("CDP command identifier must be static"),
-        };
-        let result = self
-            .runtime
-            .client
-            .call(Some(&session), method, params)
-            .await?;
         Ok(Response {
-            result: serde_json::from_value(result)?,
+            result: self.runtime.client.execute(&session, command).await?,
         })
+    }
+
+    async fn inspector_session(&self) -> Result<(Client, String)> {
+        use chromiumoxide::cdp::browser_protocol::{css, dom, target};
+
+        // A same-process subframe shares its parent's target; an OOPIF has its own.
+        let owner = self
+            .execute(target::GetTargetInfoParams::default())
+            .await?
+            .result
+            .target_info;
+        // Dropping the private connection detaches its sessions, even if a timeout
+        // interrupts attach/enable. Inspector events never reach the scenario bus.
+        let client = self.runtime.client.isolated_connection().await?;
+        let session = client.attach(owner.target_id.as_ref()).await?;
+        client
+            .execute(&session, dom::EnableParams::default())
+            .await?;
+        client
+            .execute(&session, css::EnableParams::default())
+            .await?;
+        Ok((client, session))
     }
 
     /// Keep action masks in the inspected document, independent of both inline
     /// style CSP and the application's own adoptedStyleSheets list.
     pub(super) async fn add_inspector_style_rule(&self, rule: String) -> Result<()> {
-        use chromiumoxide::cdp::browser_protocol::{css, dom};
+        use chromiumoxide::cdp::browser_protocol::css;
 
-        let added: Result<()> = async {
-            self.execute(dom::EnableParams::default()).await?;
-            self.execute(css::EnableParams::default()).await?;
-            // Without `force`, Chromium reuses the inspector sheet for this document.
-            let sheet = self
-                .execute(css::CreateStyleSheetParams::new(self.realm.frame.clone()))
-                .await?;
-            self.execute(css::AddRuleParams::new(
-                sheet.result.style_sheet_id,
-                rule,
-                css::SourceRange::new(0, 0, 0, 0),
-            ))
+        let (client, session) = self.inspector_session().await?;
+        // The inspector sheet belongs to the document and outlives this connection.
+        let sheet = client
+            .execute(
+                &session,
+                css::CreateStyleSheetParams::new(self.realm.frame.clone()),
+            )
             .await?;
-            Ok(())
-        }
-        .await;
-        // The rule outlives these domains. Leaving them enabled would stream every
-        // page stylesheet change into the shared event bus, where a CSS-in-JS burst
-        // can overflow dialog, tab, navigation, and network waits.
-        let css_disabled = self.execute(css::DisableParams::default()).await;
-        let dom_disabled = self.execute(dom::DisableParams::default()).await;
-        added
-            .and(css_disabled.map(drop))
-            .and(dom_disabled.map(drop))
+        client
+            .execute(
+                &session,
+                css::AddRuleParams::new(
+                    sheet.style_sheet_id,
+                    rule,
+                    css::SourceRange::new(0, 0, 0, 0),
+                ),
+            )
+            .await?;
+        Ok(())
     }
 
     pub(super) fn input_connection(&self) -> (Client, String) {
@@ -1364,6 +1370,63 @@ mod tests {
         assert!(!is_stale_context(&anyhow!(
             "CDP command failed: Execution context was destroyed."
         )));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires managed Chromium; run regressify install"]
+    async fn cancelled_inspector_session_does_not_stream_stylesheet_events() -> Result<()> {
+        let (mut browser, handler, directory) =
+            super::super::browser_tests::launch_browser("mask-timeout", Default::default()).await?;
+        let result = async {
+            let page = browser.new_page("about:blank").await?;
+            let runtime = Runtime::new(&browser, &page).await?;
+            let target = runtime.target(&None, Duration::from_secs(5)).await?;
+            // Start the deadline only after Chromium acknowledges both domain enables.
+            let (inspector, session) = target.inspector_session().await?;
+            let stalled = async move {
+                inspector.call(Some(&session), "Runtime.evaluate", json!({
+                    "expression": "window.pendingMask = new Promise(() => {})", "awaitPromise": true
+                })).await
+            };
+            anyhow::ensure!(
+                tokio::time::timeout(Duration::from_millis(50), stalled)
+                    .await
+                    .is_err(),
+                "expected the pending inspector command to be cancelled"
+            );
+            let mut events = runtime.client.subscribe();
+            let color: String = target
+                .evaluate(
+                    r#"(() => {
+                const style = window.document.createElement('style');
+                style.textContent = 'body { color: rgb(1, 2, 3) }';
+                window.document.head.append(style);
+                return getComputedStyle(window.document.body).color;
+            })()"#,
+                )
+                .await?
+                .into_value()?;
+            anyhow::ensure!(color == "rgb(1, 2, 3)", "stylesheet mutation did not run");
+            // Flush preceding session events before inspecting the shared receiver.
+            target.evaluate("true").await?;
+            loop {
+                match events.try_recv() {
+                    Ok(event) => anyhow::ensure!(
+                        !event.method.starts_with("CSS.") && !event.method.starts_with("DOM."),
+                        "cancelled mask leaked {} onto the shared session",
+                        event.method
+                    ),
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Ok(())
+        }
+        .await;
+        browser.close().await?;
+        handler.await?;
+        let _ = std::fs::remove_dir_all(directory);
+        result
     }
 
     #[tokio::test]
