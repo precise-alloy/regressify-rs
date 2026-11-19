@@ -746,6 +746,27 @@ mod tests {
     }
 
     #[test]
+    fn startup_and_overview_teach_selector_choices() {
+        let catalog = build().unwrap();
+        for (surface, guidance) in [
+            ("instructions", &catalog["instructions"]),
+            ("overview", &catalog["guides"]["overview"]["content"]),
+        ] {
+            for contract in [
+                "Prefer standard CSS selectors",
+                "first match in DOM order",
+                ":visible",
+                "custom dropdowns",
+            ] {
+                assert!(
+                    guidance.as_str().unwrap().contains(contract),
+                    "Missing selector guidance in {surface}: {contract}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn guidance_teaches_consumer_project_memory() {
         let catalog = build().unwrap();
         let overview = catalog["guides"]["overview"]["content"].as_str().unwrap();
@@ -763,6 +784,7 @@ mod tests {
                 "60 lines",
                 "one site and one specific behavior",
                 "Split long or broad notes",
+                "Never send cookies",
                 "private",
             ] {
                 assert!(

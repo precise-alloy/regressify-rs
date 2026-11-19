@@ -5,6 +5,9 @@ are historical evidence, not open implementation tasks.
 
 ## Action and Screenshot Selectors (2026-11-19)
 
+- Resolved: website-only deployment of the `v2.4.4` catalog failed because
+  Worker tests required unreleased CSS guidance. Catalog tests now enforce the
+  wording; the Worker tests verify delivery of the supplied release content.
 - Resolved: `hide`/`remove` could report success for Playwright-only or
   shadow-only targets without styling any matching element. The actions now
   wait using native document CSS and add a rule to the document's inspector
