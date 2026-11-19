@@ -1498,6 +1498,8 @@ fn selector_capture_problem(
 }
 
 fn selector_capture_script(selector: &str) -> Result<String> {
+    // Inside a frame `document` is the action selector proxy. Screenshot clips
+    // must use native CSS and the same light-DOM scope as main-page clips.
     let selector = serde_json::to_string(selector)?
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029");
@@ -1505,7 +1507,7 @@ fn selector_capture_script(selector: &str) -> Result<String> {
         r#"(async () => {{
             const selector = {selector};
             const find = () => {{
-                try {{ return {{ element: document.querySelector(selector) }}; }}
+                try {{ return {{ element: window.document.querySelector(selector) }}; }}
                 catch (_) {{ return {{ error: 'invalid_selector' }}; }}
             }};
             const visibleReason = (element) => {{
@@ -2340,6 +2342,34 @@ mod tests {
         assert!(script.contains("top: rect.top"));
     }
 
+    #[tokio::test]
+    #[ignore = "requires managed Chromium; run regressify install"]
+    async fn css_only_selectors_in_frame_captures() -> Result<()> {
+        use crate::test::{browser_tests::launch_browser, runtime::Runtime};
+        use crate::types::Frame;
+
+        let (mut browser, handler, directory) =
+            launch_browser("frame-css", Default::default()).await?;
+        let result = async {
+            let page = browser.new_page("about:blank").await?;
+            page.evaluate(r#"document.body.innerHTML = `<iframe title="results" srcdoc="<h2>Products</h2><div id=host></div>"></iframe>`"#).await?;
+            let runtime = Runtime::new(&browser, &page).await?;
+            let frame = runtime.target(&Some(Frame::Single("css=iframe[title=results]".into())), Duration::from_secs(5)).await?;
+            frame.evaluate("document.querySelector('#host').attachShadow({mode:'open'}).innerHTML = '<h2 id=shadow>Other</h2>'").await?;
+            prepare_selector_capture(&page, Some(&frame), "h2").await?;
+            for (selector, reason) in [(r#"h2:text-is("Products")"#, "standard CSS only"), ("#shadow", "element not found")] {
+                let error = prepare_selector_capture(&page, Some(&frame), selector).await.err()
+                    .ok_or_else(|| anyhow!("frame capture unexpectedly found {selector}"))?;
+                anyhow::ensure!(error.to_string().contains(reason), "{error}");
+            }
+            Ok(())
+        }.await;
+        browser.close().await?;
+        handler.await?;
+        let _ = fs::remove_dir_all(directory);
+        result
+    }
+
     #[test]
     fn capture_dimensions_must_be_finite_positive_and_bounded() {
         assert!(validate_capture_dimensions(1920.0, 10_000.0, "test").is_ok());
@@ -2601,7 +2631,7 @@ const element = {{
     getBoundingClientRect() {{ return {{ left: 20, top: 30, width: 40, height: 50 }}; }},
 }};
 let calls = 0;
-global.document = {{
+window.document = {{
     querySelector() {{ return ++calls === 1 ? element : null; }},
 }};
 (async () => {{
@@ -2653,7 +2683,7 @@ const element = {{
     scrollIntoView() {{ window.scrollTo(0, 500); }},
     getBoundingClientRect() {{ return {{ left: 20, top: 30, width: 40, height: 50 }}; }},
 }};
-global.document = {{ querySelector: () => element }};
+window.document = {{ querySelector: () => element }};
 (async () => {{
     const result = await {capture_script};
     if (result.error !== 'content_visibility_hidden' || window.scrollX !== 12 || window.scrollY !== 34)

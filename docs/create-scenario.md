@@ -230,8 +230,9 @@ hideSelectors
 Type: `string[]`.  
 Default value: Test suite's value, then workspace value, then `[]`.
 
-Standard CSS selectors set to `visibility: hidden` in every document of the
-scenario, before actions and captures. Hidden elements keep their layout space,
+Standard CSS selectors set to `visibility: hidden` in the selected tab's main
+document before actions and captures, not in iframes. A policy that blocks
+inline styles can block these rules. Hidden elements keep their layout space,
 actions cannot interact with them, and selectors that match nothing are ignored.
 A scenario list replaces the inherited list. Use the [`hide` action][action-hide]
 instead when only a later step should hide an element.
@@ -659,8 +660,9 @@ removeSelectors
 Type: `string[]`.  
 Default value: Test suite's value, then workspace value, then `[]`.
 
-Standard CSS selectors set to `display: none` in every document of the
-scenario, before actions and captures. Matching elements stay in the DOM but
+Standard CSS selectors set to `display: none` in the selected tab's main
+document before actions and captures, not in iframes. A policy that blocks
+inline styles can block these rules. Matching elements stay in the DOM but
 take no space, actions cannot interact with them, and selectors that match
 nothing are ignored. A scenario list replaces the inherited list. Use the
 [`remove` action][action-remove] instead when only a later step should remove

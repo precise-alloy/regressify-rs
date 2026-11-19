@@ -1673,6 +1673,111 @@ async fn navigation_options_wait_for_load_and_network_idle() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires managed Chromium; run regressify install"]
+async fn css_only_selectors_in_hide_and_remove() -> Result<()> {
+    use super::{
+        runtime::Runtime,
+        storage_state::StorageState,
+        test_action::{ActionExecutionContext, exec_test_action},
+    };
+    use crate::{
+        config::ResolvedConfig,
+        types::{Frame, TestScenario, TestSuite},
+    };
+    use serde_json::json;
+
+    let site = Site::new(|request| {
+        let body = r#"<style>main { display: none }</style>
+            <main><h2>Products</h2><h2 data-result><span>Products</span></h2></main>
+            <aside id="note;"><template shadowrootmode="open"><b id="shadow">Shadow</b></template></aside>"#;
+        let _ = request.respond(
+            Response::from_string(body)
+                .with_header(Header::from_bytes("Content-Type", "text/html").unwrap())
+                .with_header(
+                    Header::from_bytes("Content-Security-Policy", "style-src 'none'").unwrap(),
+                ),
+        );
+    })?;
+    let (mut browser, handler, directory) =
+        launch_browser("css-actions", Default::default()).await?;
+    let result = async {
+        let page = browser.new_page(site.origin.as_str()).await?;
+        let runtime = Runtime::new(&browser, &page).await?;
+        let storage = StorageState::install(&browser, &page, None, &site.origin).await?;
+        let suite = TestSuite::default();
+        let scenario = TestScenario { url: site.origin.clone(), ..Default::default() };
+        let config = ResolvedConfig { element_timeout_ms: 2000, ..Default::default() };
+        let ctx = || ActionExecutionContext { page: &page, runtime: &runtime, storage: &storage,
+            test_suite: &suite, scenario: &scenario, config: &config, url_replacements: &[],
+            viewport_label: None, log_prefix: "css-actions" };
+        for action in [
+            json!({"wait":r#"main h2:text-is("Products")"#}),
+            json!({"wait":"h2[data-result]", "text":"Products"}),
+            json!({"wait":"#shadow"}),
+        ] {
+            exec_test_action(ctx(), &serde_json::from_value(action)?).await?;
+        }
+        let child_url = site.origin.replace("127.0.0.1", "localhost");
+        page.evaluate(format!("(async () => {{
+            const child = document.createElement('iframe');
+            child.src = {};
+            const loaded = new Promise(resolve => child.onload = resolve);
+            document.body.append(child);
+            await loaded;
+        }})()", serde_json::to_string(&child_url)?)).await?;
+        let frame = Some(Frame::Single("css=iframe".into()));
+        for scope in [&frame, &None] {
+            let target = runtime.target(scope, Duration::from_secs(5)).await?;
+            let unmasked: bool = target.evaluate(r#"getComputedStyle(document.querySelector('main')).display !== 'none'
+                && getComputedStyle(document.querySelector('h2')).display !== 'none'
+                && getComputedStyle(document.querySelector('[data-result]')).visibility === 'visible'"#).await?.into_value()?;
+            ensure!(unmasked, "CSP was not enforced or frame actions reached the parent");
+            for action in [
+                json!({"hide":"h2/* heading */[data-result]", "frame":scope}),
+                json!({"remove":"main > h2:not([data-result])", "frame":scope}),
+            ] {
+                exec_test_action(ctx(), &serde_json::from_value(action)?).await?;
+            }
+            // A theme swap owns the page's adopted sheets, not Regressify's masks.
+            let mut events = runtime.client().subscribe();
+            target.evaluate(r#"(() => {
+                const theme = new CSSStyleSheet();
+                theme.replaceSync('main { --theme: switched }');
+                window.document.adoptedStyleSheets = [theme];
+                window.document.head.append(window.document.createElement('style'));
+            })()"#).await?;
+            let styled: bool = target.evaluate(r#"getComputedStyle(document.querySelector('[data-result]')).visibility === 'hidden'
+                && getComputedStyle(document.querySelector('h2')).display === 'none'
+                && getComputedStyle(document.querySelector('main')).getPropertyValue('--theme').trim() === 'switched'
+                && getComputedStyle(document.querySelector('#shadow')).visibility === 'visible'"#).await?.into_value()?;
+            ensure!(styled, "CSS action masks did not survive the theme change under CSP (frame: {})", scope.is_some());
+            // Responses follow earlier session events, so the evaluations above flushed them.
+            while let Ok(event) = events.try_recv() {
+                ensure!(!event.method.starts_with("CSS.") && !event.method.starts_with("DOM."),
+                    "hide/remove left {} streaming page stylesheet events", event.method);
+            }
+        }
+        for (action, reason) in [
+            (json!({"hide":r#"main h2:text-is("Products")"#}), "SyntaxError"),
+            (json!({"remove":"text=Products"}), "SyntaxError"),
+            (json!({"hide":"#shadow"}), "Timed out"),
+            (json!({"hide":"#note;"}), "SyntaxError"),
+        ] {
+            let action = serde_json::from_value(action)?;
+            let error = exec_test_action(ctx(), &action).await.expect_err("invalid or shadow-only mask succeeded");
+            let detail = format!("{error:#}");
+            ensure!(detail.contains(reason) && detail.contains("standard CSS only; shadow roots are not searched"),
+                "expected {reason:?} with CSS scope: {detail}");
+        }
+        Ok(())
+    }.await;
+    browser.close().await?;
+    handler.await?;
+    let _ = std::fs::remove_dir_all(directory);
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires managed Chromium; run regressify install"]
 async fn action_keyboard_selection_and_navigation_work_in_frames() -> Result<()> {
     use super::{
         runtime::Runtime,

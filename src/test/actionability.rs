@@ -329,12 +329,23 @@ async fn wait_for_attached_selector(
 ) -> Result<()> {
     let frame_selectors = get_frame_selectors(frame);
     let element_js = build_element_js(selector, &frame_selectors);
+    wait_for_attachment(page, selector, frame, config, element_js, "the DOM").await
+}
+
+async fn wait_for_attachment(
+    page: &Page,
+    selector: &str,
+    frame: &Option<Frame>,
+    config: &ActionabilityConfig,
+    element_js: String,
+    scope: &str,
+) -> Result<()> {
     let script = format!("(() => {{ return !!({element_js}); }})()");
 
     let timeout = std::time::Duration::from_millis(config.element_timeout_ms);
     let poll = std::time::Duration::from_millis(config.poll_interval_ms);
     let start = std::time::Instant::now();
-    let exists_operation = format!("checking whether element '{}' exists", selector);
+    let exists_operation = format!("checking whether element '{selector}' exists in {scope}");
     let mut waiting_for_frame = None;
 
     loop {
@@ -348,7 +359,7 @@ async fn wait_for_attached_selector(
                 ));
             }
             return Err(anyhow!(
-                "Timed out after {}ms waiting for element '{}' to exist in the DOM",
+                "Timed out after {}ms waiting for element '{}' to exist in {scope}",
                 config.element_timeout_ms,
                 selector
             ));
@@ -1189,7 +1200,7 @@ fn parse_focus_result(selector: &str, value: &serde_json::Value) -> Result<()> {
     }
 }
 
-/// Minimal check: just wait for element to exist (for scroll, hide, remove).
+/// Wait for a match using the action selector engine, without requiring visibility.
 pub async fn ensure_exists(
     page: &Page,
     selector: &str,
@@ -1200,6 +1211,32 @@ pub async fn ensure_exists(
         crate::diagnostics::record::SafeValue::Exists,
         selector,
         wait_for_attached_selector(page, selector, frame, config),
+    )
+    .await
+}
+
+/// A document stylesheet cannot reach shadow roots or use the action selector engine.
+/// `page` already targets the selected frame; `window.document` bypasses its action proxy.
+pub(super) async fn ensure_stylesheet_target(
+    page: &Page,
+    selector: &str,
+    config: &ActionabilityConfig,
+) -> Result<()> {
+    let lookup = format!(
+        "window.document.querySelector({})",
+        serde_json::to_string(selector)?
+    );
+    diagnostic_condition(
+        crate::diagnostics::record::SafeValue::Exists,
+        selector,
+        wait_for_attachment(
+            page,
+            selector,
+            &None,
+            config,
+            lookup,
+            "the selected document (standard CSS only; shadow roots are not searched)",
+        ),
     )
     .await
 }

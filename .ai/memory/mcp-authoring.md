@@ -1,6 +1,6 @@
 # MCP Authoring
 
-Verified: 2026-10-29
+Verified: 2026-11-19
 
 - Live verification on 2026-10-23: `https://regressify.eshn.dev/mcp` served
   `regressify-authoring` v2.0.8. The pinned SDK read all 3 tools, 9 guides,
@@ -27,6 +27,13 @@ Verified: 2026-10-29
   inside `save.frame` when `frame` is set); `select`/`check`/`uncheck` require
   native HTML controls (use `click` for custom combobox/switch widgets); captures
   and `report.json` share `<output>/<suite>/bitmaps_test/<run>/`.
+- Startup, overview, actions and [workspace guidance](../../src/init.rs) prefer
+  stable standard CSS on both environments. Keep action selector lookup in
+  [the runtime](../../src/test/runtime.rs) distinct from native document lookup:
+  the `css_only_selectors_in_` Chromium fixtures cover frame clips and
+  `hide`/`remove` under strict CSP in the main document and a cross-origin frame,
+  even after the page replaces its adopted theme sheets. Configured masks use
+  the [main-document inline CSS hook](../../src/test/hooks.rs), not action rules.
 - Suite preflight (`validate_action_fields`, `validate_action_files`, and
   screenshot selector prefixes) rejects schema-valid but unusable actions before
   browser launch; the actions guide lists them under "Checks Beyond the Schema".
@@ -45,8 +52,9 @@ Verified: 2026-10-29
 - Page-level failure markers, `engineErrorMsg`, and progress errors carry a typed
   summary (step, condition, duration, category); the console adds a sanitized
   local detail line that is never archived. Journals keep `ActionIndex`,
-  `Condition`, and stage records. Identity fields are unsalted `sha256:` of the
-  exact text, so local candidates can be hashed to confirm a match.
+  `Condition`, and stage records. Source selectors are readable metadata in
+  current logs; do not embed secrets in them. Older logs can use `sha256:`
+  identities; see the [logging note](logging-diagnostics.md).
 - New guide topics are discovered through the overview served by the same Worker
   version. Keep CLI-managed `AGENTS.md` tool/topic references compatible with
   older hosted Workers; the consumer memory policy adds no tools or guide topics.

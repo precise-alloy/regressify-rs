@@ -48,13 +48,17 @@ server's version; do not assume newer fields work in an older installed CLI.
 - Each scenario/viewport pair runs in a fresh browser, possibly in parallel:
   never rely on another scenario's session, order, or side effects.
 - Use one action key per list item and quote YAML selectors that start with `#`.
-- Element selectors in actions accept CSS, `text=`, `xpath=`, and `>>` chains;
+- Prefer standard CSS selectors with stable page hooks. Verify the intended
+  match on both reference and test pages at the configured viewports. Only use
+  Playwright extensions when CSS cannot reliably identify the target.
+- Interactive actions, `scroll`, selector `wait`, `readySelector`, and `frame`
+  accept CSS, `text=`, `xpath=`, and `>>` chains;
   `hide`/`remove`, `hideSelectors`/`removeSelectors`,
   `imageSimplificationExcludeSelectors`, and screenshot selectors are standard
   CSS only.
-- Selectors resolve to the first match in DOM order. Responsive pages often keep
+- Single-element actions use the first match in DOM order. Responsive pages often keep
   hidden mobile and desktop duplicates in the DOM; scope selectors to the active
-  container, use `:visible` or `>> visible=true` in action/wait/`readySelector`
+  container first. If necessary use `:visible` or `>> visible=true` in action/wait/`readySelector`
   selectors, and restrict viewport-specific steps with `viewportNames`.
 - `select` works only on native `<select>` elements, and `check`/`uncheck` work
   only on native `<input type="checkbox">` or `<input type="radio">` controls.

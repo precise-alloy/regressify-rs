@@ -3,6 +3,20 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Action and Screenshot Selectors (2026-11-19)
+
+- Resolved: `hide`/`remove` could report success for Playwright-only or
+  shadow-only targets without styling any matching element. The actions now
+  wait using native document CSS and add a rule to the document's inspector
+  stylesheet. Inline styles can be blocked by CSP; action rules in a page's
+  adopted stylesheet list disappeared when the page replaced that list.
+  Verified computed styles after a theme switch under strict CSP in the main
+  document and a cross-origin frame.
+  Frame `save.selector` also uses native CSS, as main-document
+  captures already did; `frame` itself still accepts action selectors.
+  The two `css_only_selectors_in_` Chromium regressions reproduce the original
+  failures and check the CSS-only boundary.
+
 ## Link Styles (2026-11-18)
 
 - Resolved #18: snapshot and landing text links (breadcrumbs, back link, suite
@@ -313,10 +327,10 @@ are historical evidence, not open implementation tasks.
   missing from captures unless `bypassCsp: true`. Image simplification is
   unaffected: its filter uses CSSOM and an adopted constructed stylesheet.
 - Both elements reach only the main document of the captured page (after each
-  navigation and `switchTab`), never iframes, although the
-  [scenario docs](docs/create-scenario.md), schema descriptions, and the MCP
-  [recipes](src/mcp/guides/recipes.md) and [actions](src/mcp/guides/actions.md)
-  guides say the selector lists apply to every document.
+  navigation and `switchTab`), never iframes. This limitation affects configured
+  lists, not action-level `hide` and `remove`. The [scenario docs](docs/create-scenario.md),
+  schema descriptions, and [MCP recipes](src/mcp/guides/recipes.md) now
+  distinguish those cases.
 - Verified on 2026-10-26 with a temporary loopback probe: under
   `default-src 'self'; style-src 'self'` both `<style>` elements were present but
   no rule applied (computed visibility, display, and caret color unchanged); with

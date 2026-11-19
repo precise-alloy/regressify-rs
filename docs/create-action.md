@@ -22,15 +22,31 @@ Each scenario can have zero, one or multiple actions. Each action must be one of
 
 Interactive actions wait for the target element to exist, be visible, become stable, scroll into view, and not be covered by another element before interacting. Form controls must also be enabled. These checks intentionally make actions fail when a real user could not perform them.
 
-Action selectors support CSS, `text=`, `xpath=`, Playwright CSS extensions such
-as `:has-text()`, and `>>` selector chaining. CSS/text selectors traverse open
+Prefer standard CSS selectors that identify the intended element on both
+reference and test pages. Use a stable ID, test attribute, or component class;
+verify its scope, uniqueness and visibility at each relevant viewport. When
+checking wording, separate the locator from the assertion, for example
+`{wait: "#results-title", text: Products}`. This works even if the heading's
+text is wrapped in a span.
+
+When stable CSS is not enough, interactive actions, `scroll`, selector `wait`,
+`readySelector`, and `frame` support `text=`, `xpath=`, Playwright CSS
+extensions such as `:has-text()`, and `>>` selector chaining. CSS/text selectors traverse open
 Shadow DOM. The bundled selector helper runs inside Chromium; Node is not
 required for these actions. Closed shadow roots cannot be selected.
 
-Screenshot selectors (`save.selector` and scenario `selector`/`selectors`) use
-standard CSS to capture the first matching element in the selected tab's page.
+Screenshot selectors (`save.selector` and scenario `selector`/`selectors`),
+`hide`, and `remove` require standard CSS. These lookups do not pierce shadow
+roots. A screenshot clips the first matching element in the selected document.
+If an older `save.selector` used a Playwright locator inside a frame, keep the
+`frame` locator and replace the clip selector with a light-DOM CSS selector.
+`hide` and `remove` wait for a matching element, then apply a CSS rule to
+all matches in the selected document. A pseudo-element alone (e.g.
+`.badge::after`) cannot satisfy that wait. Use the owning element if hiding
+the whole badge is intended. Action rules survive inline-style restrictions
+and page theme changes that replace `document.adoptedStyleSheets`.
 
-`frame` selectors use the same selector syntax. Same-origin, cross-origin,
+`frame` itself accepts action selector syntax. Same-origin, cross-origin,
 and nested frames are resolved through CDP execution contexts. `goto` and URL
 waits target the specified frame without navigating or checking the main page.
 File uploads work in frames. With `useFileChooser: true`, `input` may identify

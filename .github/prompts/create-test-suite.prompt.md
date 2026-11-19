@@ -26,7 +26,10 @@ After creating/modifying, ensure:
 
 - All scenarios have unique IDs (auto-generated from label if not set)
 - URLs are syntactically valid; contact pages only when authorized for this task
-- Selectors use valid CSS syntax
+- Prefer stable standard CSS; verify the intended match on both reference and
+  test pages at the configured viewports. Use Playwright-only locators as a
+  fallback in supported action, wait, readiness, or frame fields, never for
+  screenshot or hide/remove targets.
 - `frame` selectors target actual `<iframe>` elements
 - File paths in `input.file` are relative to `visual_tests/`
 - Run the skill's relevant checks and update docs/examples when behavior changes.

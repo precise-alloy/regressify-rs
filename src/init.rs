@@ -182,6 +182,11 @@ Use the `regressify-mcp` MCP server configured in `.vscode/mcp.json`
     plus any additional topics listed by the overview.
 - Consult `get_schema` and `get_example` before creating or changing test
     suites, scenarios, actions, or shared configuration.
+- Prefer standard CSS selectors with stable page hooks. Verify the intended
+    match and visibility on both reference and test pages at the configured
+    viewports. Use Playwright extensions only when CSS cannot reliably identify
+    the target and the field supports them; screenshot and hide/remove targets
+    require standard CSS.
 - For failures, read `get_authoring_guide` with `topic: "troubleshooting"`
     before changing configuration or baselines. Use `topic: "hooks"` before
     writing injected browser scripts; hooks (`jsOnReadyPath`, `onBeforeScript`,
@@ -706,6 +711,7 @@ mod tests {
             "Split long or broad notes",
             "Never store secrets",
             "classic browser JavaScript",
+            "Prefer standard CSS selectors",
             "module.exports",
             "same larger capture area",
             "closed/default",

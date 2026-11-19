@@ -13,8 +13,8 @@ use crate::{
     test::{
         actionability::{
             self, ActionabilityConfig, build_frame_document_js, cdp_click, ensure_actionable,
-            ensure_exists, ensure_focusable, escape_css_rule, escape_js_string, focus_element,
-            get_frame_selectors, scroll_into_view, wait_for_selector,
+            ensure_exists, ensure_focusable, escape_js_string, focus_element, get_frame_selectors,
+            scroll_into_view, wait_for_selector,
         },
         capture::{
             artifact_write_error, save_screenshot_with_target, state_path,
@@ -942,30 +942,38 @@ async fn exec_test_action_inner(
             .await?;
         }
 
-        TestAction::Hide(HideAction { hide, .. }) => {
-            // Wait for the element to exist so it is actually present (and hidden)
-            // in the captured screenshot; a typo'd selector fails clearly instead
-            // of silently leaving the element visible.
-            ensure_exists(page, hide, frame, &ac).await?;
-            let frame_selectors = get_frame_selectors(frame);
-            let rule = serde_json::to_string(&format!(
-                "{} {{ visibility: hidden !important; }}",
-                escape_css_rule(hide)
-            ))?;
-            let doc = frame_selectors
-                .as_ref()
-                .map(|selectors| build_frame_document_js(selectors))
-                .unwrap_or_else(|| "document".to_string());
+        TestAction::Hide(HideAction { hide: selector, .. })
+        | TestAction::Remove(RemoveAction {
+            remove: selector, ..
+        }) => {
+            actionability::ensure_stylesheet_target(page, selector, &ac).await?;
+            let declaration = if matches!(action, TestAction::Hide(_)) {
+                "visibility: hidden"
+            } else {
+                "display: none"
+            };
+            // Send Chromium's serialization of one style rule to the inspector,
+            // never interpolate the supplied selector into stylesheet text.
+            let selector = serde_json::to_string(selector)?;
             let script = format!(
                 "(() => {{
-                    const d = {doc};
-                    const style = d.createElement('style');
-                    style.textContent = {rule};
-                    (d.head || d.documentElement).appendChild(style);
+                    const sheet = new CSSStyleSheet();
+                    sheet.insertRule(':not(*) {{ {declaration} !important; }}');
+                    const rule = sheet.cssRules[0];
+                    rule.selectorText = {selector};
+                    // A rejected assignment keeps the old selector, which cannot match.
+                    if (rule.selectorText === ':not(*)')
+                        throw new Error('Invalid hide/remove stylesheet selector');
+                    return rule.cssText;
                 }})()"
             );
-            let _: serde_json::Value =
-                evaluate_action(page, script, &ac, "hiding the requested element").await?;
+            let rule = evaluate_action(page, script, &ac, "building the hide/remove rule").await?;
+            actionability::cdp_with_timeout(
+                action_timeout(&ac),
+                "applying the hide/remove CSS rule",
+                page.add_inspector_style_rule(rule),
+            )
+            .await?;
         }
 
         TestAction::Hover(action) => super::gestures::hover(page, action, &ac).await?,
@@ -1114,31 +1122,6 @@ async fn exec_test_action_inner(
 
             let keystroke = parse_press_key(key)?;
             dispatch_key_stroke(page, &keystroke, &ac).await?;
-        }
-
-        TestAction::Remove(RemoveAction { remove, .. }) => {
-            // Wait for the element to exist before removing it so a typo'd selector
-            // fails clearly instead of silently leaving the element in the capture.
-            ensure_exists(page, remove, frame, &ac).await?;
-            let frame_selectors = get_frame_selectors(frame);
-            let rule = serde_json::to_string(&format!(
-                "{} {{ display: none !important; }}",
-                escape_css_rule(remove)
-            ))?;
-            let doc = frame_selectors
-                .as_ref()
-                .map(|selectors| build_frame_document_js(selectors))
-                .unwrap_or_else(|| "document".to_string());
-            let script = format!(
-                "(() => {{
-                    const d = {doc};
-                    const style = d.createElement('style');
-                    style.textContent = {rule};
-                    (d.head || d.documentElement).appendChild(style);
-                }})()"
-            );
-            let _: serde_json::Value =
-                evaluate_action(page, script, &ac, "removing the requested element").await?;
         }
 
         TestAction::Scroll(ScrollAction {

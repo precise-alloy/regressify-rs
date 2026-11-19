@@ -21,7 +21,15 @@ description: 'Use when interpolating selectors or page data into JavaScript, CSS
    JS escaping blindly to raw CSS text or double-escape valid selectors.
 1. Audit action-level hide/remove and config-level hideSelectors/removeSelectors
    separately. Serializing an entire stylesheet safely into JS does not constrain
-   a selector's ability to introduce extra CSS rules.
+   a selector's ability to introduce extra CSS rules. Hide/remove actions use
+   native lookup, assign `CSSStyleRule.selectorText`, and insert only the
+   serialized rule into the frame's CDP inspector stylesheet (independent of
+   inline style CSP and page-owned adopted sheets), then disable the CSS/DOM
+   domains again so page stylesheet churn cannot overflow shared CDP event
+   waits; config lists still
+   use `escape_css_rule`. In a resolved frame `document` is the action-selector
+   proxy, not a native CSS lookup. Keep screenshot and stylesheet targets in
+   the light DOM of `window.document`.
 1. `imageSimplificationExcludeSelectors` reach the page only inside one JSON
    options literal and are used through `matches`/`closest`, never CSS text; the
    filter rule is built from generated IDs. Keep
@@ -35,9 +43,11 @@ description: 'Use when interpolating selectors or page data into JavaScript, CSS
 ```sh
 cargo test --lib test::actionability::tests
 cargo test --lib test::test_action::tests
+cargo test --lib css_only_selectors_in_ -- --ignored
 ```
 
-Test quotes, backslashes, braces, angle brackets, CR/LF, tabs, NUL, Unicode, and
+The ignored fixtures require cached Chromium. Test quotes, backslashes,
+braces, angle brackets, CR/LF, tabs, NUL, Unicode, and
 valid attribute selectors. For CSS/DOM changes use a local browser fixture and
 assert both intended selection and absence of effects on unrelated elements.
 
