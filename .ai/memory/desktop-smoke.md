@@ -41,10 +41,10 @@ Verified: 2026-10-21
   focus return, unchanged draft/saved bytes, and window-close owner release.
   Native Update, Artifact, Publishing, Deployment and Git flows pass with this
   footer check and the shared DialogFooter layout across all nine dialog sites.
-- Kit 0.8.0 still needs [ToolbarFocus](../../src/desktop/ui/design.rs) for backward wrap,
-  menu dismissal/cycle-release helpers, CopyText generation keys, mixed checkboxes and contrast fixes.
-  Base Toolbar/Accordion, Clipboard and theme colors did not change; menu scrolling/context-trigger
-  fixes do not replace ownership/focus adapters. Tab remains pointer-only, so keep log-tab keys.
+- Kit 0.10 (verified 2026-11-20) fixed Toolbar backward wrap but moves focus on Ctrl/Alt arrows, so
+  [ToolbarFocus](../../src/desktop/ui/design.rs) stays, with menu cycle/focus helpers, CopyText keys,
+  the base mixed checkbox (styled `indeterminate` not adopted) and contrast fixes. Stock Tabs own log-tab
+  keys; pointer clicks do not focus them, so [default](../../ci/desktop-smoke/flows/default.ps1) uses UIA focus.
   Native default verifies Add-to-More Left and exact log-search caret behavior; `toolbar_` covers release.
 - Run interactive flows without concurrent user mouse/keyboard input. Pointer
   movement dismissed a metadata hover card and redirected image-tab clicks;

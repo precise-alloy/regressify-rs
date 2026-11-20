@@ -205,7 +205,7 @@ impl Render for LogControls {
                     cx.entity().entity_id(),
                 ))
                 .with_size(gpui_kit::component::Size::Medium)
-                .h_auto()
+                .content_height()
                 .flex_wrap()
                 .content(
                     Button::new("log-level-filter")

@@ -1699,7 +1699,7 @@ impl ResultsPanel {
     fn zoom_at_pointer(
         &mut self,
         index: usize,
-        event: &gpui_kit::ScrollWheelEvent,
+        event: &gpui_kit::ScrollEvent,
         cx: &mut Context<Self>,
     ) {
         if !event.modifiers.control && !event.modifiers.platform {
@@ -2103,7 +2103,7 @@ impl ResultsPanel {
                 })
                 .id(("image-surface", index))
                 .min_h_full()
-                .on_scroll_wheel(cx.listener(move |this, event, _, cx| {
+                .on_scroll(cx.listener(move |this, event, _, cx| {
                     this.zoom_at_pointer(index, event, cx);
                 }));
                 let viewport = div()
@@ -4877,7 +4877,7 @@ mod pointer_tests {
                 let viewport = window.find(("image-scroll", 0_usize)).bounds();
                 let pointer = point(before.center().x, viewport.top() + px(30.));
                 window.dispatch_event(
-                    gpui_kit::ScrollWheelEvent {
+                    gpui_kit::ScrollEvent {
                         position: pointer,
                         delta: gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-40.))),
                         modifiers: gpui_kit::Modifiers {
@@ -5037,7 +5037,7 @@ mod pointer_tests {
                 let before = window.find(("image-content", 0_usize)).bounds();
                 let viewport = window.find(("image-scroll", 0_usize)).bounds();
                 let pointer = point(viewport.left() + px(30.), before.center().y);
-                window.dispatch_event(gpui_kit::ScrollWheelEvent {
+                window.dispatch_event(gpui_kit::ScrollEvent {
                     position: pointer,
                     delta: gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-40.))),
                     modifiers: gpui_kit::Modifiers { control: true, ..Default::default() },

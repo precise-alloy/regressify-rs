@@ -90,7 +90,7 @@ impl<Item: Clone + PartialEq> ListState<Item> {
     }
 }
 
-pub(super) fn bind_keys(modifier: &str, cx: &mut App) {
+pub(super) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(
             "f2",
@@ -108,23 +108,17 @@ pub(super) fn bind_keys(modifier: &str, cx: &mut App) {
         ),
     ]);
     for context in ["RegressifyList", "RegressifyChecklist"] {
-        cx.bind_keys([
-            KeyBinding::new(&format!("{modifier}-a"), SelectAllListItems, Some(context)),
-            KeyBinding::new(
-                &format!("{modifier}-shift-a"),
-                ClearListSelection,
-                Some(context),
-            ),
+        let bindings = [
+            load_binding("secondary-a", SelectAllListItems, context, cx),
+            load_binding("secondary-shift-a", ClearListSelection, context, cx),
             KeyBinding::new("escape", ClearListSelection, Some(context)),
-        ]);
+        ];
+        cx.bind_keys(bindings);
     }
+    let toggle = load_binding("secondary-space", ToggleListItem, "RegressifyList", cx);
     cx.bind_keys([
         KeyBinding::new("space", ToggleListItem, Some("RegressifyList")),
-        KeyBinding::new(
-            &format!("{modifier}-space"),
-            ToggleListItem,
-            Some("RegressifyList"),
-        ),
+        toggle,
         KeyBinding::new("enter", OpenListItem, Some("RegressifyList")),
         KeyBinding::new(
             "enter",
@@ -139,20 +133,22 @@ pub(super) fn bind_keys(modifier: &str, cx: &mut App) {
         ("end", Destination::Last),
     ] {
         for (prefix, extend, additive) in [
-            (String::new(), false, false),
-            ("shift-".into(), true, false),
-            (format!("{modifier}-"), false, true),
-            (format!("{modifier}-shift-"), true, true),
+            ("", false, false),
+            ("shift-", true, false),
+            ("secondary-", false, true),
+            ("secondary-shift-", true, true),
         ] {
-            cx.bind_keys([KeyBinding::new(
+            let binding = load_binding(
                 &format!("{prefix}{key}"),
                 MoveListSelection {
                     destination,
                     extend,
                     additive,
                 },
-                Some("RegressifyList"),
-            )]);
+                "RegressifyList",
+                cx,
+            );
+            cx.bind_keys([binding]);
         }
     }
 }

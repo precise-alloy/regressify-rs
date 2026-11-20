@@ -344,7 +344,7 @@ impl RunPanel {
                         "run-log-toolbar-focus",
                         gpui_kit::component::toolbar::Toolbar::new("run-log-command-toolbar")
                             .with_size(gpui_kit::component::Size::Medium)
-                            .h_auto()
+                            .content_height()
                             .flex_wrap()
                             .child(
                                 Button::new("log-activity")

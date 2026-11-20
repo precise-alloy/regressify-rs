@@ -1500,7 +1500,10 @@ impl Workbench {
                                         .max(px(240.)),
                                 )
                                 .overflow_y_scrollbar()
-                                .child(body),
+                                // The always-visible scrollbar overlays the content's trailing
+                                // edge once it scrolls; keep controls such as Cloudflare options
+                                // out from under its 16px hitbox.
+                                .child(body.pr(px(16.))),
                         ),
                 )
                 .on_close(window.listener_for(&view, |this, _, window, cx| {

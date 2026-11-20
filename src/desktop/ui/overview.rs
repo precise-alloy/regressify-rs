@@ -618,7 +618,7 @@ impl Workbench {
         {
             px(0.)
         } else {
-            // Kit 0.7.3 caption slots match TITLE_BAR_HEIGHT (34px), also verified by the native smoke harness.
+            // Kit caption slots match TITLE_BAR_HEIGHT (34px), also verified by the native smoke harness.
             gpui_kit::component::TITLE_BAR_HEIGHT
                 * (1 + usize::from(controls.minimize) + usize::from(controls.maximize)) as f32
         };
