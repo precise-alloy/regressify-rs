@@ -533,22 +533,23 @@ async fn results_capture_log_view_selects_reference_and_test_without_changing_re
             window.find("results-log-page-number").label(),
             Some("Page 1 of 1")
         );
+        // Kit 0.10 tabs own keyboard focus: Tab enters on the selected source, arrows move focus
+        // and Enter/Space activate. A pointer click does not focus a tab (OUTSTANDING_ISSUES).
+        let tab = |window: &mut gpui_kit::Window, index: usize| {
+            window.within("results-log-source").find(index).focused() == Some(true)
+        };
+        for _ in 0..80 {
+            if tab(window, 0) {
+                break;
+            }
+            window.press("tab", cx);
+        }
         assert!(
-            view.read(cx)
-                .results
-                .read(cx)
-                .capture_log_source_focus(0)
-                .is_focused(window)
+            tab(window, 0),
+            "Tab did not enter the source tabs on Reference"
         );
         window.press("right", cx);
-        window.render_frame(cx);
-        assert!(
-            view.read(cx)
-                .results
-                .read(cx)
-                .capture_log_source_focus(1)
-                .is_focused(window)
-        );
+        assert!(tab(window, 1), "Right did not move focus to Test");
         window.press("enter", cx);
     })
     .unwrap();
@@ -563,6 +564,26 @@ async fn results_capture_log_view_selects_reference_and_test_without_changing_re
             window.find("results-log-page-number").label(),
             Some("Page 1 of 2")
         );
+        // Focus stays on Test across the selection rerender; Left and Space select Reference again.
+        assert_eq!(
+            window.within("results-log-source").find(1_usize).focused(),
+            Some(true)
+        );
+        window.press("left", cx);
+        assert_eq!(
+            window.within("results-log-source").find(0_usize).focused(),
+            Some(true)
+        );
+        window.press("space", cx);
+    })
+    .unwrap();
+    cx.wait_for(handle.into(), Duration::from_secs(10), |_, cx| {
+        let text = view.read(cx).results.read(cx).capture_log_text(cx);
+        text.contains("#3]") && !text.contains("#7]")
+    })
+    .await;
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
         assert!(window.find("results-capture-log-view").visible());
         window.click("results-log-back", cx);
         window.render_frame(cx);
@@ -10022,6 +10043,36 @@ fn source_line_clipboard_copies_cuts_and_pastes_whole_lines(cx: &mut TestAppCont
     press_source(cx, handle, &key("z"));
     assert_eq!(source_state(cx, &view).0, original);
 
+    // Cutting the last line keeps the line ending before it, so pasting keeps line order.
+    for (text, caret, cut, restored) in [
+        (
+            "debug: true\nheadless: true",
+            26,
+            "debug: true\n",
+            "debug: true\nheadless: true\n",
+        ),
+        (
+            "debug: true\r\nheadless: true",
+            27,
+            "debug: true\r\n",
+            "debug: true\r\nheadless: true\r\n",
+        ),
+    ] {
+        place_source(cx, handle, &view, text, caret..caret);
+        press_source(cx, handle, &key("x"));
+        assert_eq!(source_state(cx, &view), (cut.into(), cut.len()..cut.len()));
+        press_source(cx, handle, &key("v"));
+        assert_eq!(source_state(cx, &view).0, restored, "{text:?}");
+        press_source(cx, handle, &key("z"));
+        press_source(cx, handle, &key("z"));
+        assert_eq!(source_state(cx, &view).0, text, "Undo {text:?}");
+    }
+    // Cutting the trailing empty line keeps the file's final newline.
+    place_source(cx, handle, &view, original, original.len()..original.len());
+    press_source(cx, handle, &key("x"));
+    assert_eq!(source_state(cx, &view).0, original);
+    assert_eq!(clipboard_entry(cx), ("\n".into(), metadata.clone()));
+
     // An unterminated last line is copied with a line ending so it pastes as a line.
     place_source(cx, handle, &view, "debug: true\r\nheadless: true", 20..20);
     press_source(cx, handle, &key("c"));
@@ -10170,6 +10221,25 @@ fn source_line_navigation_selects_inserts_and_homes_like_vs_code(cx: &mut TestAp
             "scenarios:\n  \n  - label: home\n    url: /\n"
         );
         assert_eq!(selection(cx), (13..13, 13));
+
+        // With a selection, insertion follows the caret's line in either direction.
+        for (range, reversed, expected, caret) in [
+            (
+                11..27,
+                false,
+                "scenarios:\n  - label: home\n    url: /\n    \n",
+                42,
+            ),
+            (15..30, true, below, 31),
+        ] {
+            place(15..15, window, cx);
+            source.update(cx, |state, cx| {
+                state.set_selected_range_with_direction(range.clone(), reversed, cx)
+            });
+            window.press(&format!("{modifier}-enter"), cx);
+            assert_eq!(source.read(cx).value().as_ref(), expected, "{range:?}");
+            assert_eq!(selection(cx), (caret..caret, caret), "{range:?}");
+        }
     })
     .unwrap();
 
@@ -10209,8 +10279,8 @@ fn source_line_navigation_selects_inserts_and_homes_like_vs_code(cx: &mut TestAp
         });
     }
 
-    // Additional cursors collapse first, so stepping over this line's indentation cannot carry
-    // them into later lines.
+    // Smart Home keeps only the active cursor, so other lines' indentation cannot misplace or
+    // carry additional cursors into later lines.
     place_source(cx, handle, &view, "b\n    a: 1\n", 9..9);
     cx.update(|cx| source.update(cx, |state, cx| state.add_selection(0..0, cx)));
     press_source(cx, handle, "home");
@@ -10218,6 +10288,31 @@ fn source_line_navigation_selects_inserts_and_homes_like_vs_code(cx: &mut TestAp
     cx.update_window(handle.into(), |_, window, cx| window.input("x", cx))
         .unwrap();
     assert_eq!(source_state(cx, &view).0, "b\n    xa: 1\n");
+
+    // A reversed selection keeps its anchor through Shift+Home, also with additional cursors.
+    place_source(cx, handle, &view, original, 33..33);
+    cx.update(|cx| {
+        source.update(cx, |state, cx| {
+            state.set_selected_range_with_direction(33..35, true, cx);
+            state.add_selection(1..1, cx);
+        })
+    });
+    press_source(cx, handle, "shift-home");
+    let reversed = cx.update(|cx| {
+        let state = source.read(cx);
+        (
+            state.selected_range(),
+            state.cursor(),
+            state.is_selection_reversed(),
+        )
+    });
+    assert_eq!(reversed, (31..35, 31, true));
+    cx.update_window(handle.into(), |_, window, cx| window.input("x", cx))
+        .unwrap();
+    assert_eq!(
+        source_state(cx, &view).0,
+        "scenarios:\n  - label: home\n    x /\n"
+    );
 }
 
 #[gpui_kit::test]
@@ -10904,6 +10999,9 @@ pub(super) fn editor_at_size(
     cx.update(gpui_kit::init);
     cx.update(|cx| super::design::apply_theme(false, None, cx));
     cx.update(super::bind_keys);
+    // Kit 0.10 keeps closing dialogs mounted until their exit transition ends on the test clock,
+    // so a stale dialog's IDs would satisfy waits for the next one; reduced motion closes at once.
+    cx.update(|cx| cx.set_reduce_motion(true));
     let (handle, view) = cx
         .update(|cx| {
             gpui_kit::open_window(
@@ -15033,7 +15131,7 @@ async fn image_previews_zoom_at_pointer_and_pan_on_drag(cx: &mut TestAppContext)
                             zoom_levels.iter().copied().rfind(|zoom| *zoom < current_zoom - 0.001).unwrap_or(0.25)
                         };
                         window.dispatch_event(
-                            gpui_kit::ScrollWheelEvent {
+                            gpui_kit::ScrollEvent {
                                 position: pointer,
                                 delta,
                                 modifiers: gpui_kit::Modifiers {

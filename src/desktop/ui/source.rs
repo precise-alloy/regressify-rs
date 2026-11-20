@@ -41,42 +41,34 @@ pub(super) struct SourceLineCommand {
     operation: LineOperation,
 }
 
-pub(super) fn bind_keys(modifier: &str, cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
-        &format!("{modifier}-shift-z"),
-        gpui_kit::component::input::Redo,
-        Some("RegressifySource > Input"),
-    )]);
-    cx.bind_keys(
+pub(super) fn bind_keys(cx: &mut App) {
+    const CONTEXT: &str = "RegressifySource > Input";
+    let mut bindings = vec![
+        load_binding(
+            "secondary-shift-z",
+            gpui_kit::component::input::Redo,
+            CONTEXT,
+            cx,
+        ),
+        load_binding("secondary-l", SelectSourceLines, CONTEXT, cx),
+    ];
+    bindings.extend(
         [
-            (format!("{modifier}-/"), LineOperation::ToggleComment),
-            (format!("{modifier}-]"), LineOperation::Indent),
-            (format!("{modifier}-["), LineOperation::Outdent),
-            ("alt-shift-up".into(), LineOperation::DuplicateUp),
-            ("alt-shift-down".into(), LineOperation::DuplicateDown),
-            ("alt-up".into(), LineOperation::MoveUp),
-            ("alt-down".into(), LineOperation::MoveDown),
-            (format!("{modifier}-shift-k"), LineOperation::Delete),
-            (format!("{modifier}-enter"), LineOperation::InsertBelow),
-            (
-                format!("{modifier}-shift-enter"),
-                LineOperation::InsertAbove,
-            ),
+            ("secondary-/", LineOperation::ToggleComment),
+            ("secondary-]", LineOperation::Indent),
+            ("secondary-[", LineOperation::Outdent),
+            ("alt-shift-up", LineOperation::DuplicateUp),
+            ("alt-shift-down", LineOperation::DuplicateDown),
+            ("alt-up", LineOperation::MoveUp),
+            ("alt-down", LineOperation::MoveDown),
+            ("secondary-shift-k", LineOperation::Delete),
+            ("secondary-enter", LineOperation::InsertBelow),
+            ("secondary-shift-enter", LineOperation::InsertAbove),
         ]
         .into_iter()
-        .map(|(key, operation)| {
-            KeyBinding::new(
-                &key,
-                SourceLineCommand { operation },
-                Some("RegressifySource > Input"),
-            )
-        }),
+        .map(|(key, operation)| load_binding(key, SourceLineCommand { operation }, CONTEXT, cx)),
     );
-    cx.bind_keys([KeyBinding::new(
-        &format!("{modifier}-l"),
-        SelectSourceLines,
-        Some("RegressifySource > Input"),
-    )]);
+    cx.bind_keys(bindings);
 }
 
 struct LineEdit {
@@ -268,11 +260,17 @@ fn line_below(text: &str, cursor: usize) -> LineEdit {
     } else {
         line_indent(text, range.end)
     };
-    // Mirror Kit's Enter: adopt a deeper next line, else open a bracket block (outside comments).
-    let line = content.trim();
+    // Mirror Kit's Enter: adopt a deeper next line, else open a bracket block. Kit skips comments,
+    // so a YAML comment (a `#` at line start or after whitespace) cannot open one.
+    let code = content.trim_start();
+    let code = if code.starts_with('#') {
+        ""
+    } else {
+        code.split(" #").next().unwrap_or_default()
+    };
     let indent = if next.len() > current.len() {
         next.to_string()
-    } else if !line.starts_with('#') && line.ends_with(['{', '[', '(']) {
+    } else if code.trim_end().ends_with(['{', '[', '(']) {
         let width = gpui_kit::component::input::TabSize::default().tab_size;
         format!("{current}{}", " ".repeat(width))
     } else {
@@ -325,6 +323,20 @@ fn copied_line(text: &str, cursor: usize) -> Option<String> {
         format!("{block}{}", block_separator(text, &range))
     } else {
         block.to_string()
+    })
+}
+
+/// Removes the caret's line for Cut.
+///
+/// Unlike Delete Lines (and VS Code), the last line keeps the line ending before it: removing it
+/// would drop a YAML file's final newline and make an immediate line-wise paste land above the
+/// previous line, reordering the lines.
+fn cut_line(text: &str, caret: usize) -> Option<LineEdit> {
+    let range = selected_lines(text, &(caret..caret));
+    (!range.is_empty()).then(|| LineEdit {
+        range: range.clone(),
+        text: String::new(),
+        selection: range.start..range.start,
     })
 }
 
@@ -421,9 +433,10 @@ fn line_edit(text: &str, selection: Range<usize>, operation: LineOperation) -> O
         LineOperation::ToggleComment => toggle_line_comments(text, selection),
         LineOperation::Indent => indent_lines(text, selection, false),
         LineOperation::Outdent => indent_lines(text, selection, true),
-        // Like VS Code, insertion follows the caret's line, which callers pass as `selection.end`.
-        LineOperation::InsertBelow => Some(line_below(text, selection.end)),
-        LineOperation::InsertAbove => Some(line_above(text, selection.end)),
+        // Like VS Code, insertion follows the caret's line; callers pass the caret as an empty
+        // selection, so a reversed selection cannot pick the wrong end.
+        LineOperation::InsertBelow => Some(line_below(text, selection.start)),
+        LineOperation::InsertAbove => Some(line_above(text, selection.start)),
     }
 }
 
@@ -644,7 +657,7 @@ pub(super) fn inspect_source_document(
     }
 }
 
-// Kit 0.7.3 tracks hover help and diagnostic popovers separately on EditorState;
+// Kit 0.10 tracks hover help and diagnostic popovers separately on EditorState;
 // clear both so resolved or reconfigured diagnostics cannot leave a stale tooltip.
 pub(super) fn clear_source_popovers(
     state: &mut gpui_kit::component::input::EditorState,
@@ -1125,7 +1138,7 @@ impl Workbench {
                 window,
                 cx,
             );
-            // Kit 0.7.3 collapses reversed ranges; keep the edited selection forward.
+            // Line edits leave a forward selection with the caret at its end.
             state.set_selected_range(edit.selection, cx);
         });
         if let Err(error) = self.capture_source_draft(cx) {
@@ -1148,22 +1161,21 @@ impl Workbench {
         let Some(caret) = self.source_line_caret(window, cx) else {
             return;
         };
+        let text = self.source.read(cx).value().to_string();
+        // An empty document has no line to copy; Kit passes the key on unchanged.
+        let Some(line) = copied_line(&text, caret) else {
+            return;
+        };
         cx.stop_propagation();
         if cut && !self.source_editable(cx) {
             return;
         }
-        let text = self.source.read(cx).value().to_string();
-        // An empty document has no line to copy, so the clipboard stays as it was.
-        let Some(line) = copied_line(&text, caret) else {
-            return;
-        };
         cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(
             line,
             SOURCE_LINE_CLIPBOARD.into(),
         ));
         if cut {
-            let edit = line_edit(&text, caret..caret, LineOperation::Delete);
-            self.apply_source_line_edit(&text, edit, window, cx);
+            self.apply_source_line_edit(&text, cut_line(&text, caret), window, cx);
         }
     }
 
@@ -1211,44 +1223,42 @@ impl Workbench {
 
     /// Turns native Home and Shift+Home into VS Code's smart Home.
     ///
-    /// Kit's public API cannot set a reversed selection, so Kit still moves first: it keeps the
-    /// selection anchor and stops at wrapped rows. A deferred step then crosses the line's ASCII
-    /// indentation, one character per step.
+    /// Kit moves first so wrapped rows keep native visual-row Home. Then the active selection is
+    /// re-set with its anchor and direction (which also drops additional cursors), placing the
+    /// caret after the line's ASCII indentation.
     fn source_smart_home(&mut self, select: bool, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_kit::{base::actions::SelectRight, component::input::MoveRight};
         let state = self.source.read(cx);
         if !state.focus_handle(cx).is_focused(window) {
             return;
         }
         let text = state.value();
         let cursor = state.cursor();
-        let selection = state.selected_range();
         let Some(steps) = smart_home_steps(&text, cursor) else {
             return;
         };
         let start = line_start(&text, cursor);
-        // The steps would move every cursor by this line's indentation, possibly into later lines,
-        // so collapse to the active selection first. A reversed selection cannot be re-created
-        // with its anchor through the public API; it keeps Kit's cursors (see OUTSTANDING_ISSUES).
-        if !select || selection.end == cursor {
-            let range = if select { selection } else { cursor..cursor };
-            self.source
-                .update(cx, |state, cx| state.set_selected_range(range, cx));
-        }
+        let target = start + steps;
         let source = self.source.clone();
         window.defer(cx, move |window, cx| {
-            let focus = source.read(cx).focus_handle(cx);
-            // Kit stopped at a wrapped row's start: keep native visual-row Home there.
-            if !focus.is_focused(window) || source.read(cx).cursor() != start {
-                return;
-            }
-            for _ in 0..steps {
-                if select {
-                    focus.dispatch_action(&SelectRight, window, cx);
-                } else {
-                    focus.dispatch_action(&MoveRight, window, cx);
+            source.update(cx, |state, cx| {
+                // Kit stopped at a wrapped row's start: keep native visual-row Home there.
+                if !state.focus_handle(cx).is_focused(window) || state.cursor() != start {
+                    return;
                 }
-            }
+                let range = state.selected_range();
+                let anchor = if !select {
+                    target
+                } else if state.is_selection_reversed() {
+                    range.end
+                } else {
+                    range.start
+                };
+                state.set_selected_range_with_direction(
+                    anchor.min(target)..anchor.max(target),
+                    target < anchor,
+                    cx,
+                );
+            });
         });
     }
 
@@ -1787,7 +1797,7 @@ impl Workbench {
                         "source-toolbar-focus",
                         gpui_kit::component::toolbar::Toolbar::new("source-command-toolbar")
                             .with_size(gpui_kit::component::Size::Medium)
-                            .h_auto()
+                            .content_height()
                             .flex_wrap()
                             .content(self.source_edit_menu(cx))
                             .child(
@@ -1998,8 +2008,8 @@ mod tests {
     use gpui_kit::AppContext;
 
     use super::{
-        LineOperation, SourceCompletions, copied_line, expanded_line_selection, line_edit,
-        pasted_line, smart_home_steps,
+        LineOperation, SourceCompletions, copied_line, cut_line, expanded_line_selection,
+        line_edit, pasted_line, smart_home_steps,
     };
     use crate::desktop::{
         completion::CompletionCatalog,
@@ -2567,6 +2577,31 @@ mod tests {
     }
 
     #[test]
+    fn source_line_clipboard_cut_keeps_the_preceding_line_ending() {
+        for (original, caret, expected, selected) in [
+            ("a\nb\nc\n", 2, "a\nc\n", 2..2),
+            ("\n", 0, "", 0..0),
+            // The last line keeps the line ending before it, unlike Delete Lines.
+            ("a\nb", 3, "a\n", 2..2),
+            ("a\r\nb", 4, "a\r\n", 3..3),
+            ("only", 2, "", 0..0),
+        ] {
+            let edit = cut_line(original, caret).expect("Expected a cut");
+            let mut result = original.to_string();
+            result.replace_range(edit.range, &edit.text);
+            assert_eq!(
+                (result, edit.selection),
+                (expected.into(), selected),
+                "{original:?} at {caret}"
+            );
+        }
+        // A trailing empty line has nothing to remove, so the final newline survives.
+        assert!(cut_line("a\nb\n", 4).is_none());
+        assert!(cut_line("a\r\nb\r\n", 6).is_none());
+        assert!(cut_line("", 0).is_none());
+    }
+
+    #[test]
     fn source_line_clipboard_copies_terminated_lines() {
         for (original, cursor, expected) in [
             ("a\nb\nc\n", 2, "b\n"),
@@ -2654,6 +2689,20 @@ mod tests {
             ),
             ("{\n}", 0..0, LineOperation::InsertBelow, "{\n  \n}", 4..4),
             ("# [\n", 0..0, LineOperation::InsertBelow, "# [\n\n", 4..4),
+            (
+                "a: 1 # [\n",
+                0..0,
+                LineOperation::InsertBelow,
+                "a: 1 # [\n\n",
+                9..9,
+            ),
+            (
+                "a: [\n",
+                0..0,
+                LineOperation::InsertBelow,
+                "a: [\n  \n",
+                7..7,
+            ),
             ("\tx", 1..1, LineOperation::InsertBelow, "\tx\n\t", 4..4),
             (
                 "a\r\n b",
@@ -2669,22 +2718,22 @@ mod tests {
                 "a\r\n \r\n b",
                 4..4,
             ),
+            // Callers pass the caret; its line decides where the new line goes.
             (
                 "a\nb\nc\n",
-                0..3,
+                3..3,
                 LineOperation::InsertBelow,
                 "a\nb\n\nc\n",
                 4..4,
             ),
-            // The caret's line, at the selection end, decides where the line goes.
             (
                 "a\nb\nc\n",
-                2..5,
+                5..5,
                 LineOperation::InsertAbove,
                 "a\nb\n\nc\n",
                 4..4,
             ),
-            ("a\nb\n", 0..2, LineOperation::InsertBelow, "a\nb\n\n", 4..4),
+            ("a\nb\n", 2..2, LineOperation::InsertBelow, "a\nb\n\n", 4..4),
             // Above is Enter at the previous line's end, so it keeps that line's indentation.
             (
                 "    b: 1\n  - c",

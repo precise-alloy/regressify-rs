@@ -30,10 +30,10 @@ Verified: 2026-10-15
   bypass throttling. Unchanged ticks redraw only for elapsed-second changes.
   `run_log_hidden_` and `run_poll_` cover these UI-work bounds; they do not measure
   native input latency or establish a frame-time budget for large Activity lists.
-- [Capture Log](../../src/desktop/ui/reports/log.rs) uses segmented source tabs
-  with two public focus handles and Enter/Space hooks because Kit 0.7.3 tabs are
-  pointer-only. Real-handle GUI tests and native Right/Enter, Left/Space checks
-  pass; source changes reset page one and retain generation-based rejection.
+- [Capture Log](../../src/desktop/ui/reports/log.rs) (verified 2026-11-20) uses stock segmented tabs;
+  Kit 0.10 Tabs own roving focus and Enter/Space (old adapter retired); pointer clicks
+  do not focus a tab (Open in OUTSTANDING_ISSUES). Source changes reset page one and keep
+  generation-based rejection; native smoke UIA-focuses the tab before its key checks.
 - Capture failure summaries (`FailureSite` in the record module, tracked by
   `OperationContext::track` in the [runtime](../../src/diagnostics/runtime.rs))
   use only typed record fields and the category, so markers, `engineErrorMsg`,

@@ -9,7 +9,7 @@ Verified: 2026-10-21
 - [Fields groups](../../src/desktop/ui/mod.rs) use controlled Accordion with
   stable IDs and separate collapse preference. Search/errors/unsupported choices
   force open; closed inputs unmount and return focus to the disclosure.
-- Kit 0.8.0 AccordionTrigger remains pointer-only; the approved label-focus adapter
+- Kit 0.10 AccordionTrigger remains pointer-only; the approved label-focus adapter
   scopes Enter/Space away from inputs/popups. Ignore no-op content clicks.
   `controlled_group_` verifies these contracts. Workspace Button keyboard tests
   use Tab and the observed `workspace-files` wrapper, not pointer-focus assumptions.
@@ -47,8 +47,8 @@ Verified: 2026-10-21
   The Fields editor still owns bindings, raw drafts, `field_errors`, inheritance
   hints, reset, and semantic edits; `setting_search_`, numeric/threshold filters,
   and the invalid-draft/reset native regression pass after the migration.
-- [The toolkit pin](../../Cargo.toml) moved 0.7.3 -> 0.8.0 with matching base/component/assets;
-  Windows still uses `gpui-pre` 0.3.9. `gpui-fast` 0.1.10 and new renderer packages are inactive lockfile entries.
+- [The toolkit pin](../../Cargo.toml) moved 0.8.0 -> 0.10.0 (2026-11-20) with `gpui-pre` 0.3.12; `gpui-fast`/bench crates stay
+  inactive. Breaks: static-only `KeyBinding::new`, toolbar `min_h_12`, scrolling dialogs, dialog exit motion (see update-gpui traps).
   [Windows/fixtures](../../src/desktop/ui/mod.rs) retain `open_window`; adopted spinner labels
   have red/green scoped SpinButton regressions and native UIA verification.
 - Kit 0.8.0 adds custom completion highlighters, rich-text editor hosts and Editor sizing;
@@ -58,7 +58,7 @@ Verified: 2026-10-21
   [Git review](../../src/desktop/ui/git/view.rs) retains full-file aligned copies, not patch-only `diff::Diff`.
 - The schema jump/hover/save-guard test failed on offscreen diagnostic 3 until
   scrolled into view before clicking; preserve cursor, hover, draft and save checks.
-  Kit 0.7.3 tracks `diagnostic_popover` separately from `hover_popover`: clear both
+  Kit 0.10 still tracks `diagnostic_popover` separately from `hover_popover`: clear both
   (`clear_source_popovers`) on diagnostic/source updates, tab switches, and Escape,
   and skip no-op background viewport diagnostic resets so active hovers do not flicker.
 - [Action viewport choices](../../src/desktop/ui/choices.rs) reuse the native
@@ -71,11 +71,11 @@ Verified: 2026-10-21
   spans for spaces/hyphens and forces YAML block-list probes into value mode.
   `source_assistance_` covers native quoted/hyphenated acceptance, dismiss-only Shift+Tab, provider/overlay guards, and workspace-scoped focus restoration; acceptance callbacks are deferred.
 - [Source commands](../../src/desktop/ui/source.rs) bind inside `RegressifySource > Input`, check focus/busy/editable state, and apply atomic line edits via `apply_lsp_edits`; the Edit menu uses `action_context` and JSON disables comment toggling. Document owns grouped Source/Fields history; native Source Undo/Redo is captured before Kit, while Fields inputs keep local undo. `source_history_` covers mixed controls, selection, bounds, oversized paste and recovery.
-- [Source clipboard](../../src/desktop/ui/source.rs) (verified 2026-11-19) captures Kit `Copy`/`Cut`/`Paste`: Kit 0.8.0 copies nothing without a selection. Public `is_copyable` covers every cursor, so line mode runs only when no cursor selects text; `SOURCE_LINE_CLIPBOARD` metadata survives only while the Windows text hash matches. `source_line_clipboard_` covers multi-cursor, busy and external text.
-- [Smart Home](../../src/desktop/ui/source.rs) (verified 2026-11-19) collapses extra cursors, lets Kit's `MoveHome`/`SelectToStartOfLine` run (anchor, wrapped rows; no reversed-selection API), then `window.defer` steps over indentation. Press each key in its own `update_window` in GUI tests. Ctrl+Enter mirrors Kit's Enter indent (YAML `:` does not indent). See `source_line_navigation_`.
-- Kit 0.8.0 LSP-shaped positions still use scalar columns, not UTF-16. `source_ranges_` covers
+- [Source clipboard](../../src/desktop/ui/source.rs) (verified 2026-11-19) captures Kit `Copy`/`Cut`/`Paste`: Kit 0.10 copies nothing without a selection. Public `is_copyable` covers every cursor, so line mode runs only when no cursor selects text; `SOURCE_LINE_CLIPBOARD` metadata survives only while the Windows text hash matches. Cut keeps the last line's preceding ending (unlike Delete Lines/VS Code) so the final newline survives. `source_line_clipboard_` covers multi-cursor, busy, external text and end-of-file cuts.
+- [Smart Home](../../src/desktop/ui/source.rs) (verified 2026-11-20) lets Kit's `MoveHome`/`SelectToStartOfLine` run (wrapped rows), then `window.defer` re-sets the active selection with `set_selected_range_with_direction`, keeping reversed anchors and dropping extra cursors. Press each key in its own `update_window` in GUI tests. Ctrl+Enter mirrors Kit's Enter indent (YAML `:` does not indent). See `source_line_navigation_`.
+- Kit 0.10 LSP-shaped positions still use scalar columns, not UTF-16. `source_ranges_` covers
   Rope round-trips, completion/navigation after emoji, whitespace-safe commands, and quoted viewport preservation.
-- Kit 0.8.0 still normalizes `set_selected_range(end..start)` to an empty range; Source restores an ascending range after line edits, covered by the reverse CRLF/Unicode regression.
+- Kit 0.10 `set_selected_range` is always forward (use `set_selected_range_with_direction` for reversed); Source restores an ascending range after line edits, covered by the reverse CRLF/Unicode regression.
 - Block indentation uses shared line bounds (excluding column-zero selection ends) for indentation, comments, moves, duplication, and deletion; plain Tab and completion acceptance remain native, while Ctrl+Shift+Z and Ctrl+Y share document redo.
 - Native input-change notifications are deferred. [GUI tests](../../src/desktop/ui/tests.rs) settle the executor before asserting that Source edits reached the session.
 - [YAML field removal](../../src/desktop/document.rs) removes an orphaned preceding

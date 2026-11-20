@@ -4,7 +4,7 @@ use crate::desktop::workspace::ThemePreference;
 use gpui_kit::component::Size;
 
 pub(super) fn release_app_menu(bar: &Entity<gpui_kit::component::menu::AppMenuBar>, cx: &mut App) {
-    // Kit 0.7.3 menus own their bar; an empty reload breaks that cycle without changing the registry.
+    // Kit 0.10 menus still own their bar; an empty reload breaks that cycle without changing the registry.
     let menus = gpui_kit::base::GlobalState::global(cx).app_menus().to_vec();
     gpui_kit::base::GlobalState::global_mut(cx).set_app_menus(Vec::new());
     bar.update(cx, |bar, cx| bar.reload(cx));
@@ -132,6 +132,18 @@ pub(super) fn restore_managed_menu_focus<View: 'static>(
         .detach();
 }
 
+/// Sizes a toolbar to its content.
+///
+/// Kit 0.10 changed toolbars from a fixed `h_12` to `min_h_12`, so `h_auto` alone no longer lets
+/// padding-free toolbars shrink to their controls.
+pub(super) trait ContentHeight: Styled + Sized {
+    fn content_height(self) -> Self {
+        self.h_auto().min_h_0()
+    }
+}
+
+impl ContentHeight for gpui_kit::component::toolbar::Toolbar {}
+
 #[derive(IntoElement)]
 pub(super) struct ToolbarFocus {
     id: ElementId,
@@ -180,7 +192,8 @@ impl RenderOnce for ToolbarFocus {
                 };
                 let mut previous = start.clone();
                 let mut destination = start.clone();
-                // Kit 0.7.3 fails backward wrapping; choose scoped destinations from bounded forward order.
+                // Kit 0.10 toolbars also move focus on modified arrows; keep those keys with the control
+                // and choose scoped destinations from bounded forward focus order.
                 for _ in 0..1024 {
                     window.focus_next(cx);
                     let Some(next) = window.focused(cx) else {
@@ -436,7 +449,7 @@ impl RenderOnce for ExternalLink {
         }
         button.style().refine(&self.style);
         // Kit's Button registers its variant colors and its separate hover/active
-        // styles first, then refines the base style with the caller's (Kit 0.8.0
+        // styles first, then refines the base style with the caller's (Kit 0.10
         // `Button::render`, `.refine_style(&instance_style)`). This text color
         // therefore replaces only the resting color; hover and active keep the
         // theme's link colors.

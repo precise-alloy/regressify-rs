@@ -24,7 +24,7 @@ Omit the workspace argument to use the native folder picker. The default
 `cargo build` and `cargo run -- test` remain CLI-only. Feature `desktop` builds
 headless models; `gui` adds native widgets; `gui-tests` adds UI instrumentation.
 
-The native UI pins GPUI Kit 0.8.0 through the single optional `gpui-kit`
+The native UI pins GPUI Kit 0.10.0 through the single optional `gpui-kit`
 dependency. Production windows and native test fixtures use
 `gpui_kit::open_window`; its Base root owns dialog, sheet and notification
 layers. Application close, cancellation and unsaved-document guards remain
@@ -1819,14 +1819,17 @@ the line would indent it: it adopts a deeper following line, or adds one level a
 `{`, `[`, or `(`. A line above is Enter at the end of the previous line, so it takes
 that line's indentation; on the first line it reuses the current indentation. Home
 alternates between the first non-blank character and the line start; on a blank
-line, or a later row of a wrapped line, it goes to that line's or row's start. With
-several cursors, smart Home first collapses them to the active cursor. Ctrl+L
+line, or a later row of a wrapped line, it goes to that line's or row's start. When
+Home steps over indentation it keeps only the active cursor; otherwise every cursor
+moves natively. Ctrl+L
 selects whole lines, so a following Ctrl+C or Ctrl+X takes them with their line
 endings.
 
 Like VS Code, copying or cutting when no cursor selects text takes the active
 caret's whole line; an unterminated last line gets a line ending so it pastes as a
-line. Pasting that line with nothing selected inserts it above the caret's line and
+line. Unlike VS Code and Delete Lines, cutting the last line keeps the line ending
+before it, so the file's final newline survives and pasting keeps the line order.
+Pasting that line with nothing selected inserts it above the caret's line and
 keeps the caret on its text; pasting over a selection replaces the selection. Text
 copied from a selection or another application pastes inline. Copying an empty
 document leaves the clipboard unchanged. Other selection commands, arrow-key
@@ -2183,7 +2186,9 @@ links remain available.
 
 The Capture Log icon opens the selected capture's archived timeline without
 leaving Results. Reference and Test select their original executions separately;
-the segmented source tabs support pointer selection and keyboard activation.
+the segmented source tabs support pointer selection and keyboard activation:
+Tab enters them on the selected source, Left/Right move focus, and Enter or
+Space selects. A pointer click selects without moving keyboard focus.
 Changing source starts on its first page and discards stale load results;
 the heading shows viewport dimensions and attempt when available. Multiple images
 from one execution share its history. Use Back to comparison to return to the

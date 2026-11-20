@@ -42,7 +42,7 @@ directories = "6"
 futures = "0.3.31"
 glob = "0.3.3"
 globset = "0.4"
-gpui-kit = { version = "=0.8.0", optional = true, features = ["tree-sitter-yaml"] }
+gpui-kit = { version = "=0.10.0", optional = true, features = ["tree-sitter-yaml"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 imagequant = { version = "4.4", optional = true }
 jsonc-parser = { version = "0.34", features = ["cst", "serde_json"] }

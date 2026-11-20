@@ -52,6 +52,8 @@ mod source;
 mod tokens;
 mod updates;
 
+use design::ContentHeight;
+
 #[cfg(all(test, feature = "gui-tests"))]
 mod tests;
 
@@ -1986,7 +1988,7 @@ impl Workbench {
             );
         let toolbar = gpui_kit::component::toolbar::Toolbar::new("editor-command-toolbar")
             .with_size(gpui_kit::component::Size::Medium)
-            .h_auto()
+            .content_height()
             .flex_wrap()
             .child(history)
             .child(selection)
@@ -3428,82 +3430,71 @@ pub fn launch(instance: Option<DesktopInstance>) {
 }
 
 fn bind_keys(cx: &mut App) {
-    let modifier = if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "ctrl"
-    };
-    lists::bind_keys(modifier, cx);
-    source::bind_keys(modifier, cx);
-    cx.bind_keys([
-        KeyBinding::new(
-            &format!("{modifier}-shift-p"),
-            OpenCommands,
-            Some("Regressify"),
-        ),
+    const CONTEXT: &str = "Regressify";
+    lists::bind_keys(cx);
+    source::bind_keys(cx);
+    let bindings = [
+        load_binding("secondary-shift-p", OpenCommands, CONTEXT, cx),
         KeyBinding::new("ctrl-space", CompleteSource, Some("RegressifySource")),
-        KeyBinding::new(&format!("{modifier}-shift-g"), OpenGit, Some("Regressify")),
-        KeyBinding::new(&format!("{modifier}-p"), FocusNavigator, Some("Regressify")),
-        KeyBinding::new(
-            &format!("{modifier}-b"),
-            ToggleNavigator,
-            Some("Regressify"),
-        ),
-        KeyBinding::new(
-            &format!("{modifier}-shift-f"),
-            FocusSettings,
-            Some("Regressify"),
-        ),
-        KeyBinding::new(
-            &format!("{modifier}-1"),
-            SelectView { index: 0 },
-            Some("Regressify"),
-        ),
-        KeyBinding::new(
-            &format!("{modifier}-2"),
-            SelectView { index: 1 },
-            Some("Regressify"),
-        ),
-        KeyBinding::new(
-            &format!("{modifier}-3"),
-            SelectView { index: 2 },
-            Some("Regressify"),
-        ),
-        KeyBinding::new(&format!("{modifier}-s"), SaveDocument, Some("Regressify")),
-        KeyBinding::new(&format!("{modifier}-o"), OpenWorkspace, Some("Regressify")),
-        KeyBinding::new(&format!("{modifier}-z"), UndoDocument, Some("Regressify")),
-        KeyBinding::new(
-            &format!("{modifier}-shift-z"),
-            RedoDocument,
-            Some("Regressify"),
-        ),
-        KeyBinding::new(
-            &format!("{modifier}-n"),
+        load_binding("secondary-shift-g", OpenGit, CONTEXT, cx),
+        load_binding("secondary-p", FocusNavigator, CONTEXT, cx),
+        load_binding("secondary-b", ToggleNavigator, CONTEXT, cx),
+        load_binding("secondary-shift-f", FocusSettings, CONTEXT, cx),
+        load_binding("secondary-1", SelectView { index: 0 }, CONTEXT, cx),
+        load_binding("secondary-2", SelectView { index: 1 }, CONTEXT, cx),
+        load_binding("secondary-3", SelectView { index: 2 }, CONTEXT, cx),
+        load_binding("secondary-s", SaveDocument, CONTEXT, cx),
+        load_binding("secondary-o", OpenWorkspace, CONTEXT, cx),
+        load_binding("secondary-z", UndoDocument, CONTEXT, cx),
+        load_binding("secondary-shift-z", RedoDocument, CONTEXT, cx),
+        load_binding(
+            "secondary-n",
             files::FileCommand {
                 operation: files::Operation::New,
             },
-            Some("Regressify"),
+            CONTEXT,
+            cx,
         ),
-        KeyBinding::new(
-            &format!("{modifier}-shift-s"),
+        load_binding(
+            "secondary-shift-s",
             files::FileCommand {
                 operation: files::Operation::SaveAs,
             },
-            Some("Regressify"),
+            CONTEXT,
+            cx,
         ),
-        KeyBinding::new(
-            &format!("{modifier}-r"),
+        load_binding(
+            "secondary-r",
             files::FileCommand {
                 operation: files::Operation::Reload,
             },
-            Some("Regressify"),
+            CONTEXT,
+            cx,
         ),
         KeyBinding::new(
             "f5",
             files::FileCommand {
                 operation: files::Operation::Refresh,
             },
-            Some("Regressify"),
+            Some(CONTEXT),
         ),
-    ]);
+    ];
+    cx.bind_keys(bindings);
+}
+
+/// Loads a binding from a dynamic keystroke, which may use `secondary-` (Cmd on macOS, Ctrl elsewhere).
+///
+/// Kit 0.10 `KeyBinding::new` accepts only static keystrokes with explicit modifiers, so dynamic
+/// strings and `secondary-` go through `KeyBinding::load`, which resolves the host OS.
+fn load_binding<A: Action>(keystrokes: &str, action: A, context: &str, cx: &App) -> KeyBinding {
+    let context = KeyBindingContextPredicate::parse(context).expect("valid key context");
+    KeyBinding::load(
+        keystrokes,
+        Box::new(action),
+        Some(context.into()),
+        false,
+        None,
+        cx,
+    )
+    .expect("valid keystroke")
 }

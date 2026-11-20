@@ -1787,7 +1787,7 @@ impl Render for RunPanel {
                         "run-toolbar-focus",
                         gpui_kit::component::toolbar::Toolbar::new("run-command-toolbar")
                             .with_size(gpui_kit::component::Size::Medium)
-                            .h_auto()
+                            .content_height()
                             .px_4()
                             .flex_wrap()
                             .children(
