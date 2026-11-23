@@ -12,7 +12,6 @@ pub(super) struct CaptureLogView {
     pub(super) loading: bool,
     pub(super) generation: u64,
     title: String,
-    source_focus: [FocusHandle; 2],
 }
 
 impl CaptureLogView {
@@ -60,10 +59,6 @@ impl CaptureLogView {
             loading: false,
             generation: 0,
             title: "Capture Log".into(),
-            source_focus: [
-                cx.focus_handle().tab_stop(true),
-                cx.focus_handle().tab_stop(true),
-            ],
         }
     }
 }
@@ -75,10 +70,6 @@ impl ResultsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(focus) = self.capture_log.source_focus.get(index) else {
-            return;
-        };
-        window.focus(focus, cx);
         self.capture_log.reference = index == 0;
         self.capture_log.query.offset = 0;
         self.load_capture_log(window, cx);
@@ -174,7 +165,7 @@ impl ResultsPanel {
                         "capture-log-toolbar-focus",
                         gpui_kit::component::toolbar::Toolbar::new("capture-log-command-toolbar")
                             .with_size(gpui_kit::component::Size::Medium)
-                            .h_auto()
+                            .content_height()
                             .flex_wrap()
                             .child(
                                 Button::new("results-log-back")
@@ -203,37 +194,71 @@ impl ResultsPanel {
                                 TabBar::new("results-log-source")
                                     .segmented()
                                     .selected_index(usize::from(!self.capture_log.reference))
-                                    // Kit tabs are pointer-only; retain source-button keyboard access.
-                                    .children(["Reference", "Test"].into_iter().enumerate().map(|(index, label)| {
-                                        Tab::new().label(label).track_focus(&self.capture_log.source_focus[index])
-                                            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                                                if event.keystroke.modifiers == Modifiers::default() && matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                                    cx.stop_propagation();
-                                                    this.select_capture_log_source(index, window, cx);
-                                                }
-                                            }))
-                                    }))
+                                    // Kit 0.10 tabs own roving focus: arrows move it, Enter and Space click.
+                                    .children(
+                                        ["Reference", "Test"].map(|label| Tab::new().label(label)),
+                                    )
                                     .on_click(cx.listener(|this, index: &usize, window, cx| {
                                         this.select_capture_log_source(*index, window, cx);
                                     })),
                             )
                             .child(
-                                gpui_kit::component::pagination::Pagination::new("results-log-pagination")
-                                    .compact()
-                                    .current_page(self.capture_log.page.as_ref().map_or(1, LogPage::page_number))
-                                    .total_pages(self.capture_log.page.as_ref().map_or(1, LogPage::page_count))
-                                    .disabled(self.capture_log.loading || self.capture_log.page.is_none())
-                                    .on_click(cx.listener(|this, page: &usize, window, cx| {
-                                        if this.capture_log.loading { return; }
-                                        let Some(offset) = this.capture_log.page.as_ref().and_then(|current| current.offset_for_page(*page)) else { return; };
+                                gpui_kit::component::pagination::Pagination::new(
+                                    "results-log-pagination",
+                                )
+                                .compact()
+                                .current_page(
+                                    self.capture_log
+                                        .page
+                                        .as_ref()
+                                        .map_or(1, LogPage::page_number),
+                                )
+                                .total_pages(
+                                    self.capture_log
+                                        .page
+                                        .as_ref()
+                                        .map_or(1, LogPage::page_count),
+                                )
+                                .disabled(
+                                    self.capture_log.loading || self.capture_log.page.is_none(),
+                                )
+                                .on_click(cx.listener(
+                                    |this, page: &usize, window, cx| {
+                                        if this.capture_log.loading {
+                                            return;
+                                        }
+                                        let Some(offset) = this
+                                            .capture_log
+                                            .page
+                                            .as_ref()
+                                            .and_then(|current| current.offset_for_page(*page))
+                                        else {
+                                            return;
+                                        };
                                         this.capture_log.query.offset = offset;
                                         this.load_capture_log(window, cx);
                                         cx.notify();
-                                    })),
+                                    },
+                                )),
                             )
                             .when_some(self.capture_log.page.as_ref(), |bar, page| {
-                                bar.content(div().id("results-log-page-number").role(Role::Status).aria_label(format!("Page {} of {}", page.page_number(), page.page_count())).test_support()
-                                    .text_xs().child(format!("Page {} of {}", page.page_number(), page.page_count())))
+                                bar.content(
+                                    div()
+                                        .id("results-log-page-number")
+                                        .role(Role::Status)
+                                        .aria_label(format!(
+                                            "Page {} of {}",
+                                            page.page_number(),
+                                            page.page_count()
+                                        ))
+                                        .test_support()
+                                        .text_xs()
+                                        .child(format!(
+                                            "Page {} of {}",
+                                            page.page_number(),
+                                            page.page_count()
+                                        )),
+                                )
                             }),
                     )),
             )
@@ -247,11 +272,6 @@ impl ResultsPanel {
                 ),
             )
             .into_any_element()
-    }
-
-    #[cfg(test)]
-    pub(in crate::desktop::ui) fn capture_log_source_focus(&self, index: usize) -> FocusHandle {
-        self.capture_log.source_focus[index].clone()
     }
 
     #[cfg(test)]

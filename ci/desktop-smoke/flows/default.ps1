@@ -296,6 +296,10 @@ function Test-DefaultFlows {
     Send-FixtureKeys Backspace
     Wait-WindowState { (Read-ControlText 'Search log') -ceq '' } 'Log toolbar search did not clear.'
     Invoke-Control 'Reference' -Within 'Capture log commands' -Pointer
+    # Kit 0.10 tabs follow the ARIA manual-activation pattern: a pointer click selects without
+    # taking keyboard focus, so focus the selected tab before checking the arrow/Enter/Space contract.
+    (Find-Control 'Reference' -Within 'Capture log commands').SetFocus()
+    Wait-WindowState { [System.Windows.Automation.AutomationElement]::FocusedElement.Current.Name -eq 'Reference' } 'Capture Log Reference tab did not take UIA focus.'
     Send-FixtureKeys RightArrow
     Wait-WindowState { [System.Windows.Automation.AutomationElement]::FocusedElement.Current.Name -eq 'Test' } 'Capture Log Right did not focus the Test source tab.'
     Send-FixtureKeys Enter

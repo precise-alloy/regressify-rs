@@ -559,6 +559,26 @@ are historical evidence, not open implementation tasks.
   bit-exact JSON round trips, extreme positive values, legacy metadata, and native
   and browser display regressions cover the new behavior.
 
+## GPUI Kit 0.10.0 Upgrade (2026-11-20)
+
+- Resolved: Kit 0.10 toolbars switched to `min_h_12`, so padding-free toolbars using
+  `h_auto` grew 16px and clipped the compact [Git](src/desktop/ui/git/view.rs) comparison
+  rows; `ContentHeight` restores content sizing. Both Git layout tests failed before it.
+- Resolved: the [Deploy dialog](src/desktop/ui/deployment.rs) body now really scrolls in
+  0.10, and its always-visible scrollbar covered the Cloudflare options button; a
+  trailing gutter fixes it. `cloudflare_target_fields_save_` failed before the fix.
+- Resolved: GUI fixtures saw 0.10's still-mounted closing dialogs as the next dialog;
+  fixtures now use reduced motion. Static-only `KeyBinding::new` and the `ScrollEvent`
+  rename were adopted, and smart Home uses the new direction-aware selection API.
+- Open (Kit 0.10): a pointer click on a stock [Capture Log](src/desktop/ui/reports/log.rs)
+  source tab selects without focusing it, because Kit's `Tab` stops mouse-down propagation
+  before GPUI's focus-on-click listener runs and keeps its focus handles private. Keyboard
+  entry (Tab, arrows, Enter/Space) works and `results_capture_log_view_` covers it; native
+  smoke focuses the tab through UIA. The updated
+  [default flow](ci/desktop-smoke/flows/default.ps1) is not yet run natively.
+- Open: `ToolbarFocus` stays because Kit 0.10 toolbars move focus on Ctrl/Alt arrows
+  (`toolbar_dropdown_preserves_popup_and_modified_arrow_keys` fails without it).
+
 ## GPUI Kit 0.8.0 Upgrade (2026-10-21)
 
 - Resolved: numeric Fields and Source font-size spinners had unnamed SpinButton
@@ -584,6 +604,20 @@ are historical evidence, not open implementation tasks.
 
 ## Source Editor Review (2026-10-19)
 
+- Resolved (2026-11-19): Ctrl+C/Ctrl+X did nothing without a Source selection
+  (Kit copies only selected text), and Ctrl+V always pasted inline. When no cursor
+  selects text, [Source](src/desktop/ui/source.rs) now copies/cuts the active line
+  with clipboard metadata, and pasting that line inserts it above the caret's line;
+  any selected cursor keeps Kit's native copy. `source_line_clipboard_` native tests
+  failed before the fix, including the additional-cursor selection case.
+- Resolved (2026-11-19, PR #44 review): cutting the last Source line removed the line
+  ending before it, dropping the final newline and making Ctrl+X, Ctrl+V reorder
+  lines. Cut now keeps that ending; `source_line_clipboard_cut_` and the native
+  LF/CRLF/trailing-line cut-paste checks failed before the fix.
+- Known limit: Kit 0.10 exposes only the active cursor. Line copy/cut/paste with
+  several empty cursors acts on the active one, and smart Home keeps only the active
+  cursor (`source_line_navigation_` failed without that). Kit 0.10's direction-aware
+  selection API resolved the earlier reversed Shift+Home multi-cursor limit.
 - Resolved: [Source line commands](src/desktop/ui/source.rs) classified Unicode
   whitespace inconsistently, so uncommenting could slice a UTF-8 character or
   delete a form feed. Commenting and indentation now share ASCII-only indentation

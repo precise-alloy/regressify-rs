@@ -35,7 +35,7 @@ impl GitPanel {
                 gpui_kit::component::toolbar::Toolbar::new("git-remotes-toolbar")
                     .with_size(gpui_kit::component::Size::Medium)
                     .p_0()
-                    .h_auto()
+                    .content_height()
                     .flex_wrap()
                     .content(div().text_sm().child("Remote"))
                     .content(
@@ -338,7 +338,7 @@ impl GitPanel {
                 "git-activity-toolbar-focus",
                 gpui_kit::component::toolbar::Toolbar::new("git-activity-toolbar")
                     .with_size(gpui_kit::component::Size::Medium)
-                    .h_auto()
+                    .content_height()
                     .flex_wrap()
                     .child(
                         Button::new("git-activity-toggle")
@@ -658,7 +658,7 @@ impl GitPanel {
         let owner = cx.entity().downgrade();
         let tree = &self.trees[usize::from(comparison)];
         let scroll = tree.read(cx).scroll_handle().clone();
-        // The styled 0.7.3 Tree retains itself in its menu renderer, even without a menu.
+        // The styled Kit 0.10 Tree retains itself in its menu renderer, even without a menu.
         div()
             .size_full()
             .child(
@@ -1046,7 +1046,7 @@ impl GitPanel {
                         gpui_kit::component::toolbar::Toolbar::new("git-selection-toolbar")
                             .with_size(gpui_kit::component::Size::Medium)
                             .p_0()
-                            .h_auto()
+                            .content_height()
                             .flex_wrap()
                             .child(
                                 Button::new("git-commit")
@@ -1326,7 +1326,7 @@ impl GitPanel {
                         "git-diff-toolbar-focus",
                         gpui_kit::component::toolbar::Toolbar::new("git-diff-command-toolbar")
                             .with_size(gpui_kit::component::Size::Medium)
-                            .h_auto()
+                            .content_height()
                             .flex_wrap()
                             .content(
                                 div()
@@ -1401,7 +1401,7 @@ impl GitPanel {
                                         format!("git-{side}-copy-toolbar"),
                                     ))
                                     .with_size(gpui_kit::component::Size::Medium)
-                                    .h_auto()
+                                    .content_height()
                                     .flex_wrap()
                                     .content(div().flex_1().text_xs().child(if after {
                                         "Saved File"
@@ -1587,7 +1587,7 @@ impl Render for GitPanel {
                         "git-toolbar-focus",
                         gpui_kit::component::toolbar::Toolbar::new("git-command-toolbar")
                             .with_size(gpui_kit::component::Size::Medium)
-                            .h_auto()
+                            .content_height()
                             .flex_wrap()
                             .content(Icon::new(gpui_kit::assets::IconName::GitBranch).size_4())
                             .content(
