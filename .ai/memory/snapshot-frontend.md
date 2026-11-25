@@ -81,8 +81,8 @@ Verified: 2026-10-17
   verifies one root gutter, theme-aware empty tracks, and preserved first-paint colors.
 - [Image viewer](../../frontend/src/components/ComparisonViewer.tsx) keeps names/controls outside bounded native scroll panes. Side-by-side shares maximum-width/height canvases and image origins, mirroring both axes for native scroll, drag, and keys; a per-pane WeakMap records actual clamped offsets to ignore mirrored events. Zoom/layout updates refresh those offsets to preserve per-pane anchors. Underfilled canvases drag together within unused lane width/height; normalized per-axis placement stays bounded after resize without changing zoom or adding overflow. Fits restore horizontal centering and top alignment. Ctrl/Cmd+wheel padding uses full inner bounds. The `image viewer` tests cover exact shared dimensions, all drag limits, post-drag anchoring, stationary controls, linked scrollbars, and cleanup; fits never upscale.
   Optional `imageSizes` reserves decoded dimensions before load; `dimensions` holds deltas. Legacy reports discover sizes on load.
-  Delayed-load tests use reduced motion. `magnifies original pixels` checks a 2500% edge,
-  an unscaled wipe divider, and smooth ungridded capture-error placeholders.
+  Delayed-load tests use reduced motion. At 25× Wipe tracks the pointer, not the rounded slider.
+  `placeholderImages` is independent of URL versions and outcomes. Windows alias checks use the resolved PNG name; rollback tests compare directory-entry spelling as well as bytes.
 - Side-by-side crosshairs map image pixels through optional comparer `alignment`,
   excluding band holes and unavailable images. One-screen-pixel guides span whole lanes, including blank space and image padding, with or without a diff; saved hover positions refresh after scroll, zoom, fit, and resize. Their positioned wrapper stays outside the native scroller to avoid adding overflow. Lanes retain linked offsets and image-coordinate projection; tests scroll target pixels into view and exclude borders from hover offsets.
   The `side by side crosshairs|scrolling over images` browser checks cover

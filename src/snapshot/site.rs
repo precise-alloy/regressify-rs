@@ -119,6 +119,8 @@ pub(super) struct Capture {
     pub test: Option<String>,
     pub diff: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder_images: Option<PlaceholderImages>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alignment: Option<crate::compare::image_compare::DiffAlignment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_sizes: Option<ImageSizes>,
@@ -153,6 +155,13 @@ pub(super) struct ExecutionLog {
 pub(super) struct ImageSize {
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub(super) struct PlaceholderImages {
+    pub reference: bool,
+    pub test: bool,
+    pub diff: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -244,6 +253,15 @@ pub(super) fn checked_file(
     relative: &Path,
     optional: bool,
 ) -> Result<Option<PathBuf>> {
+    // Publication needs the requested spelling for output case normalization.
+    Ok(checked_file_paths(root, relative, optional)?.map(|(requested, _)| requested))
+}
+
+pub(super) fn checked_file_paths(
+    root: &Path,
+    relative: &Path,
+    optional: bool,
+) -> Result<Option<(PathBuf, PathBuf)>> {
     normal_relative(relative)?;
     let mut path = root.to_path_buf();
     for part in relative.components() {
@@ -264,19 +282,15 @@ pub(super) fn checked_file(
             }
         }
     }
+    let resolved = path
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve snapshot artifact '{}'", path.display()))?;
     ensure!(
-        path.is_file()
-            && path
-                .canonicalize()
-                .with_context(|| format!(
-                    "Failed to resolve snapshot artifact '{}'",
-                    path.display()
-                ))?
-                .starts_with(root),
+        path.is_file() && resolved.starts_with(root),
         "Snapshot artifact must be a regular file inside its output directory: {}",
         path.display()
     );
-    Ok(Some(path))
+    Ok(Some((path, resolved)))
 }
 
 pub(super) fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
@@ -315,6 +329,158 @@ enum RollbackStep {
     },
 }
 
+// Compare spellings only after resolution has established the file's identity.
+// A DOS alternate name is not a case change. Keep ordinary Unicode case changes too.
+pub(super) fn differs_only_in_case(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+        || (a.chars().count() == b.chars().count()
+            && a.chars().zip(b.chars()).all(|(a, b)| {
+                a == b
+                    || a.to_lowercase().eq(b.to_lowercase())
+                    || a.to_uppercase().eq(b.to_uppercase())
+            }))
+}
+
+fn check_output_spelling(path: &Path, resolved: &Path) -> Result<()> {
+    ensure!(
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .zip(resolved.file_name().and_then(|n| n.to_str()))
+            .is_some_and(|(requested, actual)| differs_only_in_case(requested, actual)),
+        "Snapshot output '{}' is an alias of '{}'; refusing to replace it",
+        path.display(),
+        resolved.display()
+    );
+    Ok(())
+}
+
+fn existing_output_file(root: &Path, relative: &Path) -> Result<Option<PathBuf>> {
+    let Some((requested, resolved)) = checked_file_paths(root, relative, true)? else {
+        return Ok(None);
+    };
+    check_output_spelling(&requested, &resolved)?;
+    Ok(Some(requested))
+}
+
+/// NTFS can assign a long file a tilde alias that a sibling needs as its literal
+/// name. Materialize those literals first; this is ordering, not path validation.
+#[cfg(windows)]
+pub(super) fn prioritize_literal_short_names<T>(
+    siblings: &mut [T],
+    source_root: &Path,
+    path: impl Fn(&T) -> &Path,
+) -> Result<usize> {
+    let mut count = 0;
+    for index in 0..siblings.len() {
+        if is_literal_short_name(source_root, path(&siblings[index]))? {
+            siblings.swap(count, index);
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+#[cfg(windows)]
+fn is_literal_short_name(source_root: &Path, source: &Path) -> Result<bool> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetShortPathNameW(long: *const u16, short: *mut u16, size: u32) -> u32;
+    }
+    let name = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .context("Invalid snapshot output filename")?;
+    if !name.contains('~') || name.encode_utf16().count() > 12 {
+        return Ok(false);
+    }
+    // A name that looks 8.3-compatible can itself generate another alias
+    // (e.g. an accented name). Query the actual input, not an ASCII/OEM heuristic.
+    let wide: Vec<_> = source_root
+        .join(source)
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let error = || format!("Failed to resolve short spelling for snapshot file '{name}'");
+    // The input is terminated; the size probe includes space for the output terminator.
+    let size = unsafe { GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if size == 0 {
+        return Err(std::io::Error::last_os_error()).with_context(error);
+    }
+    let mut buffer = vec![0; size as usize];
+    let len = unsafe { GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), size) };
+    if len == 0 {
+        return Err(std::io::Error::last_os_error()).with_context(error);
+    }
+    ensure!(
+        len < size,
+        "Short spelling changed while resolving snapshot file '{name}'"
+    );
+    let short = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..len as usize]));
+    Ok(short
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| differs_only_in_case(n, name)))
+}
+
+/// Copy a literal short directory's subtree before a long sibling can acquire
+/// its name; apply the same rule at each deeper component, including the leaf.
+/// Equal priorities keep the caller's order. This does not authorize any writes.
+#[cfg(windows)]
+pub(crate) fn materialization_order<T>(
+    source_root: &Path,
+    entries: Vec<T>,
+    path: impl Fn(&T) -> &Path,
+) -> Result<Vec<T>> {
+    materialization_order_from(entries, path, |_| source_root)
+}
+
+#[cfg(windows)]
+pub(crate) fn materialization_order_from<'a, T>(
+    entries: Vec<T>,
+    path: impl Fn(&T) -> &Path,
+    source_root: impl Fn(&T) -> &'a Path,
+) -> Result<Vec<T>> {
+    let has_tilde = |p: &Path| p.as_os_str().as_encoded_bytes().contains(&b'~');
+    if !entries.iter().any(|entry| has_tilde(path(entry))) {
+        return Ok(entries);
+    }
+    let mut known = BTreeMap::<PathBuf, bool>::new();
+    let mut ranked = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let relative = path(&entry);
+        let mut priority = Vec::new();
+        if has_tilde(relative) {
+            normal_relative(relative)?;
+            let mut prefix = PathBuf::new();
+            for (depth, part) in relative.iter().enumerate() {
+                prefix.push(part);
+                if !has_tilde(Path::new(part)) {
+                    continue;
+                }
+                let root = source_root(&entry);
+                let key = root.join(&prefix);
+                let literal = match known.get(&key) {
+                    Some(&literal) => literal,
+                    None => {
+                        let literal = is_literal_short_name(root, &prefix)?;
+                        known.insert(key, literal);
+                        literal
+                    }
+                };
+                if literal {
+                    priority.resize(depth + 1, false);
+                    priority[depth] = true;
+                }
+            }
+        }
+        ranked.push((priority, entry));
+    }
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(ranked.into_iter().map(|(_, entry)| entry).collect())
+}
+
 fn ensure_exact_case(path: &Path, rollback: Option<&mut Vec<RollbackStep>>) -> Result<()> {
     let Some(expected) = path.file_name() else {
         return Ok(());
@@ -323,6 +489,7 @@ fn ensure_exact_case(path: &Path, rollback: Option<&mut Vec<RollbackStep>>) -> R
         .canonicalize()
         .with_context(|| format!("Failed to resolve snapshot artifact '{}'", path.display()))?;
     if canonical.file_name() != Some(expected) {
+        check_output_spelling(path, &canonical)?;
         let parent = path.parent().context("Snapshot path has no parent")?;
         let original_name = canonical.file_name().map(std::ffi::OsStr::to_os_string);
         let temporary = parent.join(format!(".case-{}", uuid::Uuid::new_v4()));
@@ -436,7 +603,7 @@ fn output_file(root: &Path, relative: &str, bytes: &[u8]) -> Result<()> {
     let relative = Path::new(relative);
     normal_relative(relative)?;
     ensure_output_parent(root, relative, None, None)?;
-    if let Some(existing) = checked_file(root, relative, true)?
+    if let Some(existing) = existing_output_file(root, relative)?
         && fs::read(&existing).with_context(|| {
             format!(
                 "Failed to read existing snapshot artifact '{}'",
@@ -458,11 +625,14 @@ fn publish_staged_files(staged_root: &Path, root: &Path, dependencies: &[PathBuf
     let status_rel = Path::new(STATUS_PATH);
     let index_rel = Path::new("index.html");
     let gitignore_rel = Path::new(".gitignore");
-    let mut ordered: Vec<&Path> = dependencies
+    let ordered: Vec<&Path> = dependencies
         .iter()
         .map(PathBuf::as_path)
         .filter(|path| *path != manifest_rel && *path != status_rel && *path != index_rel)
         .collect();
+    #[cfg(windows)]
+    let ordered = materialization_order(staged_root, ordered, |p| p)?;
+    let mut ordered = ordered;
     for tail in [manifest_rel, status_rel] {
         if dependencies.iter().any(|path| path.as_path() == tail) {
             ordered.push(tail);
@@ -495,7 +665,7 @@ fn publish_staged_files(staged_root: &Path, root: &Path, dependencies: &[PathBuf
                 Some(&mut applied),
                 Some(&mut verified_parents),
             )?;
-            let prior = if let Some(existing) = checked_file(root, relative, true)? {
+            let prior = if let Some(existing) = existing_output_file(root, relative)? {
                 let existing_bytes = fs::read(&existing).with_context(|| {
                     format!(
                         "Failed to read existing snapshot artifact '{}'",
@@ -524,6 +694,9 @@ fn publish_staged_files(staged_root: &Path, root: &Path, dependencies: &[PathBuf
                         existing.display()
                     )
                 })?;
+                // Record the old spelling before replacement can erase it. Rollback
+                // then restores the bytes first and the directory-entry name last.
+                ensure_exact_case(&existing, Some(&mut applied))?;
                 Some(backup)
             } else {
                 None
@@ -836,7 +1009,24 @@ pub(crate) fn generate_site(
             if suites.len() == 1 { "suite" } else { "suites" }
         ));
     }
-    for (index, id) in suites.iter().enumerate() {
+    let suite_order = suites.iter();
+    #[cfg(windows)]
+    let suite_order = {
+        // A missing suite has no output subtree and no short spelling to query.
+        let mut present = Vec::new();
+        for id in suite_order {
+            ensure!(valid_suite_id(id), "Invalid snapshot suite ID");
+            if root
+                .join(id)
+                .try_exists()
+                .with_context(|| format!("Cannot inspect snapshot suite '{id}'"))?
+            {
+                present.push(id);
+            }
+        }
+        materialization_order(&root, present, |id| Path::new(id))?.into_iter()
+    };
+    for (index, id) in suite_order.enumerate() {
         snapshot_phase(&format!(
             "Loading snapshot suite {}/{}: {id}",
             index + 1,
@@ -1227,7 +1417,19 @@ pub(crate) fn artifact_inventory(
     present: &[String],
     absent: &[String],
 ) -> Result<SiteInventory> {
+    artifact_inventory_with_suite_root(output, output, present, absent)
+}
+
+/// Verify the candidate index, status and shared files in `output` against the actual
+/// suite JSON, images and logs under `suite_output` before installing that index there.
+pub(crate) fn artifact_inventory_with_suite_root(
+    output: &Path,
+    suite_output: &Path,
+    present: &[String],
+    absent: &[String],
+) -> Result<SiteInventory> {
     let root = output.canonicalize()?;
+    let suite_root = suite_output.canonicalize()?;
     let (manifest_path, manifest) = read_manifest(&root)?;
     let mut expected = BTreeSet::new();
     for id in present.iter().chain(absent) {
@@ -1289,7 +1491,7 @@ pub(crate) fn artifact_inventory(
             continue;
         }
         let report: SuiteReport =
-            serde_json::from_slice(&read_versioned(&root, &summary.report, "data")?)?;
+            serde_json::from_slice(&read_versioned(&suite_root, &summary.report, "data")?)?;
         let passed = report
             .tests
             .iter()
@@ -1332,7 +1534,7 @@ pub(crate) fn artifact_inventory(
                 }
                 files.insert(relative.clone());
                 if verified.insert(relative) {
-                    read_versioned(&root, image, "images")?;
+                    read_versioned(&suite_root, image, "images")?;
                 }
             }
             if let Some(logs) = &capture.logs {
@@ -1381,7 +1583,7 @@ pub(crate) fn artifact_inventory(
                             {
                                 ensure!(previous == *chunk, "Conflicting snapshot log versions");
                             }
-                            let bytes = read_versioned(&root, chunk, "data")?;
+                            let bytes = read_versioned(&suite_root, chunk, "data")?;
                             super::logs::validate_chunk(&bytes, log, &mut records)?;
                             verified.insert(relative.clone());
                             files.insert(relative);
@@ -1783,13 +1985,17 @@ pub(crate) fn image_roles(
         let report: SuiteReport =
             serde_json::from_slice(&read_versioned(&root, &summary.report, "data")?)?;
         for capture in report.tests {
-            for (image, diff) in [
-                (&capture.reference, false),
-                (&capture.test, false),
+            let artwork = capture.placeholder_images.as_ref();
+            for (image, protected) in [
+                (
+                    &capture.reference,
+                    artwork.is_some_and(|flags| flags.reference),
+                ),
+                (&capture.test, artwork.is_some_and(|flags| flags.test)),
                 (&capture.diff, true),
             ] {
                 if let Some(image) = image {
-                    let role = if diff || capture.error.is_some() {
+                    let role = if protected || capture.error.is_some() {
                         ImageRole::Protected
                     } else if capture.status == "pass" {
                         ImageRole::Passed
@@ -2415,6 +2621,48 @@ mod tests {
         );
         assert!(!message.contains("private blocking contents"), "{message}");
         assert_eq!(fs::read(&root)?, b"private blocking contents");
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publication_rollback_restores_exact_filename_and_bytes() -> Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("published");
+        let stage = temp.path().join("staged");
+        let relative = Path::new("images/ALPHA.png");
+        fs::create_dir_all(root.join("images"))?;
+        fs::create_dir_all(stage.join("images"))?;
+        let root = root.canonicalize()?;
+        fs::write(root.join("images/Alpha.png"), b"original pixels")?;
+        fs::write(root.join("index.html"), b"old index")?;
+        fs::write(stage.join("index.html"), b"new index")?;
+        fs::write(stage.join(".gitignore"), b"rules")?;
+        for pixels in [b"original pixels".as_slice(), b"changed pixels"] {
+            fs::write(stage.join(relative), pixels)?;
+            // Fail *after* the image is replaced, regardless of dependency ordering.
+            let locked = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(root.join("index.html"))?;
+            let error = publish_staged_files(&stage, &root, &[relative.to_owned()]).unwrap_err();
+            drop(locked);
+            assert_eq!(
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .unwrap()
+                    .raw_os_error(),
+                Some(32)
+            );
+            let entries = fs::read_dir(root.join("images"))?
+                .map(|e| Ok(e?.file_name()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            assert_eq!(entries, [std::ffi::OsStr::new("Alpha.png")]);
+            assert_eq!(fs::read(root.join("images/Alpha.png"))?, b"original pixels");
+            assert_eq!(fs::read(root.join("index.html"))?, b"old index");
+            assert!(!root.join(".gitignore").try_exists()?);
+        }
         Ok(())
     }
 

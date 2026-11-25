@@ -93,6 +93,19 @@ describe("snapshot contract", () => {
     }
   });
 
+  test("placeholder metadata is optional and identifies image roles, not capture outcomes", () => {
+    expect(capture.placeholderImages).toBeUndefined();
+    const flags = { reference: false, test: true, diff: true };
+    const parsed = captureSchema.parse({ ...capture, placeholderImages: flags });
+    expect(parsed.placeholderImages).toEqual(flags);
+    expect(parsed.error).toBeNull();
+    for (const invalid of [{ ...flags, test: "true" }, { test: true }]) {
+      expect(captureSchema.safeParse({ ...capture, placeholderImages: invalid }).success).toBe(
+        false,
+      );
+    }
+  });
+
   test("capture diagnostic schema is typed and excludes provider detail", () => {
     const record = {
       schemaVersion: 1,

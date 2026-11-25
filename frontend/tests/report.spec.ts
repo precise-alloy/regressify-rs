@@ -2737,6 +2737,86 @@ async function mockComparisonImages(
   });
 }
 
+test("wipe follows fine pointer motion on a scrolled 25x comparison", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const size = { width: 1920, height: 80 };
+  await mockComparisonImages(page, { reference: size, test: size, diff: size }, false);
+  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=wipe");
+  const pane = page.locator(".image-pane");
+  await pane.press("1");
+  for (let step = 0; step < 16; step++) await pane.press("+");
+  await expect(page.getByLabel("Zoom level")).toHaveText("2500%");
+  await pane.evaluate((element) => element.scrollTo(23800, 0));
+  const bounds = await pane.boundingBox();
+  if (!bounds) throw new Error("Missing wipe viewport");
+  const divider = page.locator(".wipe-divider");
+  for (const offset of [120, 122]) {
+    const x = Math.round(bounds.x) + offset;
+    await page.mouse.move(x, Math.round(bounds.y) + 20);
+    await expect
+      .poll(() => divider.evaluate((el, x) => Math.abs(el.getBoundingClientRect().left - x), x))
+      .toBeLessThan(1);
+  }
+  const slider = page.getByRole("slider", { name: "Wipe position" });
+  await slider.press("ArrowRight");
+  await expect(slider).toHaveValue("51");
+
+  // The native slider already reads 0/100 at these hover positions, but the wipe isn't there yet.
+  const world = page.locator(".image-world");
+  for (const end of [false, true]) {
+    await pane.evaluate((el, end) => el.scrollTo(end ? el.scrollWidth : 0, 0), end);
+    const image = await world.boundingBox();
+    if (!image) throw new Error("Missing magnified wipe image");
+    const edge = image.x + (end ? image.width : 0);
+    const near = Math.round(edge + (end ? -30 : 30));
+    for (const action of end ? ["End", "ArrowRight", "click"] : ["Home", "ArrowLeft", "click"]) {
+      await page.mouse.move(near, Math.round(bounds.y) + 20);
+      await expect(slider).toHaveValue(end ? "100" : "0");
+      await expect
+        .poll(() => divider.evaluate((el) => el.getBoundingClientRect().left))
+        .toBeCloseTo(near, 0);
+      if (action === "click") {
+        const track = await slider.boundingBox();
+        if (!track) throw new Error("Missing wipe slider");
+        await slider.click({ position: { x: end ? track.width - 2 : 2, y: track.height / 2 } });
+      } else {
+        await slider.press(action);
+      }
+      await expect
+        .poll(() => divider.evaluate((el) => el.getBoundingClientRect().left))
+        .toBeCloseTo(edge, 0);
+      await expect(world.locator("[style*='clip-path']")).toHaveCSS(
+        "clip-path",
+        end ? "inset(0px 0px 0px 100%)" : "inset(0px 0px 0px 0%)",
+      );
+      await page.mouse.move(near + 1, Math.round(bounds.y) + 22);
+    }
+  }
+});
+
+test("artifact metadata keeps legacy error artwork smooth without hiding valid peer pixels", async ({
+  page,
+}) => {
+  await page.route("**/_snapshot/data/suites/workspace-overview.json?*", async (route) => {
+    const response = await route.fetch();
+    const suite = await response.json();
+    suite.tests[0].placeholderImages = { reference: true, test: false, diff: true };
+    await route.fulfill({ response, json: suite });
+  });
+  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
+  const panes = page.locator(".comparison-lane");
+  await panes.first().press("1");
+  for (let step = 0; step < 13; step++) await panes.first().press("+");
+  await expect(page.getByLabel("Zoom level")).toHaveText("1250%");
+  for (const [index, isArtwork] of [true, false, true].entries()) {
+    await expect(panes.nth(index).locator("img")).toHaveCSS(
+      "image-rendering",
+      isArtwork ? "auto" : "pixelated",
+    );
+    await expect(panes.nth(index).locator(".pixel-grid")).toHaveCount(isArtwork ? 0 : 1);
+  }
+});
+
 test("image viewer magnifies original pixels up to 2500%", async ({ page, isMobile }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   const size = { width: 80, height: 80 };
@@ -2809,7 +2889,7 @@ test("image viewer magnifies original pixels up to 2500%", async ({ page, isMobi
       await page.locator(".image-pane").focus();
       for (let step = 0; step < 15; step++) await page.locator(".image-pane").press("+");
       await expect(zoom).toHaveText("2500%");
-      const divider = await page.locator(".image-surface div[class*='bg-[#008f74]']").boundingBox();
+      const divider = await page.locator(".wipe-divider").boundingBox();
       expect(divider?.width).toBe(3);
     }
   }

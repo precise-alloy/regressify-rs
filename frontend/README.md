@@ -512,7 +512,11 @@ Hover any image to show synchronized crosshairs at the same image-pixel coordina
 in all three lanes. White guides with dark outlines stay one screen pixel wide at
 every zoom level. Missing images and coordinates outside a smaller image have no
 guides. Moving off the image, scrolling, changing views, or using touch clears them.
-Wipe follows mouse movement without dragging; its slider supports keyboard and touch.
+Wipe follows mouse movement without snapping to percentage steps. The slider
+supports keyboard and touch in whole percentages. Optional `placeholderImages`
+flags (`reference`, `test`, `diff`) control sampling and grid visibility in the
+viewer. Regenerated reports can explicitly mark all three false when a diagnostic
+names no lane; older reports without flags keep their diagnostic fallback.
 
 Hover or focus the Info icon for mismatch/threshold statistics, dimensions, capture
 and run details, source URLs, and engine errors. The bubble allows native text

@@ -52,6 +52,17 @@ description: 'Use when changing regressify snapshot, the frontend React SPA, rep
 
 The `magnifies original pixels` regression checks the actual rendered grid
 above 1000%, including line thickness and unchanged source colors between lines.
+Keep optional `placeholderImages` metadata per lane, not per URL or capture
+status. Emit all-false flags rather than guessing a lane from an unqualified error.
+Within one capture, a Diff alias of the failed Test inherits its artwork flag;
+never propagate that diagnostic to another capture using the same file.
+Match validated source paths for aliasing and preserve the Test's declared case.
+Use the resolved filename for DOS aliases and look for markers beside the resolved
+PNG. `windows_short_` exercises regeneration and collision rollback on 8.3-enabled volumes.
+Finish literal short suite directories and image filenames before their long
+siblings. Apply the same component ordering to published and deployment copies.
+Check rollback with directory-entry names, not just case-insensitive reads of old URLs.
+Verify Home/End against the wipe divider itself after fractional pointer movement.
 
 ```sh
 cargo test --lib snapshot::

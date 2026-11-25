@@ -40,6 +40,9 @@ export async function createFixture() {
   const errorIconBytes = await readFile(
     resolve(import.meta.dir, "../../src/test/data/error-icon.png"),
   );
+  const errorImage = await artifact("_snapshot/images/preview/error-icon.png", errorIconBytes);
+  const { width, height } = PNG.sync.read(errorIconBytes);
+  const errorImageSize = { width, height };
   const browser = await chromium.launch({ executablePath: browserExecutable(), headless: true });
   let errorThumbnailUrl = "";
   const captures: {
@@ -271,16 +274,24 @@ export async function createFixture() {
         mismatch: error ? null : failed ? images.mismatch : 0,
         error,
         reference: error ? null : images.reference,
-        test: failed ? images.test : images.reference,
+        test: error ? errorImage : failed ? images.test : images.reference,
         diff: failed && !error ? images.diff : null,
         imageSizes: {
           reference: error ? null : images.imageSizes.reference,
-          test: failed ? images.imageSizes.test : images.imageSizes.reference,
+          test: error
+            ? errorImageSize
+            : failed
+              ? images.imageSizes.test
+              : images.imageSizes.reference,
           diff: failed && !error ? images.imageSizes.diff : null,
         },
         previews: {
           reference: error ? null : images.previews.reference,
-          test: failed ? images.previews.test : images.previews.reference,
+          test: error
+            ? images.previews.gridError
+            : failed
+              ? images.previews.test
+              : images.previews.reference,
           diff: failed && !error ? images.previews.diff : null,
           grid: error
             ? images.previews.gridError
@@ -299,7 +310,7 @@ export async function createFixture() {
       );
       await writeFile(
         join(suiteDir, "bitmaps_test/20260923-094200", fileName),
-        images.bytes[failed ? 1 : 0] || new Uint8Array(),
+        error ? errorIconBytes : images.bytes[failed ? 1 : 0] || new Uint8Array(),
       );
       const diffName = fileName.replace(".png", "_diff.png");
       if (capture.diff)

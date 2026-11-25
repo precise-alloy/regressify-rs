@@ -40,6 +40,14 @@ description: 'Use when changing desktop comparison reports, image previews, nami
 
 The pixel grid is visible strictly above 1000%. Clip its one-device-pixel
 strokes to the image and use the same pixel boundaries as nearest-neighbor sampling.
+Keep the Wipe pointer fraction unrounded; whole percentages belong to the
+slider steps and Overlay opacity. The Overlay slider's accessible numeric value
+must equal the opacity painted, without losing the Wipe fraction on a tab switch.
+Byte-identical unmarked error artwork is a sampling decision,
+not grounds to change capture identity, file actions, or approval.
+Only a Diff resolving to this capture's marked Test inherits its replacement
+artwork; keep the Diff path for file actions and avoid unrelated sidecar reads.
+Register crosshair geometry for displayed file pixels, never a substituted icon.
 
 ```sh
 cargo test --features desktop --lib desktop::results::tests

@@ -243,37 +243,43 @@ impl ReportDeployment {
             "Checking local copies of {} kept suites against the site",
             prepared.plan.local.len()
         ));
+        // Hash and copy in parallel, but don't create the public names in worker completion
+        // order: a long name can claim a literal short name needed by a different worker/suite.
+        std::fs::create_dir(stash).context("Cannot create a new local report stash")?;
+        let mut verified = BTreeMap::new();
         let mut regenerate = Vec::new();
         for suite in &prepared.plan.local {
             let id = &suite.summary.id;
             let copied = suite
                 .files
                 .par_iter()
-                .try_for_each(|(path, file)| -> Result<()> {
-                    // Same checks as staging: no symlinks, nothing outside the report output.
-                    let source = super::artifact_source(&output, Path::new(path), true)?
-                        .with_context(|| format!("Missing local copy of '{path}'"))?;
-                    // The size is compared before reading, so a wrong file is never loaded.
-                    ensure!(
-                        std::fs::metadata(&source)?.len() == file.size,
-                        "The local copy of '{path}' differs from the site"
-                    );
-                    let bytes = std::fs::read(&source)
-                        .with_context(|| format!("Cannot read the local copy of '{path}'"))?;
-                    ensure!(
-                        provider_hash(self.provider(), &bytes, path) == file.hash,
-                        "The local copy of '{path}' differs from the site"
-                    );
-                    let target = stash.join(path);
-                    std::fs::create_dir_all(target.parent().context("Invalid stash path")?)?;
-                    std::fs::write(&target, &bytes)
-                        .with_context(|| format!("Cannot stash the local copy of '{path}'"))?;
-                    Ok(())
-                });
-            if let Err(error) = copied {
-                phase(&format!("Regenerating '{id}': {error:#}"));
-                regenerate.push(id.clone());
+                .map(|(path, file)| -> Result<_> {
+                    use std::io::Write;
+                    let bytes = checked_bytes(&output, path, self.provider(), file)?;
+                    let mut temp = tempfile::NamedTempFile::new_in(stash)?;
+                    temp.write_all(&bytes)?;
+                    Ok((Path::new(path), temp.into_temp_path()))
+                })
+                .collect::<Result<Vec<_>>>();
+            match copied {
+                Ok(files) => verified.extend(files),
+                Err(error) => {
+                    phase(&format!("Regenerating '{id}': {error:#}"));
+                    regenerate.push(id.clone());
+                }
             }
+        }
+        #[cfg(windows)]
+        let verified = crate::snapshot::materialization_order(
+            &output,
+            verified.into_iter().collect(),
+            |(p, _)| *p,
+        )?;
+        for (path, temp) in verified {
+            let target = stash.join(path);
+            std::fs::create_dir_all(target.parent().context("Invalid stash path")?)?;
+            temp.persist_noclobber(&target)
+                .with_context(|| format!("Cannot stash the local copy of '{}'", path.display()))?;
         }
         for id in &regenerate {
             prepared.plan.regenerate_local(id);
@@ -296,25 +302,54 @@ impl ReportDeployment {
 
     /// Puts reused suites back into the report output once generation pruned them from it,
     /// whatever the deployment's outcome: the next deployment can only reuse files the output
-    /// still has. When staging completed (`staged`), the staged site is written back whole,
-    /// so the local report lists exactly the suites it holds; otherwise only the stashed files
-    /// return. Callers only warn on failure: the next deployment regenerates what it cannot
-    /// reuse.
+    /// still has. Fill missing suite files, never overwrite one owned by the current report.
+    /// Install a completed stage's index only if its suite dependencies verify locally.
+    /// Callers only warn on failure: the next deployment regenerates what it cannot reuse.
     fn restore_reused(
         &self,
-        staged: Option<&Path>,
+        staged: Option<(&Path, &SiteState)>,
         stash: &Path,
         local: &[SuiteState],
     ) -> Result<()> {
-        let source = staged.unwrap_or(stash);
-        for suite in local {
-            for path in suite.files.keys() {
-                restore_file(&self.output, &source.join(path), path, false)?;
+        let source = staged.map_or(stash, |(root, _)| root).canonicalize()?;
+        let output = self.output.canonicalize()?;
+        let mut files = BTreeMap::new();
+        for original in local {
+            let suite = match staged {
+                Some((_, state)) => state
+                    .suites
+                    .get(&original.summary.id)
+                    .context("Reused suite is absent from the staged state")?,
+                None => original,
+            };
+            for (path, file) in &suite.files {
+                ensure!(
+                    files
+                        .insert(path.as_str(), file)
+                        .is_none_or(|other| other == file),
+                    "Conflicting recovery records for '{path}'"
+                );
             }
         }
-        let Some(staged) = staged else {
+        let paths = files.keys().copied().collect::<Vec<_>>();
+        #[cfg(windows)]
+        let paths = crate::snapshot::materialization_order(&source, paths, |p| Path::new(*p))?;
+        for path in paths {
+            let bytes = checked_bytes(&source, path, self.provider(), files[path])?;
+            restore_missing_file(&output, &bytes, path)?;
+        }
+        // Check the final tree, not just the bytes that went into individual writes.
+        for (path, file) in files {
+            checked_bytes(&output, path, self.provider(), file)?;
+        }
+        let Some((staged, state)) = staged else {
             return Ok(());
         };
+        // The remote manifest can legitimately include suites kept only by provider hash.
+        // Before changing any shared file, check what this index would serve from the output.
+        let suites = state.suites.keys().cloned().collect::<Vec<_>>();
+        crate::snapshot::artifact_inventory_with_suite_root(staged, &output, &suites, &[])
+            .context("Keeping the local report index: the staged site is not complete locally")?;
         let last = [
             "_snapshot/status.json",
             "_snapshot/data/manifest.json",
@@ -339,20 +374,24 @@ impl ReportDeployment {
             if suite_file || path == site_state::STATE_PATH || last.contains(&path.as_str()) {
                 continue;
             }
-            restore_file(&self.output, entry.path(), &path, false)?;
+            restore_file(
+                &output,
+                &std::fs::read(exact_source(&source, &path)?)?,
+                &path,
+                false,
+            )?;
         }
         // The entry page and manifest go last, so they never name files that are not there.
         for path in last {
             if staged.join(path).is_file() {
-                restore_file(&self.output, &staged.join(path), path, true)?;
+                restore_file(
+                    &output,
+                    &std::fs::read(exact_source(&source, path)?)?,
+                    path,
+                    true,
+                )?;
             }
         }
-        let suites = SiteState::parse(&std::fs::read(staged.join(site_state::STATE_PATH))?)?
-            .suites
-            .into_keys()
-            .collect::<Vec<_>>();
-        crate::snapshot::artifact_inventory(&self.output, &suites, &[])
-            .context("The restored local report is incomplete")?;
         Ok(())
     }
 
@@ -523,9 +562,7 @@ impl ReportDeployment {
             && !prepared.plan.local.is_empty()
             && let Err(error) = self.restore_reused(None, stash, &prepared.plan.local)
         {
-            eprintln!(
-                "Warning: Cannot put the reused suites back into the local report; the next deployment regenerates them: {error:#}"
-            );
+            eprintln!("Warning: Local report recovery was incomplete: {error:#}");
         }
     }
 
@@ -687,57 +724,49 @@ impl ReportDeployment {
         staging: &Path,
         client: &DeploymentClient,
     ) -> Result<Outcome> {
-        let reused = prepared
-            .stash
-            .clone()
-            .filter(|_| !prepared.plan.local.is_empty())
-            .map(|stash| (stash, prepared.plan.local.clone()));
-        let result = self
-            .publish_staged(prepared, generated, staging, client)
-            .await;
-        if let Some((stash, local)) = reused {
-            // A complete staged site (its state is written last) is the best local report;
-            // without one, the stashed files at least remain available for the next update.
-            let staged = staging
-                .join(site_state::STATE_PATH)
-                .is_file()
-                .then(|| staging.to_path_buf());
+        // Cloudflare can rewrite deployment.json for its optimized upload. The original
+        // staging files do not change, so recover against the state verified before upload.
+        let (result, staged_state) = match self.stage(&prepared, generated, staging).await {
+            Ok(state) => (
+                self.publish_staged(&prepared, staging, &state, client)
+                    .await,
+                Some(state),
+            ),
+            Err(error) => (Err(error), None),
+        };
+        if let Some(stash) = prepared.stash
+            && !prepared.plan.local.is_empty()
+        {
+            let staging = staging.to_path_buf();
+            let local = prepared.plan.local;
             let context = self.clone();
             let scope = crate::diagnostics::runtime::current();
             let restored = tokio::task::spawn_blocking(move || {
                 crate::diagnostics::runtime::in_scope(scope, || {
-                    context.restore_reused(staged.as_deref(), &stash, &local)
+                    let staged = staged_state
+                        .as_ref()
+                        .map(|state| (staging.as_path(), state));
+                    context.restore_reused(staged, &stash, &local)
                 })
             })
             .await
             .context("Local report restore task failed")
             .and_then(|result| result);
             if let Err(error) = restored {
-                eprintln!(
-                    "Warning: Cannot put the reused suites back into the local report; the next deployment regenerates them: {error:#}"
-                );
+                eprintln!("Warning: Local report recovery was incomplete: {error:#}");
             }
         }
         result
     }
 
-    async fn publish_staged(
+    async fn stage(
         &self,
-        prepared: Prepared,
+        prepared: &Prepared,
         generated: &Path,
         staging: &Path,
-        client: &DeploymentClient,
-    ) -> Result<Outcome> {
-        let Prepared {
-            plan,
-            budget,
-            remote,
-            inputs,
-            suite_inputs,
-            records,
-            served,
-            stash,
-        } = prepared;
+    ) -> Result<SiteState> {
+        let plan = &prepared.plan;
+        let stash = prepared.stash.clone();
         ensure!(
             plan.local.is_empty() || stash.is_some(),
             "Local copies of kept suites were not checked before generation"
@@ -750,7 +779,7 @@ impl ReportDeployment {
         let generate = plan.generate.clone();
         let provider = self.provider();
         let diagnostic_context = crate::diagnostics::runtime::current();
-        let (fingerprint, state) = super::with_heartbeat(
+        super::with_heartbeat(
             "Staging selected reports",
             tokio::task::spawn_blocking(move || {
                 crate::diagnostics::runtime::in_scope(diagnostic_context, || {
@@ -774,11 +803,9 @@ impl ReportDeployment {
                         .chain(&local)
                         .map(|suite| suite.summary.clone())
                         .collect::<Vec<_>>();
-                    let inventory =
-                        super::stage_site(&generated, &generate, &summaries, &destination)?;
-                    if let Some(stash) = &stash {
-                        add_local_copies(stash, &mut local, &destination, provider)?;
-                    }
+                    let copies = stash.as_deref().filter(|_| !local.is_empty())
+                        .map(|stash| LocalCopies { stash, suites: &mut local, provider });
+                    let inventory = super::stage_site(&generated, &generate, &summaries, &destination, copies)?;
                     let mut all = generate.clone();
                     all.extend(summaries.iter().map(|summary| summary.id.clone()));
                     all.sort();
@@ -799,33 +826,53 @@ impl ReportDeployment {
                         &bytes,
                     )
                     .context("Cannot stage the site state")?;
-                    Ok((fingerprint, state))
+                    Ok(state)
                 })
             }),
         )
         .await
         .context("Deployment staging task failed")?
-        .context("Cannot stage selected reports for deployment")?;
+        .context("Cannot stage selected reports for deployment")
+    }
+
+    async fn publish_staged(
+        &self,
+        prepared: &Prepared,
+        staging: &Path,
+        state: &SiteState,
+        client: &DeploymentClient,
+    ) -> Result<Outcome> {
+        let Prepared {
+            plan,
+            budget,
+            remote,
+            inputs,
+            suite_inputs,
+            records,
+            served,
+            ..
+        } = prepared;
+        let fingerprint = &state.fingerprint;
         let suites = state.suites.keys().cloned().collect::<Vec<_>>();
         let unchanged_url = super::decide_publication(
             &self.job,
             self.settings.as_deref(),
-            &fingerprint,
-            &remote,
+            fingerprint,
+            remote,
             inputs.as_deref(),
         )?;
         if let Some(url) = unchanged_url {
             // The site already serves this content, so its suites match these inputs. Records
             // name the state the site serves, which a provider may have rewritten (Cloudflare
             // does for optimized images), never the state staged here.
-            if let Some(served) = &served {
-                self.record_suite_inputs(&records, served, &suite_inputs);
+            if let Some(served) = served {
+                self.record_suite_inputs(records, served, suite_inputs);
             }
             // Confirmed by the site's own state, the skip leaves the same records an upload
             // would: local records can lag the site (an upload that landed unconfirmed, or the
             // same content published elsewhere), and stale ones mislead links, offline statuses,
             // and later early checks. A skip on local records alone has nothing new to record.
-            let confirmed = match (&remote, &served, &self.settings) {
+            let confirmed = match (remote, served, &self.settings) {
                 (SiteContent::Reports(_), Some(served), Some(path)) => {
                     if let Err(error) = site_state::mark_published(path, &self.job.target.id)
                         .and_then(|()| site_state::save_local(path, &self.job.target.id, served))
@@ -840,8 +887,8 @@ impl ReportDeployment {
             };
             return Ok(Outcome {
                 url: Some(url),
-                fingerprint: Some(fingerprint),
-                inputs,
+                fingerprint: Some(fingerprint.clone()),
+                inputs: inputs.clone(),
                 unchanged: true,
                 suites: confirmed,
             });
@@ -887,7 +934,7 @@ impl ReportDeployment {
                 .transpose();
             let saved = match served {
                 Ok(Some(served)) => {
-                    self.record_suite_inputs(&records, &served, &suite_inputs);
+                    self.record_suite_inputs(records, &served, suite_inputs);
                     site_state::save_local(path, &self.job.target.id, &served)
                 }
                 Ok(None) => site_state::forget_local(path, &self.job.target.id),
@@ -904,8 +951,8 @@ impl ReportDeployment {
         }
         Ok(Outcome {
             url: published.url,
-            fingerprint: Some(fingerprint),
-            inputs,
+            fingerprint: Some(fingerprint.clone()),
+            inputs: inputs.clone(),
             unchanged: false,
             suites: Some(suites),
         })
@@ -1087,38 +1134,79 @@ fn suites_to_optimize(kept: &[SuiteState], remaining: u64) -> BTreeSet<String> {
     enough_to_save(savings, remaining)
 }
 
-/// Adds the stashed copies of reused suites to a staged site. Generated suites win where both
-/// list a file, such as a shared capture log chunk, because their copy is the current one; the
-/// reused suite's state then records the staged bytes, so it describes what is uploaded.
-fn add_local_copies(
-    stash: &Path,
-    local: &mut [SuiteState],
-    destination: &Path,
-    provider: DeploymentProvider,
-) -> Result<()> {
-    for suite in local {
-        for (path, file) in &mut suite.files {
-            let target = destination.join(path);
-            if target.is_file() {
-                let bytes = std::fs::read(&target)?;
-                *file = StateFile {
-                    size: bytes.len() as u64,
-                    hash: provider_hash(provider, &bytes, path),
-                };
-                continue;
-            }
-            std::fs::create_dir_all(target.parent().context("Invalid staged path")?)?;
-            std::fs::copy(stash.join(path), &target)
-                .with_context(|| format!("Cannot stage the local copy of '{path}'"))?;
-        }
-    }
-    Ok(())
+pub(super) struct LocalCopies<'a> {
+    pub stash: &'a Path,
+    pub suites: &'a mut [SuiteState],
+    pub provider: DeploymentProvider,
 }
 
-/// Writes `source` to `relative` under the report `output` without following symlinks
-/// (the same rule staging applies), replacing the file atomically. An existing identical file
-/// is left alone unless `replace` asks for the newer copy anyway.
-fn restore_file(output: &Path, source: &Path, relative: &str, replace: bool) -> Result<()> {
+impl LocalCopies<'_> {
+    pub(super) fn verify(
+        self,
+        destination: &Path,
+        generated: &crate::snapshot::SiteInventory,
+    ) -> Result<BTreeSet<String>> {
+        let root = destination.canonicalize()?;
+        let mut superseded = BTreeSet::new();
+        let generated: BTreeSet<_> = generated
+            .suites
+            .values()
+            .flatten()
+            .map(PathBuf::as_path)
+            .collect();
+        for suite in self.suites {
+            for (path, file) in &mut suite.files {
+                if generated.contains(Path::new(path)) {
+                    // A shared log chunk is taken from the generated suite, not the stash.
+                    let bytes = std::fs::read(exact_source(&root, path)?)?;
+                    let staged = StateFile {
+                        size: bytes.len() as u64,
+                        hash: provider_hash(self.provider, &bytes, path),
+                    };
+                    if *file != staged {
+                        *file = staged;
+                        superseded.insert(suite.summary.id.clone());
+                    }
+                } else {
+                    checked_bytes(&root, path, self.provider, file)?;
+                }
+            }
+        }
+        Ok(superseded)
+    }
+}
+
+fn exact_source(root: &Path, path: &str) -> Result<PathBuf> {
+    let source = super::artifact_source(root, Path::new(path), false)?
+        .with_context(|| format!("Missing local copy of '{path}'"))?;
+    ensure!(
+        source == root.join(path),
+        "Report path '{path}' names a different directory entry"
+    );
+    Ok(source)
+}
+
+fn checked_bytes(
+    root: &Path,
+    path: &str,
+    provider: DeploymentProvider,
+    file: &StateFile,
+) -> Result<Vec<u8>> {
+    let source = exact_source(root, path)?;
+    let input = std::fs::File::open(source)?;
+    ensure!(
+        input.metadata()?.len() == file.size,
+        "The local copy of '{path}' differs from the site"
+    );
+    let bytes = super::bounded_read(input, usize::try_from(file.size)?, path)?;
+    ensure!(
+        bytes.len() as u64 == file.size && provider_hash(provider, &bytes, path) == file.hash,
+        "The local copy of '{path}' differs from the site"
+    );
+    Ok(bytes)
+}
+
+fn restore_target(output: &Path, relative: &str) -> Result<PathBuf> {
     let relative = Path::new(relative);
     ensure!(
         relative
@@ -1132,11 +1220,24 @@ fn restore_file(output: &Path, source: &Path, relative: &str, replace: bool) -> 
         target.push(part);
         let last = parts.peek().is_none();
         match std::fs::symlink_metadata(&target) {
-            Ok(metadata) => ensure!(
-                !metadata.file_type().is_symlink() && (last || metadata.is_dir()),
-                "Report output path '{}' is not a regular location",
-                relative.display()
-            ),
+            Ok(metadata) => {
+                ensure!(
+                    !metadata.file_type().is_symlink()
+                        && if last {
+                            metadata.is_file()
+                        } else {
+                            metadata.is_dir()
+                        },
+                    "Report output path '{}' is not a regular location",
+                    relative.display()
+                );
+                #[cfg(windows)]
+                ensure!(
+                    target.canonicalize()?.file_name() == target.file_name(),
+                    "Report output path '{}' names a different directory entry",
+                    target.display()
+                );
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if !last {
                     std::fs::create_dir(&target)?;
@@ -1145,17 +1246,41 @@ fn restore_file(output: &Path, source: &Path, relative: &str, replace: bool) -> 
             Err(error) => return Err(error.into()),
         }
     }
-    let bytes = std::fs::read(source)
-        .with_context(|| format!("Cannot read '{}' to restore", relative.display()))?;
+    Ok(target)
+}
+
+/// Generation may have published newer bytes at the same shared log URL. Verify existing
+/// files in the final pass, after filling the other missing paths, rather than replacing them.
+fn restore_missing_file(output: &Path, bytes: &[u8], relative: &str) -> Result<()> {
+    use std::io::Write;
+    let target = restore_target(output, relative)?;
+    if target.try_exists()? {
+        return Ok(());
+    }
+    let write = || -> Result<()> {
+        let mut builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        builder.permissions(
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o666),
+        );
+        let mut temp = builder
+            .suffix(".tmp")
+            .tempfile_in(target.parent().context("Invalid restore path")?)?;
+        temp.write_all(bytes)?;
+        temp.as_file().sync_all()?;
+        temp.persist_noclobber(&target)?;
+        Ok(())
+    };
+    write().with_context(|| format!("Cannot restore missing '{relative}' in the local report"))
+}
+
+fn restore_file(output: &Path, bytes: &[u8], relative: &str, replace: bool) -> Result<()> {
+    let target = restore_target(output, relative)?;
     if !replace && std::fs::read(&target).is_ok_and(|current| current == bytes) {
         return Ok(());
     }
-    crate::helpers::write_file_atomically(&target, &bytes).with_context(|| {
-        format!(
-            "Cannot restore '{}' in the local report",
-            relative.display()
-        )
-    })
+    crate::helpers::write_file_atomically(&target, bytes)
+        .with_context(|| format!("Cannot restore '{relative}' in the local report"))
 }
 
 fn site_path(relative: &Path) -> String {
@@ -2443,20 +2568,297 @@ mod tests {
     }
 
     #[test]
+    fn incremental_aliases_keep_distinct_bytes_at_stash_merge_and_restore() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let output = root.path().join("output");
+        let short_suite = "RECORD~1";
+        let long_suite = "RECORDEDCAPTURESUITE";
+        let short = "RECORD~1.PNG";
+        let long = "RECORDEDCAPTUREWITHLONGNAME.PNG";
+        workspace(&output, &[(short_suite, 20), (long_suite, 90)]);
+        let run = output.join(short_suite).join("bitmaps_test/run");
+        let mut report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(run.join("report.json"))?)?;
+        let mut rows = Vec::new();
+        for (name, shade) in [(short, 40u8), (long, 190)] {
+            let mut row = report["tests"][0].clone();
+            row["pair"]["fileName"] = name.into();
+            row["pair"]["test"] = format!("../bitmaps_test/run/{name}").into();
+            rows.push(row);
+            std::fs::write(
+                run.join(name),
+                lodepng::encode32(&[shade, 20, 60, 255], 1, 1)?,
+            )?;
+        }
+        report["tests"] = rows.into();
+        std::fs::write(run.join("report.json"), report.to_string())?;
+        std::fs::write(
+            output.join(short_suite).join("html_report/config.js"),
+            format!("report({report});"),
+        )?;
+        let all = [long_suite.to_owned(), short_suite.to_owned()];
+        generate(&output, &all);
+        let mut context = deployment(&output, DeploymentMode::Update, &[long_suite], &[]);
+        context.job.target.provider = DeploymentProvider::AzureSwa;
+        let inventory = crate::snapshot::artifact_inventory(&output, &all, &[])?;
+        let known = build_state(
+            &output,
+            &inventory,
+            &[],
+            &context.job.target,
+            &"b".repeat(64),
+        )?
+        .suites[short_suite]
+            .clone();
+        let mut prepared = Prepared {
+            plan: Plan {
+                generate: vec![long_suite.into()],
+                local: vec![known.clone()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let check = |tree: &Path| -> Result<()> {
+            let names =
+                std::fs::read_dir(tree.join("_snapshot/images").join(short_suite).join("test"))?
+                    .map(|entry| entry.map(|entry| entry.file_name()))
+                    .collect::<std::io::Result<BTreeSet<_>>>()?;
+            assert_eq!(names, [short.into(), long.into()].into());
+            for (path, file) in &known.files {
+                let bytes = std::fs::read(tree.join(path))?;
+                ensure!(
+                    bytes.len() as u64 == file.size
+                        && provider_hash(DeploymentProvider::AzureSwa, &bytes, path) == file.hash,
+                    "Wrong reused bytes for {path}"
+                );
+            }
+            Ok(())
+        };
+        let stash = root.path().join("stash");
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()?
+            .install(|| context.stash_local(&mut prepared, &stash))?;
+        assert_eq!(prepared.plan.local.len(), 1);
+        check(&stash)?;
+        generate(&output, &prepared.plan.generate);
+        context.restore_reused(None, &stash, &prepared.plan.local)?;
+        check(&output)?;
+        // A generated long suite and a reused literal short suite share the staging namespace.
+        let staging = root.path().join("merged");
+        let summaries = vec![known.summary.clone()];
+        let mut local = prepared.plan.local.clone();
+        super::super::stage_site(
+            &output,
+            &prepared.plan.generate,
+            &summaries,
+            &staging,
+            Some(LocalCopies {
+                stash: &stash,
+                suites: &mut local,
+                provider: DeploymentProvider::AzureSwa,
+            }),
+        )?;
+        assert_eq!(
+            local, prepared.plan.local,
+            "An NTFS alias is not a generated inventory overlap"
+        );
+        check(&staging)?;
+        crate::snapshot::artifact_inventory(&staging, &all, &[])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn incremental_shared_log_uses_generated_bytes_and_staged_recovery_hash() -> Result<()> {
+        use crate::diagnostics::{
+            journal::{ArchiveState, JournalOptions, JournalWriter, OperationMetadata},
+            record::{DiagnosticEvent, DiagnosticRecordV1, OperationKind, Outcome, Stage},
+            runtime::ArchiveReference,
+        };
+        let root = tempfile::tempdir()?;
+        let output = root.path().join("output");
+        workspace(&output, &[("one", 20), ("two", 90)]);
+        let meta = OperationMetadata::new(OperationKind::Capture, None);
+        let mut journal = JournalWriter::create(&output, meta.clone(), JournalOptions::default())?;
+        journal.write(&DiagnosticRecordV1::new(
+            meta.operation_id.clone(),
+            OperationKind::Capture,
+            Stage::QueueSetup,
+            DiagnosticEvent::Decision,
+        ))?;
+        journal.flush()?;
+        let chunk = format!(
+            "_snapshot/data/logs/{}/chunk-000000.json",
+            meta.operation_id
+        );
+        let log = serde_json::to_value(crate::test::capture::CaptureLog {
+            state: ArchiveState::Partial,
+            archive: Some(ArchiveReference {
+                operation_id: meta.operation_id,
+                execution_id: None,
+                state: ArchiveState::Partial,
+                missing_records: Some(0),
+            }),
+        })?;
+        let both = ["one".to_owned(), "two".to_owned()];
+        for id in &both {
+            let report = output.join(id).join("bitmaps_test/run/report.json");
+            let mut rows: serde_json::Value = serde_json::from_slice(&std::fs::read(&report)?)?;
+            rows["tests"][0]["pair"]["testLog"] = log.clone();
+            std::fs::write(&report, rows.to_string())?;
+            std::fs::write(
+                output.join(id).join("html_report/config.js"),
+                format!("report({rows});"),
+            )?;
+        }
+        generate(&output, &both);
+        let mut ctx = deployment(&output, DeploymentMode::Update, &["one"], &[]);
+        ctx.job.target.provider = DeploymentProvider::AzureSwa;
+        ctx.job.target.site_id.clear();
+        let target = &ctx.job.target;
+        let inventory = crate::snapshot::artifact_inventory(&output, &both, &[])?;
+        let mut initial = build_state(&output, &inventory, &[], target, &"b".repeat(64))?;
+        let current = initial.suites["one"].files[&chunk].clone();
+        let mut two = initial.suites.remove("two").unwrap();
+        assert_eq!(two.files[&chunk], current);
+        let mut attempt = Prepared {
+            plan: Plan {
+                generate: vec!["one".into()],
+                local: vec![two.clone()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ctx.stash_local(&mut attempt, &root.path().join("verified-stash"))?;
+        assert_eq!(attempt.plan.local.len(), 1);
+        let stash = root.path().join("stash");
+        super::super::stage_reports(&output, &both, &stash)?;
+        // The provider's reused record and stash contain different bytes for the same chunk.
+        // The generated copy still satisfies both reports' public versioned URLs.
+        let mut older = std::fs::read(stash.join(&chunk))?;
+        older.push(b'\n');
+        std::fs::write(stash.join(&chunk), &older)?;
+        two.files.insert(
+            chunk.clone(),
+            StateFile {
+                size: older.len() as u64,
+                hash: provider_hash(target.provider, &older, &chunk),
+            },
+        );
+
+        generate(&output, &both[..1]);
+        let merged = root.path().join("merged");
+        let mut local = vec![two.clone()];
+        let inventory = super::super::stage_site(
+            &output,
+            &both[..1],
+            &[two.summary.clone()],
+            &merged,
+            Some(LocalCopies {
+                stash: &stash,
+                suites: &mut local,
+                provider: target.provider,
+            }),
+        )?;
+        assert_eq!(local[0].files[&chunk], current);
+        let state = build_state(&merged, &inventory, &local, target, &"b".repeat(64))?;
+        ctx.restore_reused(Some((&merged, &state)), &stash, std::slice::from_ref(&two))?;
+        crate::snapshot::artifact_inventory(&output, &both, &[])?;
+
+        // Finalizing the capture adds a record. The older suite now genuinely requires
+        // a different version at that same URL; changing its provider hash cannot fix it.
+        journal.finalize(Outcome::Success)?;
+        generate(&output, &both[..1]);
+        let refused = root.path().join("conflicting");
+        let generated_chunk = std::fs::read(output.join(&chunk))?;
+        crate::snapshot::artifact_inventory(&output, &both[..1], &[])?;
+        let reused_report = output.join("_snapshot/data/suites/two.json");
+        assert!(!reused_report.exists());
+        // The refusal happens before the provider; never contact an Azure endpoint in this test.
+        let offline = DeploymentClient::Netlify(client("http://127.0.0.1:1"));
+        let error = ctx
+            .publish(attempt, &output, &refused, &offline)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("version"), "{error:#}");
+        assert!(!refused.exists());
+        for (path, file) in &two.files {
+            if path != &chunk {
+                checked_bytes(&output.canonicalize()?, path, ctx.provider(), file)?;
+            }
+        }
+        assert_eq!(std::fs::read(output.join(&chunk))?, generated_chunk);
+        crate::snapshot::artifact_inventory(&output, &both[..1], &[])?;
+        Ok(())
+    }
+
+    #[test]
+    fn incremental_recovery_rejects_changed_stash_bytes_before_overwriting() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("source");
+        let output = root.path().join("output");
+        workspace(&source, &[("one", 40)]);
+        let all = vec!["one".to_owned()];
+        generate(&source, &all);
+        let context = deployment(&output, DeploymentMode::Update, &["one"], &[]);
+        let inventory = crate::snapshot::artifact_inventory(&source, &all, &[])?;
+        let mut suite = build_state(
+            &source,
+            &inventory,
+            &[],
+            &context.job.target,
+            &"b".repeat(64),
+        )?
+        .suites["one"]
+            .clone();
+        let path = "_snapshot/images/one/test/home.png";
+        assert!(suite.files.contains_key(path));
+        suite.files.retain(|name, _| name == path);
+        let original = std::fs::read(source.join(path))?;
+        std::fs::create_dir_all(output.join(path).parent().unwrap())?;
+        std::fs::write(output.join(path), &original)?;
+        let mut damaged = original.clone();
+        damaged[0] ^= 1;
+        std::fs::write(source.join(path), damaged)?;
+        assert!(context.restore_reused(None, &source, &[suite]).is_err());
+        assert_eq!(std::fs::read(output.join(path))?, original);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn incremental_restore_refuses_existing_file_and_parent_aliases() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let tree = root.path();
+        let long = "RECORDEDCAPTUREWITHLONGNAME.PNG";
+        std::fs::write(tree.join(long), b"keep")?;
+        std::fs::create_dir(tree.join("RECORDCAPTUREDIRECTORY"))?;
+        // Exact-case collisions are checked even on volumes without 8.3 aliases.
+        assert!(restore_file(tree, b"other", &long.to_lowercase(), false).is_err());
+        if tree.join("RECORD~1.PNG").is_file() {
+            assert!(restore_file(tree, b"other", "RECORD~1.PNG", false).is_err());
+        }
+        if tree.join("RECORD~1").is_dir() {
+            assert!(restore_file(tree, b"other", "RECORD~1/new.png", false).is_err());
+        }
+        assert_eq!(std::fs::read(tree.join(long))?, b"keep");
+        assert!(!tree.join("RECORDCAPTUREDIRECTORY/new.png").exists());
+        Ok(())
+    }
+
+    #[test]
     fn restored_report_files_never_follow_symlinks_out_of_the_output() -> Result<()> {
         let root = tempfile::tempdir()?;
         let output = root.path().join("output");
         let outside = root.path().join("outside");
         std::fs::create_dir_all(output.join("_snapshot/images"))?;
         std::fs::create_dir_all(&outside)?;
-        let source = root.path().join("source.png");
-        std::fs::write(&source, b"image")?;
-        restore_file(&output, &source, "_snapshot/images/one/home.png", false)?;
+        restore_file(&output, b"image", "_snapshot/images/one/home.png", false)?;
         assert_eq!(
             std::fs::read(output.join("_snapshot/images/one/home.png"))?,
             b"image"
         );
-        assert!(restore_file(&output, &source, "_snapshot/../escape.png", false).is_err());
+        assert!(restore_file(&output, b"image", "_snapshot/../escape.png", false).is_err());
         #[cfg(unix)]
         let linked = std::os::unix::fs::symlink(&outside, output.join("_snapshot/images/two"));
         // Creating symlinks on Windows needs Developer Mode or elevation.
@@ -2465,7 +2867,7 @@ mod tests {
             std::os::windows::fs::symlink_dir(&outside, output.join("_snapshot/images/two"));
         if linked.is_ok() {
             assert!(
-                restore_file(&output, &source, "_snapshot/images/two/home.png", false).is_err()
+                restore_file(&output, b"image", "_snapshot/images/two/home.png", false).is_err()
             );
             assert!(!outside.join("home.png").exists());
         }
