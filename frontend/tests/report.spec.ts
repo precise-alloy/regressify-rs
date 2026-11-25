@@ -2975,7 +2975,13 @@ for (const diagnostic of [null, "Test scenario failed to capture: timeout"]) {
       )
       .toBe(3);
     await images.first().hover();
-    await expect(page.locator(".comparison-crosshair")).toHaveCount(2);
+    const guideIn = (lane: string) =>
+      page
+        .getByRole("region", { name: `${lane} image viewport`, exact: true })
+        .locator(".comparison-crosshair");
+    await expect(guideIn("Reference")).toHaveCount(1);
+    await expect(guideIn("Diff")).toHaveCount(1);
+    await expect(guideIn("Test")).toHaveCount(0);
     await images.nth(1).hover();
     await expect(page.locator(".comparison-crosshair")).toHaveCount(0);
   });
