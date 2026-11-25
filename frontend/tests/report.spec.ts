@@ -2714,6 +2714,7 @@ async function mockComparisonImages(
   page: Page,
   imageSizes: Record<"reference" | "test" | "diff", { width: number; height: number }>,
   hasDiff: boolean,
+  paintImage?: (image: PNG) => void,
 ) {
   const roles = ["reference", "test", "diff"] as const;
   const paths = Object.fromEntries(
@@ -2731,9 +2732,120 @@ async function mockComparisonImages(
     if (!role) throw new Error("Unexpected shared canvas fixture image");
     const image = new PNG(imageSizes[role]);
     image.data.fill(255);
+    paintImage?.(image);
     await route.fulfill({ contentType: "image/png", body: PNG.sync.write(image) });
   });
 }
+
+test("image viewer magnifies original pixels up to 2500%", async ({ page, isMobile }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const size = { width: 80, height: 80 };
+  await mockComparisonImages(page, { reference: size, test: size, diff: size }, true, (image) => {
+    for (let x = 0; x < image.width; x += 2) {
+      for (let y = 0; y < image.height; y++) {
+        image.data.fill(0, (y * image.width + x) * 4, (y * image.width + x) * 4 + 3);
+      }
+    }
+  });
+  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=test");
+  const images = page.locator(".image-world img");
+  const zoom = page.getByLabel("Zoom level");
+  const more = page.getByRole("button", { name: "Zoom in", exact: true });
+  const less = page.getByRole("button", { name: "Zoom out", exact: true });
+  const grid = page.locator(".pixel-grid");
+  await page.getByRole("button", { name: "Fit to window", exact: true }).click();
+  await expect(images).toHaveCSS("image-rendering", "auto");
+  await page.getByRole("button", { name: "Actual size", exact: true }).click();
+  await expect(images).toHaveCSS("image-rendering", "auto");
+  await more.click();
+  await expect(images).toHaveCSS("image-rendering", "pixelated");
+  await page.locator(".image-pane").focus();
+  for (let step = 0; step < 11; step++) await page.locator(".image-pane").press("+");
+  await expect(zoom).toHaveText("1000%");
+  await expect(grid).toHaveCount(0);
+  await page.locator(".image-pane").press("+");
+  await expect(zoom).toHaveText("1250%");
+  await expect(grid).toHaveCSS("background-size", "12.5px 12.5px, 12.5px 12.5px");
+  for (let step = 0; step < 2; step++) await page.locator(".image-pane").press("+");
+  await expect(zoom).toHaveText("2000%");
+  await more.click();
+  await expect(zoom).toHaveText("2500%");
+  await expect(more).toBeDisabled();
+
+  const bounds = await images.boundingBox();
+  if (!bounds) throw new Error("Magnified image is unavailable");
+  const pixels = PNG.sync.read(
+    await page.screenshot({
+      scale: "css",
+      clip: { x: Math.round(bounds.x) + 18, y: Math.round(bounds.y) + 18, width: 15, height: 15 },
+    }),
+  );
+  const red = (x: number, y: number) => pixels.data[(y * pixels.width + x) * 4];
+  expect(Array.from({ length: pixels.width }, (_, x) => red(x, 0))).toEqual([
+    0, 0, 0, 0, 0, 0, 0, 241, 255, 255, 255, 255, 255, 255, 255,
+  ]);
+  expect(Array.from({ length: pixels.height }, (_, y) => red(0, y))).toEqual([
+    0, 0, 0, 0, 0, 0, 0, 42, 0, 0, 0, 0, 0, 0, 0,
+  ]);
+  await less.click();
+  await expect(zoom).toHaveText("2000%");
+
+  // Verify both layers in blend modes and all available lanes in side-by-side.
+  for (const [mode, label] of [
+    ["side", "Side by side"],
+    ["wipe", "Wipe"],
+    ["overlay", "Overlay"],
+    ["reference", "Reference"],
+    ["diff", "Diff"],
+  ]) {
+    if (isMobile) await page.getByRole("combobox", { name: "Comparison mode" }).selectOption(mode);
+    else await page.getByRole("button", { name: label, exact: true }).click();
+    await expect(images.first()).toHaveCSS("image-rendering", "auto");
+    await page.getByRole("button", { name: "Actual size", exact: true }).click();
+    await more.click();
+    for (const image of await images.all())
+      await expect(image).toHaveCSS("image-rendering", "pixelated");
+    if (mode === "wipe") {
+      await page.locator(".image-pane").focus();
+      for (let step = 0; step < 15; step++) await page.locator(".image-pane").press("+");
+      await expect(zoom).toHaveText("2500%");
+      const divider = await page.locator(".image-surface div[class*='bg-[#008f74]']").boundingBox();
+      expect(divider?.width).toBe(3);
+    }
+  }
+
+  // Failed-capture error placeholders stay smooth and ungridded while valid peers magnify crisply.
+  await page.route("**/_snapshot/data/manifest.json?*", async (route) => {
+    const response = await route.fetch();
+    const manifest = await response.json();
+    const summary = manifest.suites.find(
+      (suite: { id: string }) => suite.id === "workspace-overview",
+    );
+    if (summary) summary.errors += 1;
+    await route.fulfill({ response, json: manifest });
+  });
+  await page.route("**/_snapshot/data/suites/workspace-overview.json*", async (route) => {
+    const response = await route.fetch();
+    const suite = await response.json();
+    Object.assign(suite.tests[0], {
+      status: "fail",
+      mismatch: null,
+      error: "Test scenario failed to capture: click timed out",
+      diff: null,
+      dimensions: null,
+    });
+    await route.fulfill({ response, json: suite });
+  });
+  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
+  await page.getByRole("button", { name: "Actual size", exact: true }).click();
+  await page.locator(".image-pane").first().focus();
+  for (let step = 0; step < 13; step++) await page.locator(".image-pane").first().press("+");
+  await expect(zoom).toHaveText("1250%");
+  await expect(images.nth(0)).toHaveCSS("image-rendering", "pixelated");
+  await expect(images.nth(1)).toHaveCSS("image-rendering", "auto");
+  await expect(page.locator(".comparison-lane").nth(0).locator(".pixel-grid")).toHaveCount(1);
+  await expect(page.locator(".comparison-lane").nth(1).locator(".pixel-grid")).toHaveCount(0);
+});
 
 for (const hasDiff of [false, true]) {
   test(`image viewer keeps ${hasDiff ? "three" : "two"} lanes bounded with native scrollbars`, async ({

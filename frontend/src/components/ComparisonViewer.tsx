@@ -44,6 +44,8 @@ type View = {
 };
 const fallback: Size = { width: 640, height: 400 };
 
+const maxZoom = 25;
+const pixelGridThreshold = 10;
 const zoomLevels = [
   0.25,
   1 / 3,
@@ -64,11 +66,16 @@ const zoomLevels = [
   5,
   6,
   8,
+  10,
+  12.5,
+  15,
+  20,
+  maxZoom,
 ];
 
 export function nextZoom(current: number, increase: boolean): number {
   return increase
-    ? (zoomLevels.find((value) => value > current + 0.001) ?? 8)
+    ? (zoomLevels.find((value) => value > current + 0.001) ?? maxZoom)
     : (zoomLevels.findLast((value) => value < current - 0.001) ?? Math.min(current, 0.25));
 }
 
@@ -76,6 +83,22 @@ export function imageFitScale(image: Size, viewport: Size, fit: Fit): number {
   return Math.max(
     0.001,
     Math.min(1, viewport.width / image.width, fit === "area" ? viewport.height / image.height : 1),
+  );
+}
+
+function PixelGrid({ size, scale }: { size: Size; scale: number }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="pixel-grid pointer-events-none absolute top-0 left-0 origin-top-left [background-image:linear-gradient(to_right,#c0c0c038_1px,transparent_1px),linear-gradient(to_bottom,#c0c0c038_1px,transparent_1px)]"
+      style={{
+        width: size.width * scale,
+        height: size.height * scale,
+        backgroundSize: `${scale}px ${scale}px`,
+        // The parent scales the screenshot, but the grid strokes stay one CSS pixel wide.
+        transform: `scale(${1 / scale})`,
+      }}
+    />
   );
 }
 
@@ -213,11 +236,19 @@ export function ComparisonViewer({
   const referenceSize = getSize(capture.reference) || fallback;
   const testSize = getSize(capture.test) || fallback;
   const diffSize = getSize(capture.diff);
+  // Capture-failure placeholders publish the vector error icon and keep smooth scaling.
+  const referencePlaceholder =
+    capture.error !== null &&
+    (capture.error.startsWith("Reference scenario failed to capture:") ||
+      capture.error.startsWith("Both reference and test scenarios failed to capture"));
+  const testPlaceholder =
+    capture.error !== null && !capture.error.startsWith("Reference scenario failed to capture:");
   const lanes = [
     {
       label: "Reference",
       path: capture.reference,
       size: referenceSize,
+      placeholder: referencePlaceholder,
       gap: imageAlignmentGaps(
         capture.alignment?.referenceGaps ?? capture.alignment?.reference,
         referenceSize.height,
@@ -228,6 +259,7 @@ export function ComparisonViewer({
       label: "Test",
       path: capture.test,
       size: testSize,
+      placeholder: testPlaceholder,
       gap: imageAlignmentGaps(
         capture.alignment?.testGaps ?? capture.alignment?.test,
         testSize.height,
@@ -235,12 +267,22 @@ export function ComparisonViewer({
       ),
     },
     ...(capture.diff
-      ? [{ label: "Diff", path: capture.diff, size: diffSize || fallback, gap: null }]
+      ? [
+          {
+            label: "Diff",
+            path: capture.diff,
+            size: diffSize || fallback,
+            placeholder: false,
+            gap: null,
+          },
+        ]
       : []),
   ];
   const laneWidth = Math.max(...lanes.map((lane) => lane.size.width));
   const single =
     mode === "reference" ? capture.reference : mode === "diff" ? capture.diff : capture.test;
+  const singlePlaceholder =
+    mode === "reference" ? referencePlaceholder : mode === "test" ? testPlaceholder : false;
   const size =
     mode === "side"
       ? {
@@ -253,7 +295,10 @@ export function ComparisonViewer({
             height: Math.max(referenceSize.height, testSize.height),
           }
         : getSize(single) || fallback;
-  const panes = mode === "side" ? lanes : [{ label: "Comparison", path: single, size, gap: null }];
+  const panes =
+    mode === "side"
+      ? lanes
+      : [{ label: "Comparison", path: single, size, placeholder: singlePlaceholder, gap: null }];
   const paneCount = panes.length;
   useEffect(() => {
     const element = canvas.current;
@@ -395,7 +440,7 @@ export function ComparisonViewer({
     }));
   };
   const setScale = (value: number, point?: { x: number; y: number }) => {
-    const next = Math.max(0.001, Math.min(8, value));
+    const next = Math.max(0.001, Math.min(maxZoom, value));
     if (!Number.isFinite(next) || (fit === "manual" && next === scale)) return;
     let padding: View["padding"];
     anchors.current = [];
@@ -581,7 +626,7 @@ export function ComparisonViewer({
           </output>
           <IconButton
             label="Zoom in"
-            disabled={scale >= 8}
+            disabled={scale >= maxZoom}
             onClick={() => setScale(nextZoom(scale, true))}
           >
             <Plus size={16} />
@@ -894,8 +939,11 @@ export function ComparisonViewer({
                             width={lane.size.width}
                             height={lane.size.height}
                             eager
-                            className="pointer-events-none size-full max-w-none object-contain object-[top_left] select-none"
+                            className={`pointer-events-none size-full max-w-none object-contain object-[top_left] select-none ${scale > 1 && !lane.placeholder ? "[image-rendering:pixelated]" : ""}`}
                           />
+                          {scale > pixelGridThreshold &&
+                            !lane.placeholder &&
+                            isLoaded(lane.path) && <PixelGrid size={lane.size} scale={scale} />}
                         </div>
                       ) : mode === "wipe" || mode === "overlay" ? (
                         <>
@@ -906,8 +954,13 @@ export function ComparisonViewer({
                               width={referenceSize.width}
                               height={referenceSize.height}
                               eager
-                              className="pointer-events-none size-full max-w-none object-contain object-[top_left] select-none"
+                              className={`pointer-events-none size-full max-w-none object-contain object-[top_left] select-none ${scale > 1 && !referencePlaceholder ? "[image-rendering:pixelated]" : ""}`}
                             />
+                            {scale > pixelGridThreshold &&
+                              !referencePlaceholder &&
+                              isLoaded(capture.reference) && (
+                                <PixelGrid size={referenceSize} scale={scale} />
+                              )}
                           </div>
                           <div
                             className="absolute top-0 left-0"
@@ -924,28 +977,38 @@ export function ComparisonViewer({
                                 width={testSize.width}
                                 height={testSize.height}
                                 eager
-                                className="pointer-events-none size-full max-w-none object-contain object-[top_left] select-none"
+                                className={`pointer-events-none size-full max-w-none object-contain object-[top_left] select-none ${scale > 1 && !testPlaceholder ? "[image-rendering:pixelated]" : ""}`}
                               />
+                              {scale > pixelGridThreshold &&
+                                !testPlaceholder &&
+                                isLoaded(capture.test) && (
+                                  <PixelGrid size={testSize} scale={scale} />
+                                )}
                             </div>
                           </div>
-                          {mode === "wipe" && (
-                            <div
-                              className="absolute top-0 bottom-0 w-[3px] bg-[#008f74] [box-shadow:0_0_0_1px_#ffffffa0]"
-                              style={{ left: `${blend}%` }}
-                            />
-                          )}
                         </>
                       ) : (
-                        <ReportImage
-                          path={single}
-                          alt={`${mode}: ${capture.label}`}
-                          width={size.width}
-                          height={size.height}
-                          eager
-                          className="pointer-events-none size-full max-w-none object-contain object-[top_left] select-none"
-                        />
+                        <>
+                          <ReportImage
+                            path={single}
+                            alt={`${mode}: ${capture.label}`}
+                            width={size.width}
+                            height={size.height}
+                            eager
+                            className={`pointer-events-none size-full max-w-none object-contain object-[top_left] select-none ${scale > 1 && !singlePlaceholder ? "[image-rendering:pixelated]" : ""}`}
+                          />
+                          {scale > pixelGridThreshold && !singlePlaceholder && isLoaded(single) && (
+                            <PixelGrid size={size} scale={scale} />
+                          )}
+                        </>
                       )}
                     </div>
+                    {mode === "wipe" && (
+                      <div
+                        className="pointer-events-none absolute top-0 bottom-0 w-[3px] bg-[#008f74] [box-shadow:0_0_0_1px_#ffffffa0]"
+                        style={{ left: `${blend}%` }}
+                      />
+                    )}
                   </div>
                 </div>
                 {guide && (

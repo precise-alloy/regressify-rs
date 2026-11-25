@@ -9,14 +9,23 @@ describe("image viewer zoom steps", () => {
     expect(nextZoom(0.6, false)).toBe(0.5);
     expect(nextZoom(5, true)).toBe(6);
     expect(nextZoom(6, true)).toBe(8);
+    for (const [lower, upper] of [
+      [8, 10],
+      [10, 12.5],
+      [12.5, 15],
+      [15, 20],
+      [20, 25],
+    ] as const) {
+      expect(nextZoom(lower, true)).toBe(upper);
+      expect(nextZoom(upper, false)).toBe(lower);
+    }
   });
 
   test("keeps fitted images below the minimum and clamps at either limit", () => {
     expect(nextZoom(0.1, false)).toBe(0.1);
     expect(nextZoom(0.1, true)).toBe(0.25);
     expect(nextZoom(0.25, false)).toBe(0.25);
-    expect(nextZoom(8, true)).toBe(8);
-    expect(nextZoom(8, false)).toBe(6);
+    expect(nextZoom(25, true)).toBe(25);
   });
 
   test("does not get stuck on rounded fit percentages", () => {
