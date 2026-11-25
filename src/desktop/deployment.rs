@@ -1967,18 +1967,29 @@ fn stage_site_inner(
             copied,
             copied_bytes as f64 / (1024.0 * 1024.0)
         ));
-        let inventory = crate::snapshot::artifact_inventory(destination, suite_ids, &kept_ids)?;
-        if let Some(copies) = local {
-            let superseded = copies.verify(destination, &inventory)?;
-            if !superseded.is_empty() {
-                // Updated provider hashes alone don't make a reused report's versioned URLs valid.
-                let (present, absent) = kept_ids
-                    .into_iter()
-                    .chain(suite_ids.iter().cloned())
-                    .partition::<Vec<_>, _>(|id| superseded.contains(id));
-                crate::snapshot::artifact_inventory(destination, &present, &absent)?;
-            }
-        }
+        let Some(copies) = local else {
+            return crate::snapshot::artifact_inventory(destination, suite_ids, &kept_ids);
+        };
+        // A provider hash can already match a shared chunk while an older report still
+        // requests a different cache version. Verify all materialized reports together.
+        let local_ids: BTreeSet<_> = copies
+            .suites
+            .iter()
+            .map(|s| s.summary.id.as_str())
+            .collect();
+        let (mut present, absent): (Vec<_>, Vec<_>) = kept_ids
+            .into_iter()
+            .partition(|id| local_ids.contains(id.as_str()));
+        present.extend_from_slice(suite_ids);
+        let mut inventory = crate::snapshot::artifact_inventory(destination, &present, &absent)?;
+        // The caller builds new state only for generated suites; reused suites retain their records.
+        inventory
+            .suites
+            .retain(|id, _| !local_ids.contains(id.as_str()));
+        inventory
+            .runs
+            .retain(|id, _| !local_ids.contains(id.as_str()));
+        copies.verify(destination, &inventory)?;
         Ok(inventory)
     })();
     let staged = match staged {

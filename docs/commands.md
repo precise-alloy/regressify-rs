@@ -518,8 +518,9 @@ aliases use the resolved long filename for both the public URL and capture-error
 marker lookup. A fresh snapshot keeps literal short names and their distinct
 long-named siblings, including suite directories, regardless of input order.
 Publication refuses to overwrite
-a different existing file through its DOS alias; rollback preserves the previous
-filename spelling as well as its bytes. Distinct files on a
+a different existing file through its DOS alias. If publication fails, rollback
+attempts to restore both the previous bytes and the filename spelling; a sharing
+or permission error can also block rollback. Distinct files on a
 case-sensitive filesystem are not merged just because their names differ by case.
 A diagnostic such as `Navigation timed out` still counts as a capture error, but
 does not by itself hide the pixels or replace the thumbnail of a valid screenshot.

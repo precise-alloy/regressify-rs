@@ -2895,6 +2895,7 @@ test("image viewer magnifies original pixels up to 2500%", async ({ page, isMobi
   }
 
   // Failed-capture error placeholders stay smooth and ungridded while valid peers magnify crisply.
+  let diffCase: "alias" | "distinct" | "explicit" = "alias";
   await page.route("**/_snapshot/data/manifest.json?*", async (route) => {
     const response = await route.fetch();
     const manifest = await response.json();
@@ -2911,20 +2912,60 @@ test("image viewer magnifies original pixels up to 2500%", async ({ page, isMobi
       status: "fail",
       mismatch: null,
       error: "Test scenario failed to capture: click timed out",
-      diff: null,
+      diff: diffCase === "distinct" ? suite.tests[0].diff : suite.tests[0].test,
       dimensions: null,
     });
+    if (diffCase === "explicit") {
+      suite.tests[0].placeholderImages = { reference: false, test: true, diff: false };
+    } else {
+      delete suite.tests[0].placeholderImages;
+    }
     await route.fulfill({ response, json: suite });
   });
+  for (diffCase of ["alias", "distinct", "explicit"] as const) {
+    await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
+    await page.getByRole("button", { name: "Actual size", exact: true }).click();
+    await page.locator(".image-pane").first().focus();
+    for (let step = 0; step < 13; step++) await page.locator(".image-pane").first().press("+");
+    await expect(zoom).toHaveText("1250%");
+    await expect(images.nth(0)).toHaveCSS("image-rendering", "pixelated");
+    await expect(images.nth(1)).toHaveCSS("image-rendering", "auto");
+    await expect(page.locator(".comparison-lane").nth(0).locator(".pixel-grid")).toHaveCount(1);
+    await expect(page.locator(".comparison-lane").nth(1).locator(".pixel-grid")).toHaveCount(0);
+    await expect(images.nth(2)).toHaveCSS(
+      "image-rendering",
+      diffCase === "alias" ? "auto" : "pixelated",
+    );
+    await expect(page.locator(".comparison-lane").nth(2).locator(".pixel-grid")).toHaveCount(
+      diffCase === "alias" ? 0 : 1,
+    );
+  }
+});
+
+test("side by side crosshairs exclude artwork without a capture diagnostic", async ({ page }) => {
+  await page.route("**/_snapshot/data/suites/**", async (route) => {
+    const response = await route.fetch();
+    const data = await response.json();
+    const capture = data.tests[0];
+    capture.error = null;
+    capture.placeholderImages = { reference: false, test: true, diff: false };
+    await route.fulfill({ response, json: data });
+  });
   await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
-  await page.getByRole("button", { name: "Actual size", exact: true }).click();
-  await page.locator(".image-pane").first().focus();
-  for (let step = 0; step < 13; step++) await page.locator(".image-pane").first().press("+");
-  await expect(zoom).toHaveText("1250%");
-  await expect(images.nth(0)).toHaveCSS("image-rendering", "pixelated");
-  await expect(images.nth(1)).toHaveCSS("image-rendering", "auto");
-  await expect(page.locator(".comparison-lane").nth(0).locator(".pixel-grid")).toHaveCount(1);
-  await expect(page.locator(".comparison-lane").nth(1).locator(".pixel-grid")).toHaveCount(0);
+  const images = page.locator(".comparison-image");
+  await expect
+    .poll(() =>
+      images
+        .locator("img")
+        .evaluateAll(
+          (nodes) => nodes.filter((img) => (img as HTMLImageElement).naturalWidth > 0).length,
+        ),
+    )
+    .toBe(3);
+  await images.first().hover();
+  await expect(page.locator(".comparison-crosshair")).toHaveCount(2);
+  await images.nth(1).hover();
+  await expect(page.locator(".comparison-crosshair")).toHaveCount(0);
 });
 
 for (const hasDiff of [false, true]) {

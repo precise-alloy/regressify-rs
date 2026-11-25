@@ -49,6 +49,10 @@ when staging did not finish.
 Restore missing suite files without replacing newer shared logs. Check a
 candidate index against the suite files in the output before replacing local
 shared files; the remote manifest can legitimately include remote-only suites.
+Verify cache versions for all generated and locally reused suites together, even
+when provider hashes already match. Stash install failures invalidate every
+suite needing the failed path. Preflight shared recovery destinations and use
+publication rollback if a later write fails.
 
 ## Maintain
 

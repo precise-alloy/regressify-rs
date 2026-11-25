@@ -238,14 +238,15 @@ export function ComparisonViewer({
   const testSize = getSize(capture.test) || fallback;
   const diffSize = getSize(capture.diff);
   // Older reports only identify failed lanes through their capture diagnostic.
+  const legacyTestPlaceholder =
+    capture.error !== null && !capture.error.startsWith("Reference scenario failed to capture:");
   const placeholders = capture.placeholderImages ?? {
     reference:
       capture.error !== null &&
       (capture.error.startsWith("Reference scenario failed to capture:") ||
         capture.error.startsWith("Both reference and test scenarios failed to capture")),
-    test:
-      capture.error !== null && !capture.error.startsWith("Reference scenario failed to capture:"),
-    diff: false,
+    test: legacyTestPlaceholder,
+    diff: legacyTestPlaceholder && capture.test !== null && capture.diff === capture.test,
   };
   const lanes = [
     {
@@ -347,6 +348,7 @@ export function ComparisonViewer({
       capture.error !== null ||
       !source ||
       !sourceLane ||
+      sourceLane.placeholder ||
       !isLoaded(sourceLane.path) ||
       !image?.naturalWidth ||
       !image.naturalHeight
@@ -378,7 +380,7 @@ export function ComparisonViewer({
       positions: elements.map((pane, targetIndex) => {
         const target = pane.querySelector("img");
         const lane = lanes[targetIndex];
-        if (!lane) return null;
+        if (!lane || lane.placeholder) return null;
         const row = alignedRowToImageRow(alignedY, lane.gap);
         if (!target?.naturalWidth || !target.naturalHeight || !isLoaded(lane.path) || row === null)
           return null;

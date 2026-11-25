@@ -1,6 +1,6 @@
 # Snapshot Frontend
 
-Verified: 2026-10-17
+Verified: 2026-11-25
 
 - Suite `displayName` is optional in version-2 summaries/reports. `suiteLabel`
   supplies all visible suite labels while IDs remain route/asset keys. The
