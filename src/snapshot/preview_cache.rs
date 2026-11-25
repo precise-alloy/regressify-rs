@@ -394,9 +394,17 @@ mod tests {
         fixture(&root, None);
         generate(&root);
         let marker = plant_preview(&root, "test");
-        // A capture error moves the grid from the test image to a dimmed reference overlay,
-        // so the test image keeps its pixels but loses its top-crop thumbnail.
+        // A timeout that names no lane leaves the test image's top-crop thumbnail usable.
         fixture(&root, Some("Navigation timeout"));
+        generate(&root);
+        assert_eq!(preview(&root, "test"), marker);
+
+        // Identifying the test lane as failed moves the grid to the dimmed reference,
+        // even though neither source PNG changed.
+        fixture(
+            &root,
+            Some("Test scenario failed to capture: Navigation timeout"),
+        );
         generate(&root);
         assert_ne!(preview(&root, "test"), marker);
         let cache = index(&root);
