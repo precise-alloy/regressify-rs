@@ -27,15 +27,17 @@ together. `Ctrl+B` widens the preview.
 
 ![Results on the Wipe tab at 4.90% mismatch, with the Wipe tab and the Wipe slider numbered.](../../../../assets/docs/desktop/results-wipe.png)
 
-| Zoom             | Button                                  | Key      |
-| ---------------- | --------------------------------------- | -------- |
-| Fit to window    | **Fit to window (0)**                   | `0`      |
-| Fit width        | **Fit width (W)**                       | `W`      |
-| Actual size      | **Actual size (100%)**                  | `1`      |
-| Zoom 25% to 800% | **Zoom in**, **Zoom out**, `Ctrl`+wheel | `+`, `-` |
-| Pan              | Drag                                    | Arrows   |
+| Zoom              | Button                                  | Key      |
+| ----------------- | --------------------------------------- | -------- |
+| Fit to window     | **Fit to window (0)**                   | `0`      |
+| Fit width         | **Fit width (W)**                       | `W`      |
+| Actual size       | **Actual size (100%)**                  | `1`      |
+| Zoom 25% to 2500% | **Zoom in**, **Zoom out**, `Ctrl`+wheel | `+`, `-` |
+| Pan               | Drag                                    | Arrows   |
 
-Double-click an image to toggle actual size.
+Double-click an image to toggle actual size. Above 100%, magnified comparison
+images show crisp pixels. Above 1000%, a faint grid marks each pixel. Fit views
+keep smooth scaling.
 
 ## Capture details
 

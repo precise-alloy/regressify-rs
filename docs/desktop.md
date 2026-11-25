@@ -2326,10 +2326,13 @@ the same scenario, including across report refreshes and viewport captures of th
 scenario. Selecting a different scenario, leaving Results, or restarting the app
 resets every tab to Fit area. Legacy reports without scenario IDs reset on each
 different capture.
-Zoom buttons and Ctrl/Cmd+mouse wheel use Chrome-style zoom presets, extended to 800%:
+Zoom buttons and Ctrl/Cmd+mouse wheel use Chrome-style zoom presets, extended to 2500% (25×):
 25%, 33.3%, 50%, 66.7%, 75%, 80%, 90%, 100%, 110%, 125%, 150%, 175%, 200%, 250%,
-300%, 400%, 500%, 600%, and 800%. Each action selects the nearest preset in the requested
-direction, starting from the displayed scale. Fit area remains exact and can
+300%, 400%, 500%, 600%, 800%, 1000%, 1250%, 1500%, 2000%, and 2500%.
+Each action selects the nearest preset in the requested direction, starting
+from the displayed scale. Above 100%, comparison images show crisp source
+pixels instead of interpolated colors. Above 1000%, a faint grid marks each pixel.
+Fit views keep smooth scaling. Fit area remains exact and can
 shrink below 25%; zooming out at that size leaves the image fitted.
 Ctrl/Cmd+mouse wheel keeps the image point under the pointer fixed. Left-button
 dragging pans images that exceed the viewport; ordinary wheel scrolling,

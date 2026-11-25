@@ -19,8 +19,10 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::slider::{Slider, SliderState};
 
 mod log;
+mod pixelated;
 
-const ZOOM_LEVELS: [f32; 19] = [
+const MAX_ZOOM: f32 = 25.;
+const ZOOM_LEVELS: [f32; 24] = [
     0.25,
     1. / 3.,
     0.5,
@@ -40,6 +42,11 @@ const ZOOM_LEVELS: [f32; 19] = [
     5.,
     6.,
     8.,
+    10.,
+    12.5,
+    15.,
+    20.,
+    MAX_ZOOM,
 ];
 
 fn next_zoom(current: f32, increase: bool) -> f32 {
@@ -48,7 +55,7 @@ fn next_zoom(current: f32, increase: bool) -> f32 {
             .iter()
             .copied()
             .find(|zoom| *zoom > current + 0.001)
-            .unwrap_or(ZOOM_LEVELS[ZOOM_LEVELS.len() - 1])
+            .unwrap_or(MAX_ZOOM)
     } else {
         ZOOM_LEVELS
             .iter()
@@ -179,17 +186,61 @@ impl Default for PreviewView {
     }
 }
 
-#[derive(Default, Clone)]
-struct PreviewTexture(Rc<RefCell<Option<Arc<gpui_kit::RenderImage>>>>);
+#[derive(Default)]
+struct PreviewTexture {
+    decoded: Option<Arc<gpui_kit::RenderImage>>,
+    pixelated: pixelated::Tiles,
+}
 
 impl PreviewTexture {
-    fn source(&self, image: Arc<Image>) -> gpui_kit::ImageSource {
-        let texture = self.clone();
-        gpui_kit::ImageSource::from(move |window: &mut Window, cx: &mut App| {
-            let rendered = image.clone().use_render_image(window, cx)?;
-            *texture.0.borrow_mut() = Some(rendered.clone());
-            Some(Ok(rendered))
-        })
+    fn render(
+        texture: &Rc<RefCell<Self>>,
+        image: &LoadedImage,
+        canvas_size: (usize, usize),
+        zoom: f32,
+    ) -> impl IntoElement {
+        let texture = texture.clone();
+        let source = image.image.clone();
+        let pixelated = zoom > 1. && image.path.is_some();
+        canvas(
+            |_, _, _| (),
+            move |bounds, (), window, cx| {
+                let Some(source) = source.use_render_image(window, cx) else {
+                    return;
+                };
+                let mut texture = texture.borrow_mut();
+                texture.decoded = Some(source.clone());
+                let image_bounds = ObjectFit::Contain.get_bounds(bounds, source.size(0));
+                if pixelated {
+                    if let Err(error) =
+                        texture
+                            .pixelated
+                            .paint(image_bounds, &source, zoom > 10., window)
+                    {
+                        tracing::warn!(%error, "Cannot paint magnified comparison image");
+                    }
+                } else {
+                    texture.pixelated.clear(|image| {
+                        let _ = window.drop_image(image);
+                    });
+                    if let Err(error) = window.paint_image(
+                        bounds,
+                        image_bounds,
+                        Default::default(),
+                        source,
+                        0,
+                        false,
+                    ) {
+                        tracing::warn!(%error, "Cannot paint comparison image");
+                    }
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .w(relative(image.width as f32 / canvas_size.0 as f32))
+        .h(relative(image.height as f32 / canvas_size.1 as f32))
     }
 }
 
@@ -434,7 +485,7 @@ pub(super) struct ResultsPanel {
     _blend_subscription: Subscription,
     previews: Vec<Preview>,
     image_menu_epoch: u64,
-    preview_textures: [PreviewTexture; 3],
+    preview_textures: [Rc<RefCell<PreviewTexture>>; 3],
     image_task: Option<gpui_kit::Task<()>>,
     image_load_gate: Arc<futures::lock::Mutex<()>>,
     preview_scrolls: [ScrollHandle; 6],
@@ -1070,9 +1121,13 @@ impl ResultsPanel {
             }
         }
         for texture in &self.preview_textures {
-            if let Some(image) = texture.0.borrow_mut().take() {
+            let mut texture = texture.borrow_mut();
+            if let Some(image) = texture.decoded.take() {
                 cx.drop_image(image, window.as_deref_mut());
             }
+            texture.pixelated.clear(|image| {
+                cx.drop_image(image, window.as_deref_mut());
+            });
         }
         self.previews.clear();
         for view in &mut self.preview_views {
@@ -1628,7 +1683,7 @@ impl ResultsPanel {
         let canvas_width = self.preview_canvas_size(index).0 as f32;
         let guides = self.pointer_guides.clone();
         div()
-            .w(px(56.))
+            .w(px(68.))
             .self_stretch()
             .flex_shrink_0()
             // Fitted bounds are only current after the image panes have been laid out.
@@ -1823,15 +1878,25 @@ impl ResultsPanel {
                     });
                 let scroll = self.image_scroll();
                 let blend = self.blend.read(cx).value().end() / 100.;
-                let mut layers = div().absolute().top_0().left_0().size_full().child(
-                    img(self.preview_textures[index].source(image.image.clone()))
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .w(relative(image.width as f32 / canvas_width as f32))
-                        .h(relative(image.height as f32 / canvas_height as f32))
-                        .object_fit(ObjectFit::Contain),
-                );
+                let zoom = if view.mode == ZoomMode::Manual {
+                    view.zoom
+                } else {
+                    1.
+                };
+                let render_image = |index, image| {
+                    PreviewTexture::render(
+                        &self.preview_textures[index],
+                        image,
+                        (canvas_width, canvas_height),
+                        zoom,
+                    )
+                };
+                let mut layers = div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(render_image(index, image));
                 if self.image_mode >= 4
                     && let Some(current) = self
                         .previews
@@ -1859,18 +1924,7 @@ impl ResultsPanel {
                                         .right_0()
                                         .h_full()
                                         .w(relative(1. / visible))
-                                        .child(
-                                            img(self.preview_textures[1]
-                                                .source(current.image.clone()))
-                                            .absolute()
-                                            .top_0()
-                                            .left_0()
-                                            .w(relative(current.width as f32 / canvas_width as f32))
-                                            .h(relative(
-                                                current.height as f32 / canvas_height as f32,
-                                            ))
-                                            .object_fit(ObjectFit::Contain),
-                                        ),
+                                        .child(render_image(1, current)),
                                 ),
                         );
                     }
@@ -2797,7 +2851,7 @@ impl ResultsPanel {
                             .icon(gpui_kit::assets::IconName::ZoomIn)
                             .tooltip("Zoom in")
                             .accessibility_label("Zoom in")
-                            .disabled(self.capture.is_none())
+                            .disabled(self.capture.is_none() || (view.mode == ZoomMode::Manual && view.zoom >= MAX_ZOOM))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.step_zoom(true, cx);
                             })),
@@ -3169,7 +3223,9 @@ mod pointer_tests {
         assert_eq!(next_zoom(0.25, false), 0.25);
         assert_eq!(next_zoom(5., true), 6.);
         assert_eq!(next_zoom(6., true), 8.);
-        assert_eq!(next_zoom(8., true), 8.);
+        assert_eq!(next_zoom(8., true), 10.);
+        assert_eq!(next_zoom(20., true), 25.);
+        assert_eq!(next_zoom(25., true), 25.);
         assert_eq!(next_zoom(0.1, true), 0.25);
         assert_eq!(next_zoom(0.1, false), 0.1);
         assert_eq!(next_zoom(1.0005, true), 1.1);
@@ -5497,8 +5553,8 @@ mod pointer_tests {
                         .clone(),
                 );
                 let decoded = results.read(cx).preview_textures[1]
-                    .0
                     .borrow()
+                    .decoded
                     .as_ref()
                     .map(std::sync::Arc::downgrade)
                     .expect("Displayed image should be decoded");
@@ -5516,7 +5572,7 @@ mod pointer_tests {
                         .read(cx)
                         .preview_textures
                         .iter()
-                        .all(|texture| texture.0.borrow().is_none())
+                        .all(|texture| texture.borrow().decoded.is_none())
                 );
                 window.render_frame(cx);
                 decoded
@@ -5531,37 +5587,260 @@ mod pointer_tests {
 
     #[cfg(feature = "gui-tests")]
     #[gpui_kit::test]
-    fn released_results_evict_preview_assets(cx: &mut gpui_kit::TestAppContext) {
+    async fn magnified_previews_clamp_at_25x_retain_tiles_across_pan_and_evict_atlas_entries(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
         use gpui_kit::AppContext;
+        use gpui_kit::test::{TestAppContextExt, TestWindowExt};
         use std::sync::Arc;
+        use std::time::Duration;
 
         let directory = tempfile::tempdir().unwrap();
-        let (handle, _) = crate::desktop::ui::tests::editor(cx, directory.path());
+        let run = directory
+            .path()
+            .join(".regressify/ui-test/bitmaps_test/run-1");
+        std::fs::create_dir_all(&run).unwrap();
+        // 1845x164 at 110% (scale 1.0) centers with a 2.5pxContain offset inside 2030x180 bounds,
+        // so scrolling the left edge across window x = 0 flips round(right) - round(left) without the fix.
+        lodepng::encode32_file(
+            run.join("capture.png"),
+            &[40_u8, 160, 200, 255].repeat(1845 * 164),
+            1845,
+            164,
+        )
+        .unwrap();
+        std::fs::write(
+            run.join("report.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "ui-test", "tests": [{"status": "pass", "pair": {
+                    "label": "Magnify fixture",
+                    "reference": "../bitmaps_test/run-1/capture.png",
+                    "test": "../bitmaps_test/run-1/capture.png"
+                }}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let (handle, view) = crate::desktop::ui::tests::editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.within("workbench-tabs").click(2_usize, cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |window, _| {
+            window.try_find(("image-details", 1_usize)).is_some()
+        })
+        .await;
+        let results = cx.update(|cx| view.read(cx).results.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.within("image-modes").click(1_usize, cx);
+            window.click("actual-size", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |window, cx| {
+            window.render_frame(cx);
+            results.read(cx).preview_textures[1]
+                .borrow()
+                .decoded
+                .is_some()
+        })
+        .await;
+
+        cx.simulate_window_scale_factor_change(handle.into(), 1.0);
+        let released_tile = cx
+            .update_window(handle.into(), |_, window, cx| {
+                // Step to 110% (2030x180 bounds, 2025x180 contained image at +2.5px X offset).
+                window.click("zoom-in", cx);
+                window.render_frame(cx);
+                assert_eq!(window.find("zoom-value").label(), Some("110.0%"));
+
+                let content_left = window.find(("image-content", 1_usize)).bounds().left();
+                results.update(cx, |panel, cx| {
+                    panel.preview_scrolls[1].set_offset(point(-content_left - px(2.0), px(0.0)));
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                let initial = results.read(cx).preview_textures[1]
+                    .borrow()
+                    .pixelated
+                    .tile((1, 0))
+                    .expect("Visible magnified tile should be cached");
+                assert!(window.has_image_atlas_entry(&initial));
+
+                // Panning the image origin across window x = 0 must keep cached tiles intact.
+                for step in [3.0_f32, 4.0] {
+                    results.update(cx, |panel, cx| {
+                        panel.preview_scrolls[1]
+                            .set_offset(point(-content_left - px(step), px(0.0)));
+                        cx.notify();
+                    });
+                    window.render_frame(cx);
+                    let after = results.read(cx).preview_textures[1]
+                        .borrow()
+                        .pixelated
+                        .tile((1, 0))
+                        .expect("Visible tile must remain cached while panning");
+                    assert!(
+                        Arc::ptr_eq(&initial, &after),
+                        "Panning across zero at step {step} unexpectedly invalidated cached tiles"
+                    );
+                    assert!(window.has_image_atlas_entry(&initial));
+                }
+
+                // Scrolling tile (1, 0) completely out of the viewport evicts its atlas entry.
+                results.update(cx, |panel, cx| {
+                    panel.preview_scrolls[1].set_offset(point(px(-600.0), px(0.0)));
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                assert!(
+                    results.read(cx).preview_textures[1]
+                        .borrow()
+                        .pixelated
+                        .tile((1, 0))
+                        .is_none()
+                );
+                assert!(!window.has_image_atlas_entry(&initial));
+                let visible = results.read(cx).preview_textures[1]
+                    .borrow()
+                    .pixelated
+                    .tile((3, 0))
+                    .expect("Scrolled-into-view tile should remain cached");
+                assert!(window.has_image_atlas_entry(&visible));
+
+                // Returning to 100% drops all magnified tiles from memory and the atlas.
+                results.update(cx, |panel, cx| {
+                    panel.preview_scrolls[1].set_offset(point(px(0.0), px(0.0)));
+                    cx.notify();
+                });
+                window.click("actual-size", cx);
+                window.render_frame(cx);
+                assert!(
+                    results.read(cx).preview_textures[1]
+                        .borrow()
+                        .pixelated
+                        .is_empty()
+                );
+                assert!(!window.has_image_atlas_entry(&visible));
+
+                // Stepping to 2500% clamps and disables Zoom in until zoomed back out.
+                for _ in 0..16 {
+                    window.click("zoom-in", cx);
+                }
+                window.render_frame(cx);
+                assert_eq!(window.find("zoom-value").label(), Some("2500.0%"));
+                window.click("zoom-in", cx);
+                results.update(cx, |panel, cx| panel.step_zoom(true, cx));
+                window.render_frame(cx);
+                assert_eq!(window.find("zoom-value").label(), Some("2500.0%"));
+
+                window.click("zoom-out", cx);
+                window.render_frame(cx);
+                assert_eq!(window.find("zoom-value").label(), Some("2000.0%"));
+                window.click("zoom-in", cx);
+                window.render_frame(cx);
+                assert_eq!(window.find("zoom-value").label(), Some("2500.0%"));
+                window.click("zoom-out", cx);
+                window.render_frame(cx);
+                assert_eq!(window.find("zoom-value").label(), Some("2000.0%"));
+
+                let tile = results.read(cx).preview_textures[1]
+                    .borrow()
+                    .pixelated
+                    .tile((0, 0))
+                    .expect("2000% tile should be cached");
+                assert!(window.has_image_atlas_entry(&tile));
+                let weak = Arc::downgrade(&tile);
+                drop(tile);
+                results.update(cx, |panel, cx| panel.clear(window, cx));
+                assert!(
+                    results.read(cx).preview_textures[1]
+                        .borrow()
+                        .pixelated
+                        .is_empty()
+                );
+                if let Some(alive) = weak.upgrade() {
+                    assert!(!window.has_image_atlas_entry(&alive));
+                }
+                window.render_frame(cx);
+                weak
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            released_tile.upgrade().is_none(),
+            "Clearing previews must drop magnified tile frames"
+        );
+    }
+
+    #[cfg(feature = "gui-tests")]
+    #[gpui_kit::test]
+    fn released_results_evict_preview_assets(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::test::TestWindowExt;
+        use gpui_kit::{AppContext, IntoElement, ParentElement, Render, Styled};
+        use std::sync::Arc;
+
+        struct Host(Option<gpui_kit::Entity<super::ResultsPanel>>);
+        impl Render for Host {
+            fn render(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                _: &mut gpui_kit::Context<Self>,
+            ) -> impl IntoElement {
+                gpui_kit::div().size_full().children(self.0.clone())
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let _ = crate::desktop::ui::tests::editor(cx, directory.path());
         let encoded = Arc::new(gpui_kit::Image::from_bytes(
             gpui_kit::ImageFormat::Png,
             lodepng::encode32(&[30_u8, 150, 180, 255], 1, 1).unwrap(),
         ));
-        let panel = cx
-            .update_window(handle.into(), |_, window, cx| {
-                let panel = cx.new(|cx| super::ResultsPanel::new(window, cx));
-                panel.update(cx, |panel, _| {
-                    panel.previews.push(super::Preview {
-                        label: "Current",
-                        result: Ok(super::LoadedImage {
-                            image: encoded.clone(),
-                            width: 1,
-                            height: 1,
-                            path: Some(directory.path().join("fixture.png")),
-                        }),
-                    })
+        let host = cx.add_window(|window, cx| {
+            let panel = cx.new(|cx| super::ResultsPanel::new(window, cx));
+            panel.update(cx, |panel, _| {
+                panel.image_mode = 0;
+                panel.preview_views[0].mode = super::ZoomMode::Manual;
+                panel.preview_views[0].zoom = 25.0;
+                panel.previews.push(super::Preview {
+                    label: "Reference",
+                    result: Ok(super::LoadedImage {
+                        image: encoded.clone(),
+                        width: 1,
+                        height: 1,
+                        path: Some(directory.path().join("fixture.png")),
+                    }),
                 });
-                encoded.clone().get_render_image(window, cx);
-                assert!(encoded.is_asset_cached(cx));
-                panel
+            });
+            encoded.clone().get_render_image(window, cx);
+            assert!(encoded.is_asset_cached(cx));
+            Host(Some(panel))
+        });
+        cx.run_until_parked();
+        cx.update_window(host.into(), |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        let tile = host
+            .update(cx, |root, window, cx| {
+                let panel = root.0.take().unwrap();
+                let tile = panel.read(cx).preview_textures[0]
+                    .borrow()
+                    .pixelated
+                    .tile((0, 0))
+                    .expect("Magnified tile should be populated before release");
+                assert!(window.has_image_atlas_entry(&tile));
+                let weak = Arc::downgrade(&tile);
+                drop(tile);
+                drop(panel);
+                weak
             })
             .unwrap();
-        drop(panel);
         cx.run_until_parked();
+        assert!(
+            tile.upgrade().is_none(),
+            "Releasing Results must free magnified preview tiles"
+        );
         cx.update(|cx| {
             assert!(
                 !encoded.is_asset_cached(cx),
