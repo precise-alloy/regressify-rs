@@ -1074,6 +1074,9 @@ are historical evidence, not open implementation tasks.
 
 ## Native Smoke Clipboard Restoration (2026-10-08)
 
+- Unsupported clipboard formats can still block the default run by design.
+  For a disposable clipboard, `-OverwriteClipboard` skips the original snapshot
+  and clears test data at exit; it does not change the default backup policy.
 - Resolved on 2026-10-17: the runner now materializes an owned clipboard backup
   before any test mutation and restores it in the outer `finally`, including
   initialization and flow failures. Text, mutable arrays, and streams no longer
