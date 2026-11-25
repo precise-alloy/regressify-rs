@@ -733,6 +733,8 @@ recovery warns rather than overwriting it. The local report index is replaced
 only when all suites it would list can be verified locally. A suite kept only
 on the remote site does not become a broken link in the local report. If a shared
 file cannot be replaced, recovery attempts to roll back earlier replacements.
+If a restore fails, its diagnostic names the backup directory retained in the
+local report output, outside temporary deployment staging.
 Sites published before site
 states existed are read from their report manifest and also regenerate kept suites
 from local results. When the site cannot be read (network failure, private site,

@@ -53,6 +53,8 @@ Verify cache versions for all generated and locally reused suites together, even
 when provider hashes already match. Stash install failures invalidate every
 suite needing the failed path. Preflight shared recovery destinations and use
 publication rollback if a later write fails.
+Require an exact match between the reused suite's state paths and its verified
+report dependencies. Keep backups outside transient staging if rollback fails.
 
 ## Maintain
 

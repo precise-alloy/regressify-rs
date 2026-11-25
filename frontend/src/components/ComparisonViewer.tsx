@@ -345,7 +345,6 @@ export function ComparisonViewer({
     const image = source?.querySelector("img");
     if (
       mode !== "side" ||
-      capture.error !== null ||
       !source ||
       !sourceLane ||
       sourceLane.placeholder ||

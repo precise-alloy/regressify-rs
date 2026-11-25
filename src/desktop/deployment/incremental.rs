@@ -401,9 +401,7 @@ impl ReportDeployment {
             exact_source(&source, &path)?;
             restore_target(&output, &path)?;
         }
-        let backup =
-            tempfile::tempdir_in(&source).context("Cannot stage local report recovery backups")?;
-        crate::snapshot::publish_ordered_files(&source, &output, ordered, backup.path())
+        crate::snapshot::publish_ordered_files(&source, &output, ordered)
     }
 
     /// Generates what `prepared` plans, then stages and publishes it.
@@ -2723,6 +2721,50 @@ mod tests {
         );
         check(&staging)?;
         crate::snapshot::artifact_inventory(&staging, &all, &[])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn staging_rejects_unreferenced_files_in_reused_suite_state() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let output = temp.path().join("output");
+        workspace(&output, &[("one", 5), ("two", 20)]);
+        let ids = ["one".into(), "two".into()];
+        generate(&output, &ids);
+        let ctx = deployment(&output, DeploymentMode::Update, &["one"], &[]);
+        let mut state = build_state(
+            &output,
+            &crate::snapshot::artifact_inventory(&output, &ids, &[])?,
+            &[],
+            &ctx.job.target,
+            &"b".repeat(64),
+        )?;
+        let extra = "_snapshot/images/two/test/stale.png";
+        let data = b"not listed in the report";
+        std::fs::write(output.join(extra), data)?;
+        let mut two = state.suites.remove("two").unwrap();
+        two.files.insert(
+            extra.into(),
+            StateFile {
+                size: data.len() as u64,
+                hash: provider_hash(ctx.provider(), data, extra),
+            },
+        );
+        let mut attempt = Prepared {
+            plan: Plan {
+                generate: vec![ids[0].clone()],
+                local: vec![two],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ctx.stash_local(&mut attempt, &temp.path().join("stash"))?;
+        assert_eq!(attempt.plan.local.len(), 1);
+        generate(&output, &ids[..1]);
+        let dest = temp.path().join("stage");
+        let error = ctx.stage(&attempt, &output, &dest).await.unwrap_err();
+        assert!(format!("{error:#}").contains("two"), "{error:#}");
+        assert!(!dest.exists());
         Ok(())
     }
 

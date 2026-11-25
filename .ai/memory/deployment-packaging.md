@@ -21,6 +21,9 @@ Verified: 2026-11-25
   A refused merge can leave a newer shared log in the generated output. Recovery
   fills missing suite paths only and checks the staged index against local
   dependencies before installing it, including suites kept by provider hash.
+  A recorded path is accepted for local reuse only if the report references it.
+  An incomplete rollback keeps the old bytes in the output, not in managed
+  deployment staging which is removed after the attempt.
 - [Artifact reads](../../src/desktop/deployment.rs) require a canonical root for
   containment checks, including Windows extended-length paths. Cloudflare reads
   hosting policies from the original canonical staging root; its temporary

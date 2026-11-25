@@ -491,7 +491,11 @@ fn ensure_exact_case(path: &Path, rollback: Option<&mut Vec<RollbackStep>>) -> R
     if canonical.file_name() != Some(expected) {
         check_output_spelling(path, &canonical)?;
         let parent = path.parent().context("Snapshot path has no parent")?;
-        let original_name = canonical.file_name().map(std::ffi::OsStr::to_os_string);
+        let original = parent.join(
+            canonical
+                .file_name()
+                .context("Snapshot path has no filename")?,
+        );
         let temporary = parent.join(format!(".case-{}", uuid::Uuid::new_v4()));
         fs::rename(path, &temporary).with_context(|| {
             format!(
@@ -500,8 +504,20 @@ fn ensure_exact_case(path: &Path, rollback: Option<&mut Vec<RollbackStep>>) -> R
             )
         })?;
         if let Err(error) = fs::rename(&temporary, path) {
-            if let Some(original_name) = &original_name {
-                let _ = fs::rename(&temporary, parent.join(original_name));
+            if let Some(rollback) = rollback {
+                rollback.push(RollbackStep::Case {
+                    current: temporary,
+                    original,
+                });
+            } else if let Err(restore) = fs::rename(&temporary, &original) {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Failed to normalize '{}'; cannot restore '{}' from '{}': {restore}",
+                        path.display(),
+                        original.display(),
+                        temporary.display()
+                    )
+                });
             }
             return Err(error).with_context(|| {
                 format!(
@@ -510,10 +526,10 @@ fn ensure_exact_case(path: &Path, rollback: Option<&mut Vec<RollbackStep>>) -> R
                 )
             });
         }
-        if let (Some(rollback), Some(original_name)) = (rollback, original_name) {
+        if let Some(rollback) = rollback {
             rollback.push(RollbackStep::Case {
                 current: path.to_path_buf(),
-                original: parent.join(original_name),
+                original,
             });
         }
     }
@@ -640,17 +656,27 @@ fn publish_staged_files(staged_root: &Path, root: &Path, dependencies: &[PathBuf
     }
     ordered.push(gitignore_rel);
     ordered.push(index_rel);
-    publish_ordered_files(staged_root, root, ordered, staged_root)
+    publish_ordered_files(staged_root, root, ordered)
 }
 
-/// Publish an explicitly ordered list as one rollback group. The caller owns the backup
-/// directory and chooses the entry page last; recovery must not install a `.gitignore`.
+/// Publish an explicitly ordered list as one rollback group. The caller chooses the
+/// entry page last; recovery must not install a `.gitignore`.
 pub(crate) fn publish_ordered_files(
     staged_root: &Path,
     root: &Path,
     ordered: Vec<&Path>,
-    backup_root: &Path,
 ) -> Result<()> {
+    // Outside temporary staging: failed rollback must outlive both the snapshot generator
+    // and the deployment worker's managed staging cleanup.
+    let backup = tempfile::Builder::new()
+        .prefix(".snapshot-rollback-")
+        .tempdir_in(root)
+        .with_context(|| {
+            format!(
+                "Cannot create snapshot rollback directory in '{}'",
+                root.display()
+            )
+        })?;
     let total_files = ordered.len();
     snapshot_phase(&format!(
         "Publishing {total_files} snapshot {} to report output",
@@ -698,7 +724,7 @@ pub(crate) fn publish_ordered_files(
                     }
                     continue;
                 }
-                let backup = backup_root.join(format!(".prior-{backup_index}"));
+                let backup = backup.path().join(format!(".prior-{backup_index}"));
                 backup_index += 1;
                 fs::write(&backup, &existing_bytes).with_context(|| {
                     format!(
@@ -735,34 +761,70 @@ pub(crate) fn publish_ordered_files(
         }
         Ok(())
     })();
-    if result.is_err() {
-        for step in applied.into_iter().rev() {
-            match step {
-                RollbackStep::File { path, prior } => match prior {
-                    Some(backup) => {
-                        if let Ok(bytes) = fs::read(&backup) {
-                            let _ = write_file_atomically(&path, &bytes);
-                        }
-                    }
-                    None => {
-                        let _ = fs::remove_file(&path);
-                    }
-                },
-                RollbackStep::Directory { path } => {
-                    let _ = fs::remove_dir(&path);
-                }
-                RollbackStep::Case { current, original } => {
-                    if let Some(parent) = current.parent() {
-                        let temporary = parent.join(format!(".case-{}", uuid::Uuid::new_v4()));
-                        if fs::rename(&current, &temporary).is_ok() {
-                            let _ = fs::rename(&temporary, &original);
-                        }
-                    }
-                }
+    result.map_err(|error| rollback_publication(error, applied, backup))
+}
+
+fn rollback_publication(
+    error: anyhow::Error,
+    applied: Vec<RollbackStep>,
+    backup: tempfile::TempDir,
+) -> anyhow::Error {
+    let mut failures = Vec::new();
+    for step in applied.into_iter().rev() {
+        let result = match step {
+            RollbackStep::File {
+                path,
+                prior: Some(prior),
+            } => fs::read(&prior)
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| write_file_atomically(&path, &bytes))
+                .with_context(|| {
+                    format!(
+                        "Cannot restore '{}' from '{}'",
+                        path.display(),
+                        prior.display()
+                    )
+                }),
+            RollbackStep::File { path, prior: None } => fs::remove_file(&path).with_context(|| {
+                format!("Cannot remove newly published file '{}'", path.display())
+            }),
+            RollbackStep::Directory { path } => fs::remove_dir(&path).with_context(|| {
+                format!("Cannot remove newly created directory '{}'", path.display())
+            }),
+            RollbackStep::Case { current, original } => {
+                let temporary = current.with_file_name(format!(".case-{}", uuid::Uuid::new_v4()));
+                fs::rename(&current, &temporary)
+                    .with_context(|| {
+                        format!(
+                            "Cannot move '{}' to '{}'",
+                            current.display(),
+                            temporary.display()
+                        )
+                    })
+                    .and_then(|()| {
+                        fs::rename(&temporary, &original).with_context(|| {
+                            format!(
+                                "Cannot restore '{}' from '{}'",
+                                original.display(),
+                                temporary.display()
+                            )
+                        })
+                    })
             }
+        };
+        if let Err(failure) = result {
+            failures.push(format!("{failure:#}"));
         }
     }
-    result
+    if failures.is_empty() {
+        error
+    } else {
+        error.context(format!(
+            "Rollback incomplete; backups retained at '{}': {}",
+            backup.keep().display(),
+            failures.join("; ")
+        ))
+    }
 }
 
 fn encoded_path(relative: &str) -> Result<String> {
@@ -2675,6 +2737,46 @@ mod tests {
             assert_eq!(fs::read(root.join("index.html"))?, b"old index");
             assert!(!root.join(".gitignore").try_exists()?);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_reports_restore_failure_and_keeps_original_bytes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let backup = tempfile::tempdir_in(temp.path())?;
+        let prior = backup.path().join(".prior-0");
+        fs::write(&prior, b"old manifest")?;
+        let manifest = temp.path().join("manifest.json");
+        fs::create_dir(&manifest)?; // The OS cannot replace this destination with a file.
+        let created = temp.path().join("new-asset");
+        fs::write(&created, b"new")?;
+        let steps = vec![
+            RollbackStep::File {
+                path: created.clone(),
+                prior: None,
+            },
+            RollbackStep::File {
+                path: manifest.clone(),
+                prior: Some(prior.clone()),
+            },
+        ];
+        let error = rollback_publication(
+            anyhow::anyhow!("Cannot publish the entry page"),
+            steps,
+            backup,
+        );
+        let msg = format!("{error:#}");
+        assert!(
+            msg.contains("Cannot publish the entry page")
+                && msg.contains(&manifest.display().to_string())
+                && msg.contains(&prior.display().to_string()),
+            "{msg}"
+        );
+        assert_eq!(fs::read(prior)?, b"old manifest");
+        assert!(
+            !created.exists(),
+            "one failed restore must not stop independent repairs"
+        );
         Ok(())
     }
 
