@@ -19,7 +19,7 @@ function Assert-SmokeEqual($Actual, $Expected, [string]$Message) {
 }
 
 $entry = Read-SmokeScript (Join-Path $PSScriptRoot 'desktop-smoke.ps1')
-$parameters = @('SkipBuild', 'KeepOpen', 'Capture', 'ScenarioFlows', 'ArtifactFlows', 'CleanupFlows', 'InstanceFlows', 'UpdateFlows', 'DeploymentFlows', 'PublishingFlows', 'TitlebarFlows', 'GitFlows', 'ComparisonFlows', 'ErrorImageFlows', 'IconFlows', 'SchemaFlows', 'SourceFlows')
+$parameters = @('SkipBuild', 'KeepOpen', 'OverwriteClipboard', 'Capture', 'ScenarioFlows', 'ArtifactFlows', 'CleanupFlows', 'InstanceFlows', 'UpdateFlows', 'DeploymentFlows', 'PublishingFlows', 'TitlebarFlows', 'GitFlows', 'ComparisonFlows', 'ErrorImageFlows', 'IconFlows', 'SchemaFlows', 'SourceFlows')
 Assert-SmokeEqual @($entry.ParamBlock.Parameters.Name.VariablePath.UserPath) $parameters 'Public switches changed'
 foreach ($parameter in $entry.ParamBlock.Parameters) {
     Assert-SmokeEqual $parameter.StaticType.Name 'SwitchParameter' "Parameter $($parameter.Name) is not a switch"
@@ -512,15 +512,18 @@ public sealed class $clipboardDataTypeName {
 public static class $clipboardTypeName {
     public static $clipboardDataTypeName Current;
     public static bool FailSetText;
-    public static $clipboardDataTypeName GetDataObject() { return Current; }
+    public static int Reads;
+    public static int Clears;
+    public static $clipboardDataTypeName GetDataObject() { Reads++; return Current; }
     public static void SetText(string text) {
-        Current = null;
+        Current = new $clipboardDataTypeName();
+        Current.SetData("Partial", false, "partial clipboard write");
         if (FailSetText) throw new InvalidOperationException("Synthetic clipboard initialization failure");
         Current = new $clipboardDataTypeName();
         Current.SetData("Text", false, text);
     }
     public static void SetDataObject($clipboardDataTypeName data, bool persist) { Current = data; }
-    public static void Clear() { Current = null; }
+    public static void Clear() { Clears++; Current = null; }
 }
 "@ -PassThru
 $clipboardType = $clipboardTypes | Where-Object Name -eq $clipboardTypeName
@@ -596,6 +599,40 @@ $backupStatement = @($definitions['Test-DefaultFlows'].Body.EndBlock.Statements 
         Assert-SmokeEqual ($clipboardType::Current.GetData('Text', $false)) 'synthetic user clipboard' 'Outer clipboard scope must restore even after partial initialization failure'
         Assert-SmokeEqual $script:fixtureClipboardOwned $false 'Clipboard scope must release ownership after restoration'
     }
+    $clipboardType::FailSetText = $false
+    $unreadable = [Activator]::CreateInstance($clipboardDataType)
+    $unreadable.SetData('Unknown', $false, $null)
+    $clipboardType::Current = $unreadable
+    try {
+        Initialize-FixtureClipboard
+        throw 'Expected the default clipboard mode to reject unreadable data'
+    } catch {
+        Assert-SmokeEqual $_.Exception.Message 'A clipboard format could not be backed up; clipboard tests were not started.' 'Default mode must reject unreadable clipboard data'
+    } finally { Restore-FixtureClipboard }
+    Assert-SmokeEqual ([object]::ReferenceEquals($clipboardType::Current, $unreadable)) $true 'Default mode must not replace unreadable clipboard data'
+
+    foreach ($fails in @($false, $true)) {
+        $clipboardType::Reads = 0
+        $clipboardType::Clears = 0
+        $clipboardType::FailSetText = $fails
+        $script:fixtureClipboardOwned = $false
+        $script:fixtureClipboardBackup = $null
+        try {
+            try {
+                Initialize-FixtureClipboard -OverwriteClipboard
+                Assert-SmokeEqual ($clipboardType::Current.GetData('Text', $false)) 'Regressify smoke fixture' 'Overwrite mode must seed the fixture'
+                Assert-SmokeEqual $clipboardType::Reads 0 'Overwrite mode must not read the original clipboard'
+                Assert-SmokeEqual $script:fixtureClipboardOwned $true 'Overwrite mode must retain cleanup ownership'
+            } finally { Restore-FixtureClipboard }
+        } catch {
+            if (-not $fails) { throw }
+        }
+        Assert-SmokeEqual $clipboardType::Reads 0 'Overwrite mode must never read the original clipboard'
+        Assert-SmokeEqual $clipboardType::Clears 1 'Overwrite mode must clear even after partial SetText failure'
+        Assert-SmokeEqual $clipboardType::Current $null 'Overwrite mode must clear fixture contents at cleanup'
+        Assert-SmokeEqual $script:fixtureClipboardOwned $false 'Overwrite mode must release ownership after cleanup'
+    }
+    $clipboardType::FailSetText = $false
 }
 
 $clipboardProbe = $definitions['Invoke-FixtureClipboard'].Extent.Text.Replace('[RegressifySmokeNative]', "[$pointerTypeName]")
@@ -767,8 +804,13 @@ function Test-SmokeDispatch([hashtable]$Flags, [string[]]$ExpectedFlow, [string]
     $script:publishingCredentials = @()
     $script:publishingLandingIds = @()
     $script:cleanupSnapshot = $null
-    foreach ($name in $mockCommands) {
+    foreach ($name in $mockCommands | Where-Object { $_ -ne 'Initialize-FixtureClipboard' }) {
         Set-Item "Function:$name" ([scriptblock]::Create("`$events.Add('$name'); if (`$FailurePoint -eq '$name') { throw 'Synthetic failure: $name' }"))
+    }
+    function Initialize-FixtureClipboard([switch]$OverwriteClipboard) {
+        Assert-SmokeEqual $OverwriteClipboard.IsPresent ([bool]$Flags['OverwriteClipboard']) 'Runner must forward the clipboard overwrite opt-in'
+        $events.Add('Initialize-FixtureClipboard')
+        if ($FailurePoint -eq 'Initialize-FixtureClipboard') { throw 'Synthetic failure: Initialize-FixtureClipboard' }
     }
     function Wait-Control { }
     function Copy-Item { $events.Add('Restore settings') }
@@ -798,6 +840,7 @@ $script:dispatchChecks = 0
 Test-SmokeDispatch @{} @('Test-DefaultFlows')
 Test-SmokeDispatch @{ Capture = $true } @('Test-DefaultFlows')
 Test-SmokeDispatch @{ SkipBuild = $true } @('Test-DefaultFlows')
+Test-SmokeDispatch @{ ComparisonFlows = $true; OverwriteClipboard = $true } @('Test-ComparisonFlows')
 Test-SmokeDispatch @{ KeepOpen = $true } @('Test-DefaultFlows')
 Test-SmokeDispatch @{} @('Test-DefaultFlows') -SettingsAbsent
 foreach ($failure in @('Initialize-FixtureClipboard', 'Write-JsonFixture', 'Start-Fixture', 'Test-ApplicationMenus', 'Test-DefaultFlows')) {

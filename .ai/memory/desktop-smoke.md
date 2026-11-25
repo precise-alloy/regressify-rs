@@ -52,15 +52,15 @@ Verified: 2026-10-21
   combinations without a popup lifecycle change.
 - [Clipboard checks](../../ci/desktop-smoke/controls.ps1) wait for the native
   sequence number to change after a synthetic sentinel and copy action, then
-  await exact text within the same frame-paced deadline. Sequence change alone
-  is not completion: GPUI empties the clipboard before supplying text. Headless
+  await exact text: GPUI empties the clipboard before supplying text. Headless
   tests reproduce early empty/stale reads and retain wrong/missing-write failures.
   Avoid reads while the sequence is unchanged to reduce contention with the writer.
-  Overview Details now uses that helper too; its headless regression failed
-  before the fix, then passed along with the complete native Default flow.
+  Overview Details uses the same helper; its headless and native checks pass.
   Retry only `CLIPBRD_E_CANT_OPEN`. An owned user snapshot is restored in outer
   `finally`; copy mutable data/streams, reject unreadable user formats, and drop
   missing private formats only in fixture-owned scopes. Lifetime regressions pass.
+  `-OverwriteClipboard` is an explicit disposable-clipboard option: it skips the
+  original snapshot and clears fixture data on exit. The default remains preserving.
 - Exact-HWND activation preserves focused child input. Native Cleanup, Default, Comparison, Git, Deployment and Artifact pass.
   Current Source smoke passed twice and full Schema passed, including native Basic Auth Ctrl+Space.
 - [Schema smoke](../../ci/desktop-smoke/flows/schema.ps1) verifies Enter/Tab/Escape after Alt+Tab and native return activation without clicking the editor.

@@ -2475,6 +2475,9 @@ The runner backs up clipboard data into independent storage before smoke input
 and restores it in its outer cleanup boundary, even after partial startup or a
 failed flow. Unsupported user formats stop tests before clipboard mutation;
 missing private formats are ignored only after the fixture owns the clipboard.
+Use `-OverwriteClipboard` only when the current clipboard is disposable: it
+skips the backup, replaces the clipboard with test data, and clears it on exit
+instead of restoring the original contents.
 Foreground activation targets the exact fixture window and never substitutes
 input to another application for a failed focus check.
 

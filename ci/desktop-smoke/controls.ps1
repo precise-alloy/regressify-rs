@@ -117,8 +117,11 @@ function Send-FixturePointerClick([switch]$Right) {
     [RegressifySmokeNative]::DwmFlush() | Out-Null
 }
 
-function Initialize-FixtureClipboard {
-    $script:fixtureClipboardBackup = Invoke-FixtureClipboard { Copy-FixtureClipboardData ([System.Windows.Forms.Clipboard]::GetDataObject()) }
+function Initialize-FixtureClipboard([switch]$OverwriteClipboard) {
+    if (-not $OverwriteClipboard) {
+        $script:fixtureClipboardBackup = Invoke-FixtureClipboard { Copy-FixtureClipboardData ([System.Windows.Forms.Clipboard]::GetDataObject()) }
+    }
+    # Own cleanup before SetText in case initialization partially changes the clipboard.
     $script:fixtureClipboardOwned = $true
     Invoke-FixtureClipboard { [System.Windows.Forms.Clipboard]::SetText('Regressify smoke fixture') }
 }

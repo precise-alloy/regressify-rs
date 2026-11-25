@@ -5,10 +5,13 @@ Build and exercise Regressify Desktop in a synthetic Windows workspace.
 Requires an interactive Windows desktop. Captures only the application window.
 Icon checks also capture the application's taskbar button.
 Artifacts and the fixture workspace remain under target/desktop-smoke.
+.PARAMETER OverwriteClipboard
+Discard the existing clipboard without backing it up. Clear test data on exit.
 #>
 param(
     [switch]$SkipBuild,
     [switch]$KeepOpen,
+    [switch]$OverwriteClipboard,
     [switch]$Capture,
     [switch]$ScenarioFlows,
     [switch]$ArtifactFlows,
@@ -66,7 +69,7 @@ if (-not $SkipBuild) {
 
 $cleanupSnapshot = $null
 try {
-    Initialize-FixtureClipboard
+    Initialize-FixtureClipboard -OverwriteClipboard:$OverwriteClipboard
     Write-JsonFixture $settingsPath @{ theme = 'light'; sourceFontSize = 14; sourceWrap = $true; sourceLineNumbers = $true; navigatorHidden = $false; recentWorkspaces = @() }
     if ($PublishingFlows) {
         foreach ($backup in $script:publishingBackups) {
