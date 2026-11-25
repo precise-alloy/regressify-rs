@@ -256,12 +256,26 @@ mod tests {
             })
             .with_subscriber(tracing_subscriber::registry().with(recorded.clone()))
             .await;
-            assert_eq!(task.join().unwrap().len(), 1);
-            let unexpected = server.try_recv().unwrap();
-            assert!(
-                unexpected.is_none(),
-                "Unexpected additional request after HTTP {status}: {unexpected:?}"
-            );
+            let payloads = task.join().unwrap();
+            assert_eq!(payloads.len(), 1);
+            assert_eq!(payloads[0]["batch"][0]["event"], "regressify_site_deployed");
+            if let Some(mut extra) = server.try_recv().unwrap() {
+                // Distinguish a retry from another fixture's POST without logging either body.
+                let first_id = payloads[0]["batch"][0]["distinct_id"]
+                    .as_str()
+                    .expect("Expected an anonymous event ID");
+                let body = std::io::Read::take(extra.as_reader(), 16 * 1024);
+                let same_event = serde_json::from_reader::<_, Value>(body)
+                    .ok()
+                    .and_then(|v| {
+                        v["batch"][0]["distinct_id"]
+                            .as_str()
+                            .map(|id| id == first_id)
+                    });
+                panic!(
+                    "Unexpected additional request after HTTP {status}; same event ID: {same_event:?}"
+                );
+            }
             assert_eq!(*recorded.0.lock().unwrap(), Vec::<String>::new());
         }
     }
@@ -294,9 +308,12 @@ mod tests {
 
     #[tokio::test]
     async fn connection_failures_are_silent() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let host = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
+        // Reserve the endpoint without listening. Dropping a listener here lets a
+        // parallel mock server receive this POST and mistake it for its own retry.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = socket.local_addr().unwrap();
+        let host = format!("http://{address}");
         let client = OnceCell::new();
         let recorded = RecordedEvents::default();
         capture_using(&client, "application", "started", json!({}), || {
