@@ -2942,31 +2942,44 @@ test("image viewer magnifies original pixels up to 2500%", async ({ page, isMobi
   }
 });
 
-test("side by side crosshairs exclude artwork without a capture diagnostic", async ({ page }) => {
-  await page.route("**/_snapshot/data/suites/**", async (route) => {
-    const response = await route.fetch();
-    const data = await response.json();
-    const capture = data.tests[0];
-    capture.error = null;
-    capture.placeholderImages = { reference: false, test: true, diff: false };
-    await route.fulfill({ response, json: data });
+for (const diagnostic of [null, "Test scenario failed to capture: timeout"]) {
+  test(`side by side crosshairs exclude artwork ${diagnostic ? "with" : "without"} a capture diagnostic`, async ({
+    page,
+  }) => {
+    if (diagnostic) {
+      await page.route("**/_snapshot/data/manifest.json?*", async (route) => {
+        const response = await route.fetch();
+        const manifest = await response.json();
+        manifest.suites.find((s: { id: string }) => s.id === "workspace-overview").errors++;
+        await route.fulfill({ response, json: manifest });
+      });
+    }
+    await page.route("**/_snapshot/data/suites/**", async (route) => {
+      const response = await route.fetch();
+      const data = await response.json();
+      const capture = data.tests[0];
+      capture.mismatch = null;
+      capture.error = diagnostic;
+      capture.placeholderImages = { reference: false, test: true, diff: false };
+      await route.fulfill({ response, json: data });
+    });
+    await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
+    const images = page.locator(".comparison-image");
+    await expect
+      .poll(() =>
+        images
+          .locator("img")
+          .evaluateAll(
+            (nodes) => nodes.filter((img) => (img as HTMLImageElement).naturalWidth > 0).length,
+          ),
+      )
+      .toBe(3);
+    await images.first().hover();
+    await expect(page.locator(".comparison-crosshair")).toHaveCount(2);
+    await images.nth(1).hover();
+    await expect(page.locator(".comparison-crosshair")).toHaveCount(0);
   });
-  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
-  const images = page.locator(".comparison-image");
-  await expect
-    .poll(() =>
-      images
-        .locator("img")
-        .evaluateAll(
-          (nodes) => nodes.filter((img) => (img as HTMLImageElement).naturalWidth > 0).length,
-        ),
-    )
-    .toBe(3);
-  await images.first().hover();
-  await expect(page.locator(".comparison-crosshair")).toHaveCount(2);
-  await images.nth(1).hover();
-  await expect(page.locator(".comparison-crosshair")).toHaveCount(0);
-});
+}
 
 for (const hasDiff of [false, true]) {
   test(`image viewer keeps ${hasDiff ? "three" : "two"} lanes bounded with native scrollbars`, async ({

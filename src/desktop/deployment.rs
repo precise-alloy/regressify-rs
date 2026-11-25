@@ -1982,6 +1982,21 @@ fn stage_site_inner(
             .partition(|id| local_ids.contains(id.as_str()));
         present.extend_from_slice(suite_ids);
         let mut inventory = crate::snapshot::artifact_inventory(destination, &present, &absent)?;
+        for suite in copies.suites.iter() {
+            let referenced = inventory
+                .suites
+                .get(&suite.summary.id)
+                .context("Missing inventory for locally reused suite")?;
+            ensure!(
+                referenced.len() == suite.files.len()
+                    && suite
+                        .files
+                        .keys()
+                        .all(|p| referenced.contains(Path::new(p))),
+                "Recorded files for locally reused suite '{}' do not match its report dependencies; use Replace with the intended suites to rebuild the site from local results",
+                suite.summary.id
+            );
+        }
         // The caller builds new state only for generated suites; reused suites retain their records.
         inventory
             .suites

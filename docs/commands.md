@@ -520,7 +520,9 @@ long-named siblings, including suite directories, regardless of input order.
 Publication refuses to overwrite
 a different existing file through its DOS alias. If publication fails, rollback
 attempts to restore both the previous bytes and the filename spelling; a sharing
-or permission error can also block rollback. Distinct files on a
+or permission error can also block rollback. If rollback itself fails, the error
+identifies the affected paths and the `.snapshot-rollback-*` directory retained
+in the output for recovery. Distinct files on a
 case-sensitive filesystem are not merged just because their names differ by case.
 A diagnostic such as `Navigation timed out` still counts as a capture error, but
 does not by itself hide the pixels or replace the thumbnail of a valid screenshot.

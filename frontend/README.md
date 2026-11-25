@@ -515,7 +515,9 @@ guides. Moving off the image, scrolling, changing views, or using touch clears t
 Wipe follows mouse movement without snapping to percentage steps. The slider
 supports keyboard and touch in whole percentages. Optional `placeholderImages`
 flags (`reference`, `test`, `diff`) control sampling and grid visibility in the
-viewer. Regenerated reports can explicitly mark all three false when a diagnostic
+viewer. A placeholder cannot send or receive a crosshair, but the remaining real
+lanes still can, even when the capture has an error. Regenerated reports can
+explicitly mark all three false when a diagnostic
 names no lane; older reports without flags keep their diagnostic fallback.
 
 Hover or focus the Info icon for mismatch/threshold statistics, dimensions, capture
