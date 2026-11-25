@@ -640,6 +640,17 @@ fn publish_staged_files(staged_root: &Path, root: &Path, dependencies: &[PathBuf
     }
     ordered.push(gitignore_rel);
     ordered.push(index_rel);
+    publish_ordered_files(staged_root, root, ordered, staged_root)
+}
+
+/// Publish an explicitly ordered list as one rollback group. The caller owns the backup
+/// directory and chooses the entry page last; recovery must not install a `.gitignore`.
+pub(crate) fn publish_ordered_files(
+    staged_root: &Path,
+    root: &Path,
+    ordered: Vec<&Path>,
+    backup_root: &Path,
+) -> Result<()> {
     let total_files = ordered.len();
     snapshot_phase(&format!(
         "Publishing {total_files} snapshot {} to report output",
@@ -653,11 +664,12 @@ fn publish_staged_files(staged_root: &Path, root: &Path, dependencies: &[PathBuf
     let result = (|| -> Result<()> {
         for (index, relative) in ordered.into_iter().enumerate() {
             normal_relative(relative)?;
-            let limit = if relative == gitignore_rel || relative == index_rel {
-                MAX_REPORT_BYTES
-            } else {
-                MAX_IMAGE_BYTES
-            };
+            let limit =
+                if relative == Path::new(".gitignore") || relative == Path::new("index.html") {
+                    MAX_REPORT_BYTES
+                } else {
+                    MAX_IMAGE_BYTES
+                };
             let bytes = read_bounded(&staged_root.join(relative), limit)?;
             ensure_output_parent(
                 root,
@@ -686,7 +698,7 @@ fn publish_staged_files(staged_root: &Path, root: &Path, dependencies: &[PathBuf
                     }
                     continue;
                 }
-                let backup = staged_root.join(format!(".prior-{backup_index}"));
+                let backup = backup_root.join(format!(".prior-{backup_index}"));
                 backup_index += 1;
                 fs::write(&backup, &existing_bytes).with_context(|| {
                     format!(

@@ -723,7 +723,7 @@ packages, so an update there re-uploads the suites it keeps (unselected suites, 
 selected ones unchanged since this workspace published them) from this workspace's
 last generated report instead of rebuilding them. Every reused file is checked
 against the size and SHA-256 hash the site state records, before generation; a
-suite whose local copy is missing or different is regenerated from local results,
+suite whose local copy is missing, different, or cannot be stashed is regenerated from local results,
 and an update fails with a request to replace the site when those are missing.
 After generation, Regressify fills in missing reused files even if deployment failed.
 If staging finished, it checks the local files against their hashes **before**
@@ -731,7 +731,8 @@ any upload optimization; otherwise it uses the hashes checked when it stashed th
 If an existing file has newer contents or its name resolves to another file,
 recovery warns rather than overwriting it. The local report index is replaced
 only when all suites it would list can be verified locally. A suite kept only
-on the remote site does not become a broken link in the local report.
+on the remote site does not become a broken link in the local report. If a shared
+file cannot be replaced, recovery attempts to roll back earlier replacements.
 Sites published before site
 states existed are read from their report manifest and also regenerate kept suites
 from local results. When the site cannot be read (network failure, private site,

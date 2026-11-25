@@ -155,6 +155,10 @@ are historical evidence, not open implementation tasks.
   regenerated shared log with stashed bytes. A mixed Cloudflare budget retry
   could also install a local index naming a remote-only suite. The shared-log
   and budget-retry regressions cover the local report after deployment returns.
+- Resolved in source: stale shared-log URLs could survive staging when the
+  provider hash already matched. All locally staged reports are now checked
+  together. Local recovery also preflights shared paths and attempts rollback
+  if a later index write fails.
 - Open: `live_create_update_and_delete_temporary_worker` fetches the published
   assets once, right after publication and without the client's retries. A fresh
   workers.dev hostname intermittently answers "unavailable" or stale bytes there

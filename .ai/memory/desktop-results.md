@@ -1,6 +1,6 @@
 # Results Review
 
-Verified: 2026-11-11
+Verified: 2026-11-25
 
 - [Overview](../../src/desktop/ui/overview.rs) uses uniform DataTable rows with
   full summaries/errors retained in explicit selectable Details. `overview_table_`
