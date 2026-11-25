@@ -905,7 +905,7 @@ are historical evidence, not open implementation tasks.
 
 - Resolved in source: desktop lacked wipe/overlay; the web viewer lacked drag-pan,
   fit-to-window, pointer-anchored zoom, and scoped image keyboard controls. Both
-  now offer six comparison modes, no-upscale fits, actual size, 25-800% zoom steps,
+  now offer six comparison modes, no-upscale fits, actual size, 25–2500% zoom steps,
   pan, modifier-wheel zoom, and double-click. Ordinary scrolling remains native.
 - [Native tests](src/desktop/ui/reports.rs) cover blend controls and unavailable
   sources; [six-mode checks](src/desktop/ui/tests.rs) cover fit, pan, and anchoring.

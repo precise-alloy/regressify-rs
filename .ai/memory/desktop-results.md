@@ -90,11 +90,11 @@ Verified: 2026-11-11
   are current; fit percentages use rendered pixel bounds, including layout rounding,
   while manual percentages use the selected preset. The `image_previews_` GUI tests
   cover one-decimal labels, independent modes, pointer zoom, and resized previews.
-- Wipe/Overlay reuse existing textures, common source bounds, and independent
-  scroll/zoom state; placeholder sources cannot enter these modes. Blend Slider
-  needs capture-phase focus for native keyboard adjustment. `image_previews_`
-  covers all six modes and keys; native Comparison verifies actual blend endpoint
-  pixels in both themes at 1000x640 and 1600x1000. Web/native share 25-800% presets.
+- Wipe/Overlay share source bounds and exclude placeholders; native blend Slider
+  needs capture-phase focus for keys. `image_previews_` covers all modes; native
+  Comparison samples blend endpoints and the 2500% preset.
+  [Magnified previews](../../src/desktop/ui/reports/pixelated.rs) bypass GPUI's linear
+  sampling with viewport-bounded device-pixel tiles, not enlarged full captures.
 - Side-by-side FitWidth pixel-aligns pane widths through public canvas layout;
   fractional widths previously caused tall-image height drift. GUI one-pixel
   checks and native minimum/compact/large Comparison pass without changing zoom,
