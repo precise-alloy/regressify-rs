@@ -725,9 +725,14 @@ last generated report instead of rebuilding them. Every reused file is checked
 against the size and SHA-256 hash the site state records, before generation; a
 suite whose local copy is missing or different is regenerated from local results,
 and an update fails with a request to replace the site when those are missing.
-Whatever the outcome, the reused files are put back into the local report (which
-then lists the staged suites once staging completed), so the next update can reuse
-them again. Sites published before site
+After generation, Regressify fills in missing reused files even if deployment failed.
+If staging finished, it checks the local files against their hashes **before**
+any upload optimization; otherwise it uses the hashes checked when it stashed them.
+If an existing file has newer contents or its name resolves to another file,
+recovery warns rather than overwriting it. The local report index is replaced
+only when all suites it would list can be verified locally. A suite kept only
+on the remote site does not become a broken link in the local report.
+Sites published before site
 states existed are read from their report manifest and also regenerate kept suites
 from local results. When the site cannot be read (network failure, private site,
 or an access gateway), the last state published from this workspace is used with a
@@ -851,10 +856,13 @@ images (99 down to 80). Larger images are tried first at each quality level;
 processing stops when the report fits, with a higher-quality search for the last
 image when possible. Every attempt starts from the original, and replacements
 are kept only if smaller. Dimensions, transparency support, and test results
-remain intact; failed diff images, error placeholders, and generated previews stay lossless. Any changed
+remain intact; diff images, error placeholders (including those identified only by
+the snapshot's image-role flags), and generated previews stay lossless. Any changed
 image bytes receive a new `?v=...` value from `get_asset_version`, and suite JSON
 plus the entry manifest receive updated versions as well. Filenames remain stable,
-and only the temporary staging copy is rewritten.
+and only the temporary staging copy is rewritten. On Windows, the deployment
+staging and optimization copies create literal short names before long siblings
+at each directory level. This copy order does not change compression priority.
 The deployment log reports the budget, savings, reduced images, and skipped
 images. If the report cannot fit within these safeguards, deployment stops before
 upload with sizes and recovery steps. Choose fewer suites or a larger plan;
@@ -2342,10 +2350,14 @@ actual size, and `W` fits width. Arrow keys pan, Shift+arrows move farther, and
 Escape cancels a drag. Shortcuts do not intercept editor, filter, slider, or menu
 input. Double-click a single-image, wipe, or overlay view to toggle actual size
 and fit-to-window.
-Wipe reveals Reference on the left and Test on the right, following the pointer
-when no button is held. Overlay adjusts the Test image's opacity. Both use a
+Wipe reveals Reference on the left and Test on the right. The divider follows
+the pointer without rounding, even at 25×. Overlay shows and announces the whole
+percentage actually applied to the Test image. Switching back to Wipe at the
+same opacity restores its precise position. Both use a
 0-100% slider with arrow keys and Home/End, share the original images' scale and
 origin, and are disabled for missing images or capture-error placeholders.
+An unmarked file containing the built-in error icon is displayed smoothly
+without a pixel grid; its bytes alone do not mark a capture as failed.
 Side by side shows Reference and Test, followed by Diff on the right when a
 diff image can be loaded. Clicking an image opens its corresponding tab and
 restores that tab's own fit/zoom choice; dragging does not switch tabs.
@@ -2375,7 +2387,11 @@ with the CLI's PNG helper before decoding. When a reference capture failed and
 no baseline image exists, Reference displays the shared rounded report error
 image. Failed Test captures use the same artwork. Older Reference and Test images
 with capture-failure markers also display this rounded image in memory, without
-rewriting their files. These previews never create or promote a baseline.
+rewriting their files. A Diff pointing to the same marked Test file displays the
+same artwork but keeps its original file actions. Substituted artwork neither
+sends nor receives crosshairs; a genuine file displaying its own pixels still
+has image coordinates. A separate Diff is unchanged.
+These previews never create or promote a baseline.
 Successful reference images and the capture's error message remain intact.
 Other missing images, invalid PNGs, and unsafe paths retain their diagnostics.
 Paths resolve relative to `html_report` and must remain inside the output root.

@@ -163,6 +163,7 @@ export function ComparisonViewer({
 }) {
   const { getSize, isLoaded } = useImageSizes(capture);
   const [blend, setBlend] = useState(50);
+  const sliderPercent = Math.round(blend);
   const [zoom, setZoom] = useState<{
     capture: Capture;
     views: Partial<Record<Mode, View>>;
@@ -236,19 +237,22 @@ export function ComparisonViewer({
   const referenceSize = getSize(capture.reference) || fallback;
   const testSize = getSize(capture.test) || fallback;
   const diffSize = getSize(capture.diff);
-  // Capture-failure placeholders publish the vector error icon and keep smooth scaling.
-  const referencePlaceholder =
-    capture.error !== null &&
-    (capture.error.startsWith("Reference scenario failed to capture:") ||
-      capture.error.startsWith("Both reference and test scenarios failed to capture"));
-  const testPlaceholder =
-    capture.error !== null && !capture.error.startsWith("Reference scenario failed to capture:");
+  // Older reports only identify failed lanes through their capture diagnostic.
+  const placeholders = capture.placeholderImages ?? {
+    reference:
+      capture.error !== null &&
+      (capture.error.startsWith("Reference scenario failed to capture:") ||
+        capture.error.startsWith("Both reference and test scenarios failed to capture")),
+    test:
+      capture.error !== null && !capture.error.startsWith("Reference scenario failed to capture:"),
+    diff: false,
+  };
   const lanes = [
     {
       label: "Reference",
       path: capture.reference,
       size: referenceSize,
-      placeholder: referencePlaceholder,
+      placeholder: placeholders.reference,
       gap: imageAlignmentGaps(
         capture.alignment?.referenceGaps ?? capture.alignment?.reference,
         referenceSize.height,
@@ -259,7 +263,7 @@ export function ComparisonViewer({
       label: "Test",
       path: capture.test,
       size: testSize,
-      placeholder: testPlaceholder,
+      placeholder: placeholders.test,
       gap: imageAlignmentGaps(
         capture.alignment?.testGaps ?? capture.alignment?.test,
         testSize.height,
@@ -272,7 +276,7 @@ export function ComparisonViewer({
             label: "Diff",
             path: capture.diff,
             size: diffSize || fallback,
-            placeholder: false,
+            placeholder: placeholders.diff,
             gap: null,
           },
         ]
@@ -282,7 +286,7 @@ export function ComparisonViewer({
   const single =
     mode === "reference" ? capture.reference : mode === "diff" ? capture.diff : capture.test;
   const singlePlaceholder =
-    mode === "reference" ? referencePlaceholder : mode === "test" ? testPlaceholder : false;
+    mode === "reference" || mode === "test" || mode === "diff" ? placeholders[mode] : false;
   const size =
     mode === "side"
       ? {
@@ -701,12 +705,33 @@ export function ComparisonViewer({
               type="range"
               min="0"
               max="100"
-              value={blend}
+              value={sliderPercent}
               aria-label={mode === "wipe" ? "Wipe position" : "Test image opacity"}
               className="w-[120px] accent-accent max-[601px]:min-w-[60px] max-[601px]:flex-1"
-              onChange={(event) => setBlend(Number(event.target.value))}
+              onKeyDown={(event) => {
+                // A native range emits no change when it is already on the requested stop.
+                // Commit its integer value first; let the browser perform any further step.
+                if (
+                  [
+                    "Home",
+                    "End",
+                    "ArrowLeft",
+                    "ArrowRight",
+                    "ArrowUp",
+                    "ArrowDown",
+                    "PageUp",
+                    "PageDown",
+                  ].includes(event.key)
+                ) {
+                  setBlend(event.currentTarget.valueAsNumber);
+                }
+              }}
+              onPointerDown={(event) => {
+                if (event.button === 0) setBlend(event.currentTarget.valueAsNumber);
+              }}
+              onChange={(event) => setBlend(event.currentTarget.valueAsNumber)}
             />
-            <output className="mono w-[34px] text-[12px]">{blend}%</output>
+            <output className="mono w-[34px] text-[12px]">{sliderPercent}%</output>
           </label>
         )}
       </div>
@@ -801,9 +826,7 @@ export function ComparisonViewer({
           const bounds = world.current?.getBoundingClientRect();
           if (bounds && bounds.width > 0) {
             setBlend(
-              Math.round(
-                Math.max(0, Math.min(100, ((event.clientX - bounds.left) / bounds.width) * 100)),
-              ),
+              Math.max(0, Math.min(100, ((event.clientX - bounds.left) / bounds.width) * 100)),
             );
           }
         }}
@@ -954,10 +977,10 @@ export function ComparisonViewer({
                               width={referenceSize.width}
                               height={referenceSize.height}
                               eager
-                              className={`pointer-events-none size-full max-w-none object-contain object-[top_left] select-none ${scale > 1 && !referencePlaceholder ? "[image-rendering:pixelated]" : ""}`}
+                              className={`pointer-events-none size-full max-w-none object-contain object-[top_left] select-none ${scale > 1 && !placeholders.reference ? "[image-rendering:pixelated]" : ""}`}
                             />
                             {scale > pixelGridThreshold &&
-                              !referencePlaceholder &&
+                              !placeholders.reference &&
                               isLoaded(capture.reference) && (
                                 <PixelGrid size={referenceSize} scale={scale} />
                               )}
@@ -966,7 +989,7 @@ export function ComparisonViewer({
                             className="absolute top-0 left-0"
                             style={{
                               ...size,
-                              opacity: mode === "overlay" ? blend / 100 : 1,
+                              opacity: mode === "overlay" ? sliderPercent / 100 : 1,
                               clipPath: mode === "wipe" ? `inset(0 0 0 ${blend}%)` : undefined,
                             }}
                           >
@@ -977,10 +1000,10 @@ export function ComparisonViewer({
                                 width={testSize.width}
                                 height={testSize.height}
                                 eager
-                                className={`pointer-events-none size-full max-w-none object-contain object-[top_left] select-none ${scale > 1 && !testPlaceholder ? "[image-rendering:pixelated]" : ""}`}
+                                className={`pointer-events-none size-full max-w-none object-contain object-[top_left] select-none ${scale > 1 && !placeholders.test ? "[image-rendering:pixelated]" : ""}`}
                               />
                               {scale > pixelGridThreshold &&
-                                !testPlaceholder &&
+                                !placeholders.test &&
                                 isLoaded(capture.test) && (
                                   <PixelGrid size={testSize} scale={scale} />
                                 )}
@@ -1005,7 +1028,7 @@ export function ComparisonViewer({
                     </div>
                     {mode === "wipe" && (
                       <div
-                        className="pointer-events-none absolute top-0 bottom-0 w-[3px] bg-[#008f74] [box-shadow:0_0_0_1px_#ffffffa0]"
+                        className="wipe-divider pointer-events-none absolute top-0 bottom-0 w-[3px] bg-[#008f74] [box-shadow:0_0_0_1px_#ffffffa0]"
                         style={{ left: `${blend}%` }}
                       />
                     )}

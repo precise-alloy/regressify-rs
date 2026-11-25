@@ -190,6 +190,9 @@ export const captureSchema = z
     reference: artifact("images").nullable(),
     test: artifact("images").nullable(),
     diff: artifact("images").nullable(),
+    placeholderImages: z
+      .object({ reference: z.boolean(), test: z.boolean(), diff: z.boolean() })
+      .optional(),
     alignment: diffAlignmentSchema.optional(),
     imageSizes: z
       .object({

@@ -14,7 +14,8 @@ use super::helpers::get_asset_version;
 use super::preview_cache::{CachedImage, PreviewCache, url_version};
 use super::site::{
     Capture, CapturePreviews, Dimensions, ImageSize, ImageSizes, MAX_IMAGE_BYTES, MAX_REPORT_BYTES,
-    SuiteReport, checked_file, read_bounded, store_asset, valid_segment, valid_suite_id,
+    PlaceholderImages, SuiteReport, checked_file, checked_file_paths, differs_only_in_case,
+    read_bounded, store_asset, valid_segment, valid_suite_id,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -167,10 +168,9 @@ fn overlay_error_icon(canvas: &mut image::RgbaImage) -> Result<()> {
     Ok(())
 }
 
-fn is_error_placeholder(root: &Path, relative_image: &Path, source: &Path) -> Result<bool> {
-    let mut marker_relative = relative_image.as_os_str().to_os_string();
-    marker_relative.push(".error.json");
-    if let Some(marker_path) = checked_file(root, Path::new(&marker_relative), true)? {
+fn is_error_placeholder(root: &Path, source: &Path) -> Result<bool> {
+    let marker_relative = crate::test::capture::error_marker_path(source.strip_prefix(root)?);
+    if let Some(marker_path) = checked_file(root, &marker_relative, true)? {
         let bytes = read_bounded(&marker_path, MAX_ERROR_MARKER_BYTES)?;
         let marker: CaptureErrorMarker = serde_json::from_slice(&bytes).with_context(|| {
             format!(
@@ -400,7 +400,6 @@ fn resolve_image_source<'a>(
     run_id: &str,
     path: Option<&str>,
     role: &'static str,
-    test_paths: &BTreeSet<String>,
 ) -> Result<Option<PendingImage<'a>>> {
     let Some(path) = path else {
         return Ok(None);
@@ -423,7 +422,7 @@ fn resolve_image_source<'a>(
     );
     let name = if reference {
         ensure!(!relative.contains('/'), "Invalid snapshot image path");
-        relative.to_owned()
+        relative
     } else {
         let (image_run, name) = relative
             .split_once('/')
@@ -432,7 +431,7 @@ fn resolve_image_source<'a>(
             image_run == run_id && valid_segment(name),
             "Invalid snapshot image path"
         );
-        name.to_owned()
+        name
     };
     let folder = if reference {
         "bitmaps_reference"
@@ -440,15 +439,26 @@ fn resolve_image_source<'a>(
         "bitmaps_test"
     };
     let relative_image = Path::new(suite).join(folder).join(relative);
-    let Some(source) = checked_file(root, &relative_image, reference)? else {
+    let Some((_, source)) = checked_file_paths(root, &relative_image, reference)? else {
         return Ok(None);
     };
-    let is_placeholder = is_error_placeholder(root, &relative_image, &source)?;
-    let role = if role == "diff" && test_paths.contains(&normalized) {
-        "test"
+    let actual = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .with_context(|| format!("Invalid resolved snapshot image name: {}", source.display()))?;
+    ensure!(
+        valid_segment(actual) && actual.to_ascii_lowercase().ends_with(".png"),
+        "Invalid resolved snapshot PNG path: {}",
+        source.display()
+    );
+    // Preserve the declared casing, but don't publish a volume-local DOS alias as a URL.
+    let name = if differs_only_in_case(name, actual) {
+        name
     } else {
-        role
-    };
+        actual
+    }
+    .to_owned();
+    let is_placeholder = is_error_placeholder(root, &source)?;
     Ok(Some(PendingImage {
         source,
         suite,
@@ -729,11 +739,17 @@ pub(super) fn load_suite(
         );
         report
     };
-    let test_paths: BTreeSet<String> = report
+    // A Diff can refer to a later capture's Test. Match their validated source
+    // identities while preserving the Test's declared name in public URLs.
+    let test_images = report
         .tests
         .iter()
-        .filter_map(|test| test.pair.test.as_deref())
-        .map(normalize_image)
+        .map(|test| resolve_image_source(root, id, &run_id, test.pair.test.as_deref(), "test"))
+        .collect::<Result<Vec<_>>>()?;
+    let test_names: BTreeMap<_, _> = test_images
+        .iter()
+        .flatten()
+        .map(|image| (image.source.as_path(), image.name.as_str()))
         .collect();
     let mut tests = Vec::with_capacity(report.tests.len());
     let mut identifiers = BTreeSet::new();
@@ -749,7 +765,12 @@ pub(super) fn load_suite(
     let mut queued_sources = BTreeSet::new();
     let mut grid_modes = BTreeMap::<PathBuf, BTreeSet<GridThumbnailMode>>::new();
     let mut role_names = BTreeMap::new();
-    for (test, scenario) in report.tests.into_iter().zip(names) {
+    for ((test, scenario), current) in report
+        .tests
+        .into_iter()
+        .zip(names)
+        .zip(test_images.iter().map(Option::as_ref))
+    {
         let mut pair = test.pair;
         ensure!(
             matches!(test.status.as_str(), "pass" | "fail")
@@ -807,24 +828,15 @@ pub(super) fn load_suite(
                 .is_none_or(|pixels| pixels <= crate::helpers::png::MAX_VISUAL_IMAGE_PIXELS),
             "Invalid snapshot mismatch pixel count"
         );
-        let reference = resolve_image_source(
-            root,
-            id,
-            &run_id,
-            pair.reference.as_deref(),
-            "reference",
-            &test_paths,
-        )?;
-        let current =
-            resolve_image_source(root, id, &run_id, pair.test.as_deref(), "test", &test_paths)?;
-        let diff = resolve_image_source(
-            root,
-            id,
-            &run_id,
-            pair.diff_image.as_deref(),
-            "diff",
-            &test_paths,
-        )?;
+        let reference =
+            resolve_image_source(root, id, &run_id, pair.reference.as_deref(), "reference")?;
+        let mut diff = resolve_image_source(root, id, &run_id, pair.diff_image.as_deref(), "diff")?;
+        if let Some(diff) = &mut diff
+            && let Some(&name) = test_names.get(diff.source.as_path())
+        {
+            diff.role = "test";
+            name.clone_into(&mut diff.name);
+        }
         ensure!(
             current.is_some() || reference.is_some(),
             "Snapshot capture has no image"
@@ -840,48 +852,62 @@ pub(super) fn load_suite(
             }
             error => (error, None),
         };
-        let test_failed_to_capture = error
-            .as_deref()
-            .is_some_and(|msg| !msg.starts_with("Reference scenario failed to capture:"));
-        let ref_failed_to_capture = error.as_deref().is_some_and(|msg| {
-            msg.starts_with("Reference scenario failed to capture:")
-                || msg.starts_with("Both reference and test scenarios failed to capture")
-        });
-        let has_captured_test =
-            !test_failed_to_capture && current.as_ref().is_some_and(|img| !img.is_placeholder);
-        let has_captured_reference =
-            !ref_failed_to_capture && reference.as_ref().is_some_and(|img| !img.is_placeholder);
+        // Legacy messages can identify a lane even without an error marker, but an
+        // unqualified diagnostic is only evidence of failure of the capture as a whole.
+        let (failed_reference, failed_test) = match error.as_deref() {
+            Some(msg) if msg.starts_with("Both reference and test scenarios failed to capture") => {
+                (true, true)
+            }
+            Some(msg) if msg.starts_with("Reference scenario failed to capture:") => (true, false),
+            Some(msg) if msg.starts_with("Test scenario failed to capture:") => (false, true),
+            _ => (false, false),
+        };
+        let artwork = PlaceholderImages {
+            reference: reference
+                .as_ref()
+                .is_some_and(|img| img.is_placeholder || failed_reference),
+            test: current.is_some_and(|img| img.is_placeholder || failed_test),
+            // A legacy Diff can point at this capture's failed Test file even
+            // when the diagnostic is the only evidence that it is artwork.
+            diff: diff.as_ref().is_some_and(|img| {
+                img.is_placeholder
+                    || (failed_test && current.is_some_and(|test| test.source == img.source))
+            }),
+        };
         // Prefer the diff thumbnail when a captured test produced a diff; when no test image
         // was captured, use a dimmed top-cropped reference thumbnail overlaid with the error icon,
         // or the contained error icon alone when neither image was captured.
-        let grid_target = if has_captured_test {
-            if let Some(diff) = &diff {
+        let grid_target = if let Some(test) = current.filter(|_| !artwork.test) {
+            if let Some(diff) = diff.as_ref().filter(|_| !artwork.diff) {
                 Some((diff.source.clone(), GridThumbnailMode::DiffCrop))
             } else {
-                current
-                    .as_ref()
-                    .map(|pending| (pending.source.clone(), GridThumbnailMode::TopCrop))
+                Some((test.source.clone(), GridThumbnailMode::TopCrop))
             }
-        } else if has_captured_reference {
-            reference.as_ref().map(|pending| {
-                (
-                    pending.source.clone(),
-                    GridThumbnailMode::DimmedErrorOverlay,
-                )
-            })
+        } else if let Some(reference) = reference.as_ref().filter(|_| !artwork.reference) {
+            Some((
+                reference.source.clone(),
+                GridThumbnailMode::DimmedErrorOverlay,
+            ))
         } else {
             current
-                .as_ref()
                 .or(reference.as_ref())
                 .map(|pending| (pending.source.clone(), GridThumbnailMode::ErrorIconContain))
         };
+        // On an ambiguous error, emit explicit false flags rather than inviting
+        // older-report fallback logic to guess that the Test lane is artwork.
+        let placeholder_images =
+            (error.is_some() || artwork.reference || artwork.test || artwork.diff)
+                .then_some(artwork);
         if let Some((source, grid_mode)) = &grid_target {
             grid_modes
                 .entry(source.clone())
                 .or_default()
                 .insert(*grid_mode);
         }
-        for pending in [&reference, &current, &diff].into_iter().flatten() {
+        for pending in [reference.as_ref(), current, diff.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             let previous_name = role_names
                 .entry((pending.role, pending.name.to_ascii_lowercase()))
                 .or_insert_with(|| pending.name.clone());
@@ -908,8 +934,9 @@ pub(super) fn load_suite(
             mismatch,
             error,
             comparison_error,
+            placeholder_images,
             reference.map(|item| item.source),
-            current.map(|item| item.source),
+            current.map(|item| item.source.clone()),
             diff.map(|item| item.source),
             grid_target,
         ));
@@ -976,17 +1003,27 @@ pub(super) fn load_suite(
         }
         Ok(asset)
     };
-    let stored_images = if pending_images.len() <= 1 {
-        pending_images
-            .iter()
-            .map(process_pending)
-            .collect::<Result<Vec<_>>>()?
-    } else {
-        pending_images
-            .par_iter()
-            .map(process_pending)
-            .collect::<Result<Vec<_>>>()?
-    };
+    #[cfg(windows)]
+    let literal_count =
+        super::site::prioritize_literal_short_names(&mut pending_images, root, |p| &p.source)?;
+    #[cfg(not(windows))]
+    let literal_count = 0;
+    let (literals, remaining) = pending_images.split_at(literal_count);
+    let mut stored_images = Vec::with_capacity(total_images);
+    // Sorting a parallel iterator is not a write barrier. Finish all literal
+    // names (including their previews) before any long sibling can acquire one.
+    for batch in [literals, remaining] {
+        match batch {
+            [] => {}
+            [only] => stored_images.push(process_pending(only)?),
+            _ => stored_images.extend(
+                batch
+                    .par_iter()
+                    .map(&process_pending)
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+        }
+    }
     if total_images > 0 {
         let reused = reused.into_inner();
         super::site::snapshot_phase(&format!(
@@ -1019,6 +1056,7 @@ pub(super) fn load_suite(
         mismatch,
         error,
         comparison_error,
+        placeholder_images,
         reference_src,
         current_src,
         diff_src,
@@ -1068,6 +1106,7 @@ pub(super) fn load_suite(
             mismatch_pixels: pair.diff.as_ref().and_then(|diff| diff.mismatch_pixels),
             error,
             comparison_error,
+            placeholder_images,
             reference: reference.as_ref().map(|asset| asset.full.clone()),
             test: current.as_ref().map(|asset| asset.full.clone()),
             diff: diff.as_ref().map(|asset| asset.full.clone()),
@@ -1841,6 +1880,394 @@ mod tests {
     }
 
     #[test]
+    fn literal_short_name_and_long_sibling_publish_distinct_assets_in_either_order() -> Result<()> {
+        for (short, long) in [
+            ("RECORD~1.PNG", "RECORDEDCAPTUREWITHLONGNAME.PNG"),
+            // The longer sibling can itself look short and contain a tilde.
+            ("CAF~1~1.PNG", "caf\u{e9}~1.PNG"),
+        ] {
+            for (first, second) in [(short, long), (long, short)] {
+                let (temp, mut report) = fixture();
+                let root = temp.path();
+                let run = root.join("suite/bitmaps_test/current");
+                fs::write(run.join(short), png(40))?;
+                fs::write(run.join(long), png(190))?;
+                let row = |name: &str| {
+                    let mut row = report["tests"][0].clone();
+                    row["pair"]["fileName"] = json!(name);
+                    row["pair"]["test"] = json!(format!("../bitmaps_test/current/{name}"));
+                    row
+                };
+                report["tests"] = json!([row(first), row(second)]);
+                write_fixture(root, &report);
+                super::super::site::generate_site(
+                    root,
+                    &["suite".into()],
+                    &Default::default(),
+                    &Default::default(),
+                )?;
+                let suite: SuiteReport = serde_json::from_slice(&fs::read(
+                    root.join("_snapshot/data/suites/suite.json"),
+                )?)?;
+                #[cfg(feature = "desktop")]
+                let stage = temp.path().join("deployment-stage");
+                #[cfg(feature = "desktop")]
+                crate::desktop::deployment::stage_reports(root, &["suite".into()], &stage)?;
+                for capture in &suite.tests {
+                    let value = if capture.id == short { 40 } else { 190 };
+                    let previews = capture.previews.as_ref().unwrap();
+                    for (role, url) in [
+                        ("test", &capture.test),
+                        ("test-preview", &previews.test),
+                        ("test-thumbnail", &previews.grid),
+                    ] {
+                        let path =
+                            super::super::site::versioned_path(url.as_ref().unwrap(), "images")?;
+                        assert_eq!(
+                            path,
+                            Path::new("_snapshot/images/suite")
+                                .join(role)
+                                .join(&capture.id)
+                        );
+                        let bytes = fs::read(root.join(&path))?;
+                        #[cfg(feature = "desktop")]
+                        assert_eq!(fs::read(stage.join(&path))?, bytes);
+                        let pixels = lodepng::decode32(bytes)?;
+                        assert_eq!(pixels.buffer[0], rgb::RGBA8::new(value, value, value, 255));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn literal_short_suite_and_long_sibling_keep_distinct_image_directories() -> Result<()> {
+        let short = "RECORD~1";
+        let long = "RECORDEDCAPTURESUITE";
+        for order in [[long, short], [short, long]] {
+            let (temp, mut report) = fixture();
+            let root = temp.path();
+            for (id, color) in [(short, 40), (long, 190)] {
+                let suite = root.join(id);
+                let run = suite.join("bitmaps_test/current");
+                fs::create_dir_all(&run)?;
+                fs::create_dir_all(suite.join("html_report"))?;
+                fs::write(run.join("home.png"), png(color))?;
+                report["id"] = json!(id);
+                report["tests"][0]["pair"]["reference"] = serde_json::Value::Null;
+                let raw = serde_json::to_string(&report)?;
+                fs::write(
+                    suite.join("html_report/config.js"),
+                    format!("report({raw});"),
+                )?;
+                fs::write(run.join("report.json"), raw)?;
+            }
+            let suites = order.map(str::to_owned);
+            super::super::site::generate_site(
+                root,
+                &suites,
+                &Default::default(),
+                &Default::default(),
+            )?;
+            #[cfg(feature = "desktop")]
+            let stage = root.join("deployment-stage");
+            #[cfg(feature = "desktop")]
+            crate::desktop::deployment::stage_reports(root, &suites, &stage)?;
+            for (id, color) in [(short, 40), (long, 190)] {
+                let image = Path::new("_snapshot/images").join(id).join("test/home.png");
+                assert_eq!(fs::read(root.join(&image))?, png(color));
+                #[cfg(feature = "desktop")]
+                assert_eq!(fs::read(stage.join(image))?, png(color));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_short_capture_name_regenerates_one_readable_asset_with_its_marker() -> Result<()> {
+        let (temp, mut report) = fixture();
+        let root = temp.path();
+        let run = root.join("suite/bitmaps_test/current");
+        let long = "RecordedCaptureWithLongName.png";
+        let short = "RECORD~1.PNG";
+        fs::write(run.join(long), png(120))?;
+        if !run.join(short).try_exists()? {
+            eprintln!("Skipping DOS-alias probe: fixture has no RECORD~1.PNG alias on this volume");
+            return Ok(());
+        }
+        assert_eq!(
+            run.join(long).canonicalize()?,
+            run.join(short).canonicalize()?
+        );
+        fs::write(
+            run.join(format!("{long}.error.json")),
+            r#"{"error":true,"message":"timeout"}"#,
+        )?;
+        let generate = |report: &serde_json::Value| -> Result<()> {
+            write_fixture(root, report);
+            super::super::site::generate_site(
+                root,
+                &["suite".into()],
+                &Default::default(),
+                &Default::default(),
+            )
+        };
+        for (test, diff) in [
+            (long, None),
+            (short, None),
+            (long, Some(short)),
+            (short, Some(long)),
+            (short, Some(short)),
+        ] {
+            report["tests"][0]["pair"]["test"] = json!(format!("../bitmaps_test/current/{test}"));
+            report["tests"][0]["pair"]["diffImage"] =
+                json!(diff.map(|name| format!("../bitmaps_test/current/{name}")));
+            generate(&report)?;
+            let suite: SuiteReport =
+                serde_json::from_slice(&fs::read(root.join("_snapshot/data/suites/suite.json"))?)?;
+            let capture = &suite.tests[0];
+            let path =
+                super::super::site::versioned_path(capture.test.as_ref().unwrap(), "images")?;
+            assert_eq!(path, Path::new("_snapshot/images/suite/test").join(long));
+            assert_eq!(fs::read(root.join(path))?, png(120));
+            let flags = capture
+                .placeholder_images
+                .as_ref()
+                .expect("the long-name sidecar must be read");
+            assert!(flags.test && !flags.reference);
+            assert_eq!(flags.diff, diff.is_some());
+            if diff.is_some() {
+                assert_eq!(capture.test, capture.diff);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_short_output_collision_preserves_previous_snapshot() -> Result<()> {
+        let (temp, mut report) = fixture();
+        let root = temp.path();
+        let run = root.join("suite/bitmaps_test/current");
+        let long = "RecordedCaptureWithLongName.png";
+        let short = "RECORD~1.PNG";
+        let generate = |report: &serde_json::Value| -> Result<()> {
+            write_fixture(root, report);
+            super::super::site::generate_site(
+                root,
+                &["suite".into()],
+                &Default::default(),
+                &Default::default(),
+            )
+        };
+        fs::write(run.join(long), png(120))?;
+        report["tests"][0]["pair"]["test"] = json!(format!("../bitmaps_test/current/{long}"));
+        generate(&report)?;
+        let published = root.join("_snapshot/images/suite/test");
+        if !published.join(short).try_exists()? {
+            eprintln!("Skipping DOS-alias collision: fixture output has no RECORD~1.PNG alias");
+            return Ok(());
+        }
+        assert_eq!(
+            published.join(short).canonicalize()?,
+            published.join(long).canonicalize()?
+        );
+        let before: Vec<_> = super::super::site::artifact_paths(root, &["suite".into()])?
+            .into_iter()
+            .map(|p| fs::read(root.join(&p)).map(|bytes| (p, bytes)))
+            .collect::<std::io::Result<_>>()?;
+        // Now the input is a *literal* short-looking filename, not a source alias.
+        fs::remove_file(run.join(long))?;
+        report["tests"][0]["pair"]["test"] = json!(format!("../bitmaps_test/current/{short}"));
+        for value in [120, 180] {
+            fs::write(run.join(short), png(value))?;
+            let error = generate(&report).unwrap_err();
+            assert!(format!("{error:#}").contains("alias"), "{error:#}");
+            super::super::site::artifact_paths(root, &["suite".into()])?;
+            for (path, bytes) in &before {
+                assert_eq!(fs::read(root.join(path))?, *bytes, "{}", path.display());
+            }
+        }
+        // Once a normal regeneration prunes the old file, the same literal name is publishable.
+        report["tests"][0]["pair"]["test"] = json!("../bitmaps_test/current/home.png");
+        generate(&report)?;
+        assert!(!published.join(long).try_exists()?);
+        report["tests"][0]["pair"]["test"] = json!(format!("../bitmaps_test/current/{short}"));
+        generate(&report)?;
+        assert_eq!(fs::read(published.join(short))?, png(180));
+        Ok(())
+    }
+
+    #[test]
+    fn case_variant_diff_uses_the_test_role_only_when_the_source_resolves_to_the_same_path() {
+        let (temp, mut report) = fixture();
+        let root = temp.path();
+        let run = root.join("suite/bitmaps_test/current");
+        // home.png already exists. Probe the directory rather than assuming an OS-wide case policy.
+        let other = run.join("Home.png");
+        let alias = other.try_exists().unwrap();
+        if !alias {
+            fs::write(&other, png(120)).unwrap();
+        }
+        let diff = json!("../bitmaps_test/current/home.png");
+        let mut first = report["tests"][0].clone();
+        first["pair"]["test"] = json!("../bitmaps_test/current/other.png");
+        first["pair"]["fileName"] = json!("first.png");
+        first["pair"]["diffImage"] = diff.clone();
+        fs::write(run.join("other.png"), png(40)).unwrap();
+        let mut failed = report["tests"][0].clone();
+        failed["pair"]["test"] = json!("../bitmaps_test/current/Home.png");
+        failed["pair"]["diff"] = serde_json::Value::Null;
+        failed["pair"]["engineErrorMsg"] = json!("Test scenario failed to capture: timeout");
+        failed["pair"]["diffImage"] = diff;
+        report["tests"] = json!([first, failed]);
+        write_fixture(root, &report);
+
+        let suite = load(root).unwrap().unwrap();
+        let [first, failed] = suite.tests.as_slice() else {
+            panic!("missing captures")
+        };
+        let test_url = failed.test.as_deref().unwrap();
+        let diff_url = failed.diff.as_deref().unwrap();
+        assert!(test_url.starts_with("_snapshot/images/suite/test/Home.png?v="));
+        assert_eq!(diff_url == test_url, alias);
+        if !alias {
+            assert!(diff_url.starts_with("_snapshot/images/suite/diff/home.png?v="));
+        }
+        assert_eq!(first.diff.as_deref(), Some(diff_url));
+        assert!(first.placeholder_images.is_none());
+        assert_eq!(failed.placeholder_images.as_ref().unwrap().diff, alias);
+    }
+
+    #[test]
+    fn diff_inherits_a_legacy_test_failure_only_for_the_same_source_and_capture() {
+        let (temp, mut report) = fixture();
+        let test = report["tests"][0]["pair"]["test"].clone();
+        let distinct = json!("../bitmaps_test/current/distinct.png");
+        fs::write(
+            temp.path().join("suite/bitmaps_test/current/distinct.png"),
+            png(80),
+        )
+        .unwrap();
+        let mut failed = report["tests"][0].clone();
+        failed["pair"]["diff"] = serde_json::Value::Null;
+        failed["pair"]["engineErrorMsg"] = json!("Test scenario failed to capture: timeout");
+        failed["pair"]["diffImage"] = test.clone();
+        let mut separate = failed.clone();
+        separate["pair"]["fileName"] = json!("separate.png");
+        separate["pair"]["diffImage"] = distinct;
+        let mut normal = report["tests"][0].clone();
+        normal["pair"]["fileName"] = json!("normal.png");
+        normal["pair"]["diffImage"] = test;
+        report["tests"] = json!([failed, separate, normal]);
+        write_fixture(temp.path(), &report);
+
+        let suite = load(temp.path()).unwrap().unwrap();
+        let [aliased, separate, normal] = suite.tests.as_slice() else {
+            panic!("missing captures")
+        };
+        assert_eq!(aliased.diff, aliased.test);
+        let flags = aliased.placeholder_images.as_ref().unwrap();
+        assert!(flags.test && flags.diff && !flags.reference);
+        assert_ne!(separate.diff, separate.test);
+        let flags = separate.placeholder_images.as_ref().unwrap();
+        assert!(flags.test && !flags.diff);
+        assert_eq!(normal.diff, aliased.diff);
+        assert!(normal.placeholder_images.is_none());
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn compression_roles_protect_only_the_markerless_artwork_and_otherwise_keep_status() {
+        use super::super::site::{ImageRole, generate_site, image_roles};
+        let (temp, mut report) = fixture();
+        let root = temp.path();
+        fs::write(
+            root.join("suite/bitmaps_reference/home.png"),
+            crate::test::capture::error_icon_png(),
+        )
+        .unwrap();
+        let mut passed = report["tests"][0].clone();
+        passed["status"] = json!("pass");
+        passed["pair"]["diff"]["rawMisMatchPercentage"] = json!(0);
+        passed["pair"]["fileName"] = json!("passed.png");
+        passed["pair"]["reference"] = json!("../bitmaps_reference/ordinary.png");
+        passed["pair"]["test"] = json!("../bitmaps_test/current/artwork.png");
+        fs::write(root.join("suite/bitmaps_reference/ordinary.png"), png(40)).unwrap();
+        fs::write(
+            root.join("suite/bitmaps_test/current/artwork.png"),
+            crate::test::capture::error_icon_png(),
+        )
+        .unwrap();
+        report["tests"].as_array_mut().unwrap().push(passed);
+        write_fixture(root, &report);
+        generate_site(
+            root,
+            &["suite".into()],
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        let roles = image_roles(root, &BTreeSet::new()).unwrap().unwrap();
+        for (suffix, expected) in [
+            ("reference/home.png", ImageRole::Protected),
+            ("test/home.png", ImageRole::Comparison),
+            ("reference/ordinary.png", ImageRole::Passed),
+            ("test/artwork.png", ImageRole::Protected),
+        ] {
+            assert_eq!(
+                roles[&Path::new("_snapshot/images/suite").join(suffix)],
+                expected,
+                "{suffix}"
+            );
+        }
+    }
+
+    #[test]
+    fn unqualified_capture_error_does_not_assign_artwork_to_the_other_lane() {
+        let (temp, mut report) = fixture();
+        let root = temp.path();
+        report["tests"][0]["pair"]["diff"] = serde_json::Value::Null;
+        report["tests"][0]["pair"]["engineErrorMsg"] = json!("Navigation timed out");
+        let marker = root.join("suite/bitmaps_reference/home.png.error.json");
+        for marked_reference in [true, false] {
+            if marked_reference {
+                fs::write(
+                    &marker,
+                    r#"{"error":true,"message":"Navigation timed out"}"#,
+                )
+                .unwrap();
+                fs::write(
+                    root.join("suite/bitmaps_test/current/home_diff.png"),
+                    crate::test::capture::error_icon_png(),
+                )
+                .unwrap();
+                report["tests"][0]["pair"]["diffImage"] =
+                    json!("../bitmaps_test/current/home_diff.png");
+            } else {
+                fs::remove_file(&marker).unwrap();
+                report["tests"][0]["pair"]["diffImage"] = serde_json::Value::Null;
+            }
+            write_fixture(root, &report);
+            let suite = load(root).unwrap().unwrap();
+            let capture = &suite.tests[0];
+            assert_eq!(capture.status, "fail");
+            assert_eq!(capture.error.as_deref(), Some("Navigation timed out"));
+            let flags = capture.placeholder_images.as_ref().unwrap();
+            assert_eq!(flags.reference, marked_reference);
+            assert!(!flags.test, "The Test screenshot is valid in both reports");
+            assert_eq!(flags.diff, marked_reference);
+            let grid = capture.previews.as_ref().unwrap().grid.as_deref().unwrap();
+            let (path, _) = grid.split_once("?v=").unwrap();
+            assert!(path.starts_with("_snapshot/images/suite/test-thumbnail/"));
+            let pixels = lodepng::decode32(fs::read(root.join(path)).unwrap()).unwrap();
+            assert_eq!(pixels.buffer[0], rgb::RGBA8::new(80, 80, 80, 255));
+        }
+    }
+
+    #[test]
     fn error_marker_sidecars_validate_regular_files_symlinks_and_size_bounds() {
         let (temp, mut report) = fixture();
         report["tests"][0]["pair"]["diff"] = serde_json::Value::Null;
@@ -1876,6 +2303,8 @@ mod tests {
         // Valid error marker sidecar marks test capture as placeholder and falls back to reference thumbnail.
         fs::write(&sidecar, r#"{"error":true,"message":"capture failed"}"#).unwrap();
         let loaded = load(temp.path()).unwrap().unwrap();
+        let marked = loaded.tests[0].placeholder_images.as_ref().unwrap();
+        assert!(marked.test && !marked.reference && !marked.diff);
         assert!(
             loaded.tests[0]
                 .previews
@@ -1890,6 +2319,7 @@ mod tests {
         // An `error:false` sidecar does not mark the capture as a placeholder.
         fs::write(&sidecar, r#"{"error":false,"message":"ok"}"#).unwrap();
         let non_error = load(temp.path()).unwrap().unwrap();
+        assert!(non_error.tests[0].placeholder_images.is_none());
         assert!(
             non_error.tests[0]
                 .previews
@@ -1908,7 +2338,18 @@ mod tests {
             crate::test::capture::error_icon_png(),
         )
         .unwrap();
+        // Some legacy reports point both Test and Diff at the same artwork.
+        report["tests"][0]["pair"]["diffImage"] = report["tests"][0]["pair"]["test"].clone();
+        write_fixture(temp.path(), &report);
         let placeholder_bytes = load(temp.path()).unwrap().unwrap();
+        let capture = &placeholder_bytes.tests[0];
+        assert!(capture.error.is_none());
+        assert_eq!(
+            serde_json::to_value(capture).unwrap()["placeholderImages"],
+            json!({
+                "reference": false, "test": true, "diff": true
+            })
+        );
         assert!(
             placeholder_bytes.tests[0]
                 .previews

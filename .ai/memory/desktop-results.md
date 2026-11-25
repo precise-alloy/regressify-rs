@@ -92,9 +92,9 @@ Verified: 2026-11-11
   cover one-decimal labels, independent modes, pointer zoom, and resized previews.
 - Wipe/Overlay share source bounds and exclude placeholders; native blend Slider
   needs capture-phase focus for keys. `image_previews_` covers all modes; native
-  Comparison samples blend endpoints and the 2500% preset.
+  Comparison samples blend endpoints and 2500%. Overlay projects the applied whole percent into the stock slider; returning at the same stop restores the precise Wipe split.
   [Magnified previews](../../src/desktop/ui/reports/pixelated.rs) bypass GPUI's linear
-  sampling with viewport-bounded device-pixel tiles, not enlarged full captures.
+  sampling with viewport-bounded device-pixel tiles. Crosshairs use displayed file pixels, not the presence of a file-action path on a replacement Diff.
 - Side-by-side FitWidth pixel-aligns pane widths through public canvas layout;
   fractional widths previously caused tall-image height drift. GUI one-pixel
   checks and native minimum/compact/large Comparison pass without changing zoom,

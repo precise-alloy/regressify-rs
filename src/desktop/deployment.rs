@@ -1764,19 +1764,19 @@ pub fn stage_reports(output: &Path, suite_ids: &[String], destination: &Path) ->
         !suite_ids.is_empty(),
         "Select at least one test suite to deploy"
     );
-    stage_site(output, suite_ids, &[], destination).map(drop)
+    stage_site(output, suite_ids, &[], destination, None).map(drop)
 }
 
 /// Stages a site of the generated `suite_ids` plus `kept` suites the site already serves.
 ///
-/// Only generated suites' files and the bundled frontend are copied; kept suites contribute
-/// their summaries to a merged manifest, status, and entry page, and their files stay on the
-/// site. The staged site is verified with kept suites absent, and its inventory is returned.
-pub(crate) fn stage_site(
+/// Kept summaries are merged into the manifest, status and entry page. Suites reused locally
+/// share the generated files' copy plan; only remote-only suites stay absent.
+fn stage_site(
     output: &Path,
     suite_ids: &[String],
     kept: &[crate::snapshot::SuiteSummary],
     destination: &Path,
+    local: Option<incremental::LocalCopies<'_>>,
 ) -> Result<crate::snapshot::SiteInventory> {
     use crate::diagnostics::{record::*, runtime};
     runtime::stage_sync(
@@ -1791,7 +1791,7 @@ pub(crate) fn stage_site(
                 FieldValue::Identity(SafeIdentity::fingerprint("index.html")),
             ),
         ],
-        || stage_site_inner(output, suite_ids, kept, destination),
+        || stage_site_inner(output, suite_ids, kept, destination, local),
     )
 }
 
@@ -1800,6 +1800,7 @@ fn stage_site_inner(
     suite_ids: &[String],
     kept: &[crate::snapshot::SuiteSummary],
     destination: &Path,
+    local: Option<incremental::LocalCopies<'_>>,
 ) -> Result<crate::snapshot::SiteInventory> {
     let output = output
         .canonicalize()
@@ -1830,6 +1831,28 @@ fn stage_site_inner(
     for files in inventory.suites.into_values() {
         dependencies.extend(files);
     }
+    let mut dependencies: std::collections::BTreeMap<_, _> = dependencies
+        .into_iter()
+        .map(|path| (path, output.as_path()))
+        .collect();
+    let stash = local
+        .as_ref()
+        .map(|copies| copies.stash.canonicalize())
+        .transpose()?;
+    if let (Some(copies), Some(stash)) = (&local, &stash) {
+        for suite in copies.suites.iter() {
+            for path in suite.files.keys() {
+                // Only an exact inventory overlap belongs to the generated source.
+                dependencies.entry(PathBuf::from(path)).or_insert(stash);
+            }
+        }
+    }
+    #[cfg(windows)]
+    let dependencies = crate::snapshot::materialization_order_from(
+        dependencies.into_iter().collect(),
+        |(p, _)| p,
+        |(_, root)| *root,
+    )?;
     let dependency_count = dependencies.len();
     fs::create_dir_all(destination).with_context(|| {
         format!(
@@ -1840,83 +1863,91 @@ fn stage_site_inner(
     phase(&format!(
         "Staging {dependency_count} selected report dependencies"
     ));
-    let mut copied = BTreeSet::new();
+    let mut copied = 0usize;
     let mut copied_bytes = 0_u64;
     let mut last_update = std::time::Instant::now();
     let staged = (|| -> Result<crate::snapshot::SiteInventory> {
-        {
-            let mut copy = |relative: &Path, missing_reference: bool| -> Result<()> {
-                let Some(source) = artifact_source(&output, relative, missing_reference)
-                    .inspect_err(|_| {
-                        use crate::diagnostics::{record::*, runtime};
-                        runtime::event(
-                            Stage::SnapshotStaging,
-                            DiagnosticEvent::StageFinished,
-                            Severity::Error,
-                            [(
-                                Field::Artifact,
-                                FieldValue::Identity(SafeIdentity::fingerprint(
-                                    relative.to_string_lossy().as_bytes(),
-                                )),
-                            )],
-                        );
-                    })?
-                else {
-                    return Ok(());
-                };
-                if !copied.insert(relative.to_path_buf()) {
-                    return Ok(());
-                };
-                let target = destination.join(relative);
-                let directory = target.parent().context("Staging path has no parent")?;
-                fs::create_dir_all(directory).with_context(|| {
-                    format!(
-                        "Cannot create deployment staging directory '{}'",
-                        directory.display()
-                    )
-                })?;
-                let expected_bytes = fs::metadata(&source)?.len();
-                let bytes = fs::copy(&source, &target).with_context(|| {
-                    format!(
-                        "Cannot stage deployment artifact '{}' from '{}' to '{}'",
-                        relative.display(),
-                        source.display(),
-                        target.display()
-                    )
-                })?;
-                ensure!(
-                    bytes == expected_bytes,
-                    "Report changed during deployment staging"
-                );
-                copied_bytes += bytes;
-                if copied.len() == dependency_count {
+        let destination_root = destination.canonicalize()?;
+        for (relative, root) in dependencies {
+            let source = artifact_source(root, &relative, false)
+                .inspect_err(|_| {
                     use crate::diagnostics::{record::*, runtime};
                     runtime::event(
                         Stage::SnapshotStaging,
-                        DiagnosticEvent::Decision,
-                        Severity::Info,
-                        [
-                            (Field::FileCount, FieldValue::Number(copied.len() as u64)),
-                            (Field::Bytes, FieldValue::Number(copied_bytes)),
-                        ],
+                        DiagnosticEvent::StageFinished,
+                        Severity::Error,
+                        [(
+                            Field::Artifact,
+                            FieldValue::Identity(SafeIdentity::fingerprint(
+                                relative.to_string_lossy().as_bytes(),
+                            )),
+                        )],
                     );
-                }
-                if copied.len() == 1
-                    || copied.len() == dependency_count
-                    || copied.len().is_multiple_of(50)
-                    || last_update.elapsed().as_secs() >= 1
-                {
-                    phase(&format!(
-                        "Staged {} of {dependency_count} report files ({:.2} MiB)",
-                        copied.len(),
-                        copied_bytes as f64 / (1024.0 * 1024.0)
-                    ));
-                    last_update = std::time::Instant::now();
-                }
-                Ok(())
-            };
-            for relative in dependencies {
-                copy(&relative, false)?;
+                })?
+                .context("Missing deployment artifact")?;
+            if Some(root) == stash.as_deref() {
+                ensure!(
+                    source == root.join(&relative),
+                    "Stashed artifact '{}' names a different directory entry",
+                    relative.display()
+                );
+            }
+            let target = destination_root.join(&relative);
+            let directory = target.parent().context("Staging path has no parent")?;
+            fs::create_dir_all(directory).with_context(|| {
+                format!(
+                    "Cannot create deployment staging directory '{}'",
+                    directory.display()
+                )
+            })?;
+            // Individually valid inventories from two roots may not fit together on NTFS.
+            // Reject the merge rather than writing through an existing directory/file alias.
+            #[cfg(windows)]
+            if local.is_some() {
+                ensure!(
+                    directory.canonicalize()? == directory && !target.try_exists()?,
+                    "Conflicting staged artifact spelling '{}'",
+                    relative.display()
+                );
+            }
+            let expected_bytes = fs::metadata(&source)?.len();
+            let bytes = fs::copy(&source, &target).with_context(|| {
+                format!(
+                    "Cannot stage deployment artifact '{}' from '{}' to '{}'",
+                    relative.display(),
+                    source.display(),
+                    target.display()
+                )
+            })?;
+            ensure!(
+                bytes == expected_bytes,
+                "Report changed during deployment staging"
+            );
+            copied_bytes += bytes;
+            copied += 1;
+            if copied == dependency_count {
+                use crate::diagnostics::{record::*, runtime};
+                runtime::event(
+                    Stage::SnapshotStaging,
+                    DiagnosticEvent::Decision,
+                    Severity::Info,
+                    [
+                        (Field::FileCount, FieldValue::Number(copied as u64)),
+                        (Field::Bytes, FieldValue::Number(copied_bytes)),
+                    ],
+                );
+            }
+            if copied == 1
+                || copied == dependency_count
+                || copied.is_multiple_of(50)
+                || last_update.elapsed().as_secs() >= 1
+            {
+                phase(&format!(
+                    "Staged {} of {dependency_count} report files ({:.2} MiB)",
+                    copied,
+                    copied_bytes as f64 / (1024.0 * 1024.0)
+                ));
+                last_update = std::time::Instant::now();
             }
         }
         let kept_ids = kept
@@ -1933,10 +1964,22 @@ fn stage_site_inner(
         }
         phase(&format!(
             "Verifying {} staged report files ({:.2} MiB)",
-            copied.len(),
+            copied,
             copied_bytes as f64 / (1024.0 * 1024.0)
         ));
-        crate::snapshot::artifact_inventory(destination, suite_ids, &kept_ids)
+        let inventory = crate::snapshot::artifact_inventory(destination, suite_ids, &kept_ids)?;
+        if let Some(copies) = local {
+            let superseded = copies.verify(destination, &inventory)?;
+            if !superseded.is_empty() {
+                // Updated provider hashes alone don't make a reused report's versioned URLs valid.
+                let (present, absent) = kept_ids
+                    .into_iter()
+                    .chain(suite_ids.iter().cloned())
+                    .partition::<Vec<_>, _>(|id| superseded.contains(id));
+                crate::snapshot::artifact_inventory(destination, &present, &absent)?;
+            }
+        }
+        Ok(inventory)
     })();
     let staged = match staged {
         Ok(staged) => staged,
@@ -1947,7 +1990,7 @@ fn stage_site_inner(
     };
     phase(&format!(
         "Staging complete: {} files ({:.2} MiB) for {} suites",
-        copied.len(),
+        copied,
         copied_bytes as f64 / (1024.0 * 1024.0),
         suite_ids.len()
     ));
@@ -3875,7 +3918,7 @@ mod tests {
             super::site_state::tests::summary("zeta"),
         ];
         let destination = root.path().join("merged");
-        let inventory = stage_site(&output, &["one".into()], &kept, &destination)?;
+        let inventory = stage_site(&output, &["one".into()], &kept, &destination, None)?;
         // Only generated suites are staged and inventoried.
         assert_eq!(inventory.suites.keys().collect::<Vec<_>>(), ["one"]);
         assert!(inventory.runs.contains_key("one"));
@@ -3918,12 +3961,12 @@ mod tests {
             vec![foreign],
         ] {
             let failed = root.path().join("failed");
-            assert!(stage_site(&output, &["one".into()], &invalid, &failed).is_err());
+            assert!(stage_site(&output, &["one".into()], &invalid, &failed, None).is_err());
             assert!(!failed.exists());
         }
         // Without kept suites, staging matches the original full-site staging.
         let full = root.path().join("full");
-        stage_site(&output, &["one".into()], &[], &full)?;
+        stage_site(&output, &["one".into()], &[], &full, None)?;
         assert_eq!(
             crate::snapshot::suite_summaries(&full)?,
             crate::snapshot::suite_summaries(&output)?

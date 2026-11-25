@@ -129,6 +129,10 @@ are historical evidence, not open implementation tasks.
   results, which can publish newer runs than the site had. Azure updates re-upload
   kept suites from local copies verified against the site's hashes and regenerate
   only those whose copies are missing or differ (`whole_site_` tests cover it).
+- Resolved in source: incremental stash, staging, and local recovery could merge
+  distinct Windows 8.3 names and accept the wrong bytes. The `incremental_`
+  regressions cover literal short filenames and directories, shared capture logs,
+  and recovery without overwriting a different file.
 - Open: Cloudflare sets no total content budget, so reports upload without image
   changes at any size and updates keep other suites by hash
   (`sites_above_two_gibibytes_deploy_without_a_content_budget`; evidence and the
@@ -141,8 +145,16 @@ are historical evidence, not open implementation tasks.
   expected lossless saving brings them all back, skipping the spread at 85
   (`suites_to_optimize`); the first, early spreading batch records no
   `BudgetRetry::last_spread`, so the next batch starts from one suite; the cache is
-  pruned only when opened, so one deployment can exceed 4 GiB; and no test drives
-  `generate_and_publish` through a refusal, regeneration, and publication.
+  pruned only when opened, so one deployment can exceed 4 GiB. A loopback test
+  now drives a refusal through retry, local reuse, and publication, but not
+  regeneration from missing local copies.
+- Resolved in the test-only Cloudflare budget path: a retry could publish
+  optimized files, then fail to restore the local report because it checked the
+  unoptimized files against the published hashes.
+- Resolved in source: recovery after a rejected deployment could replace a
+  regenerated shared log with stashed bytes. A mixed Cloudflare budget retry
+  could also install a local index naming a remote-only suite. The shared-log
+  and budget-retry regressions cover the local report after deployment returns.
 - Open: `live_create_update_and_delete_temporary_worker` fetches the published
   assets once, right after publication and without the client's retries. A fresh
   workers.dev hostname intermittently answers "unavailable" or stale bytes there
@@ -903,6 +915,20 @@ are historical evidence, not open implementation tasks.
 
 ## Image Viewer Parity (2026-10-13)
 
+- Resolved (2026-11-25): Wipe follows the pointer between whole-percent slider
+  stops at 25× in both viewers. Legacy error artwork, including file-backed Diff
+  images, no longer receives pixel sampling or grid lines. Rendering is separate
+  from capture status and approval. Unqualified legacy errors do not mark a
+  valid peer as artwork. Slider endpoints commit even after fractional hover;
+  desktop keyboard steps, Overlay accessibility and rendered opacity agree. A
+  legacy Diff alias inherits the failed Test's artwork within its own capture,
+  including Windows case variants. The native Diff retains file actions when
+  showing marked Test artwork, but it has no crosshair coordinates. Windows DOS
+  aliases resolve to the long name for marker lookup and publication; an output
+  alias collision leaves the prior report readable, with the original spelling
+  and bytes. Fresh snapshots, deployment staging and optimizer copies place
+  literal short filenames and suite directories before long siblings. Deployment protects flagged
+  images even without a capture-level error.
 - Resolved in source: desktop lacked wipe/overlay; the web viewer lacked drag-pan,
   fit-to-window, pointer-anchored zoom, and scoped image keyboard controls. Both
   now offer six comparison modes, no-upscale fits, actual size, 25–2500% zoom steps,

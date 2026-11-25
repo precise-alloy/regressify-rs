@@ -903,7 +903,16 @@ fn prepare_report_inner(
     phase("Creating an isolated temporary copy for report optimization");
     let mut copied_bytes = 0_u64;
     let mut last_update = Instant::now();
-    for (index, file) in files.iter().enumerate() {
+    // Only the initial filesystem copy needs short-name ordering. Keep `files`
+    // in byte-priority order for the lossless and quality passes below.
+    let copy_order = files.iter();
+    #[cfg(windows)]
+    let copy_order =
+        crate::snapshot::materialization_order(&source_root, copy_order.collect(), |f| {
+            &f.relative
+        })?
+        .into_iter();
+    for (index, file) in copy_order.enumerate() {
         check_deadline(deadline)?;
         let destination = temporary.path().join(&file.relative);
         fs::create_dir_all(
@@ -1199,6 +1208,45 @@ pub(super) mod tests {
             format!("report({});", json!({"id":"one","tests":tests})),
         )?;
         Ok(root)
+    }
+
+    #[test]
+    fn optimization_copy_keeps_distinct_short_and_long_files_and_directories() -> Result<()> {
+        let source = tempfile::tempdir()?;
+        let root = source.path().canonicalize()?;
+        fs::write(root.join("index.html"), "local report")?;
+        let large = sample_png()?;
+        // Force the long-named suite and long file to come first in byte-priority order.
+        let mut originals = Vec::new();
+        for (dir_index, dir) in ["RECORD~1", "RECORDEDCAPTURESUITE"].into_iter().enumerate() {
+            fs::create_dir(root.join(dir))?;
+            for (index, name) in ["RECORD~1.png", "RECORDEDCAPTUREWITHLONGNAME.png"]
+                .into_iter()
+                .enumerate()
+            {
+                let path = Path::new(dir).join(name);
+                let bytes = if dir_index == 1 && index == 1 {
+                    large.clone()
+                } else {
+                    lodepng::encode32(&[40 * (dir_index * 2 + index) as u8, 40, 60, 255], 1, 1)?
+                };
+                fs::write(root.join(&path), &bytes)?;
+                originals.push((path, bytes));
+            }
+        }
+        let total = inventory(&root)?.1;
+        let prepared = prepare(&root, total - 1, deadline(), None)?;
+        assert_ne!(prepared.path(), root);
+        for (path, original) in originals {
+            assert_eq!(fs::read(root.join(&path))?, original);
+            let optimized = fs::read(prepared.path().join(&path))?;
+            assert!(
+                lodepng::decode32(&optimized)?.buffer == lodepng::decode32(&original)?.buffer,
+                "Optimization copy changed the pixels of {}",
+                path.display()
+            );
+        }
+        Ok(())
     }
 
     #[test]

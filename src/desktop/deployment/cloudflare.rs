@@ -4222,7 +4222,7 @@ mod tests {
         )?;
         let staging = tempfile::tempdir()?;
         let root = staging.path().join("report");
-        let inventory = super::super::stage_site(source.path(), &suites, &[], &root)?;
+        let inventory = super::super::stage_site(source.path(), &suites, &[], &root, None)?;
         let summary = crate::snapshot::suite_summaries(&root)?.remove(0);
         let files = inventory.suites["one"]
             .iter()
@@ -4324,6 +4324,148 @@ mod tests {
             &super::super::KeptFiles::new(),
         )?;
         assert!(!manifest.files.contains_key(&format!("/{STATE_PATH}")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn budget_retry_restores_local_bytes_and_records_optimized_publication() -> Result<()> {
+        check_budget_retry_recovery(false).await
+    }
+
+    #[tokio::test]
+    async fn budget_retry_preserves_local_index_when_a_kept_suite_is_remote_only() -> Result<()> {
+        check_budget_retry_recovery(true).await
+    }
+
+    async fn check_budget_retry_recovery(remote_only: bool) -> Result<()> {
+        use super::super::{
+            DeployTargets, DeploymentClient,
+            incremental::{Prepared, ReportDeployment},
+            site_state::{self, Plan, STATE_PATH, SiteState},
+        };
+        use clap::Parser;
+
+        let (output, _previous_dir, previous) = staged_snapshot_with_state()?;
+        let staging = tempfile::tempdir()?;
+        let previous_state = SiteState::parse(&std::fs::read(previous.join(STATE_PATH))?)?;
+        let suite = &previous_state.suites["one"];
+        let manifest = Manifest::create(&previous, deadline())?;
+        let png_bytes: u64 = suite
+            .files
+            .iter()
+            .filter(|(p, _)| p.ends_with(".png"))
+            .map(|(_, f)| f.size)
+            .sum();
+        // All suites are kept initially. Only a retry that brings `one` back can fit.
+        let site = crate::test::browser_tests::Site::new(|request| {
+            let result = if request.url().ends_with("/assets-upload-session") {
+                json!({"jwt":"cached","buckets":[]})
+            } else if request.url().ends_with("/subdomain") {
+                json!({"enabled":false,"previews_enabled":false})
+            } else if request.method().as_str() == "PUT" {
+                json!({"id":"report-worker","has_assets":true})
+            } else {
+                let _ = request.respond(tiny_http::Response::empty(404));
+                return;
+            };
+            let _ = request.respond(tiny_http::Response::from_string(
+                json!({"success":true,"result":result}).to_string(),
+            ));
+        })?;
+        let mut client = client(&site.origin);
+        let mut kept = vec![suite.clone()];
+        if remote_only {
+            let other = site_state::tests::state(previous_state.provider, &["two"]);
+            kept.push(other.suites["two"].clone());
+        }
+        // A small shortfall brings back `one` but leaves the much smaller `two` on the site.
+        client.content_budget = Some(manifest.bytes - png_bytes / 20);
+        let settings = staging.path().join("settings.json");
+        let context = ReportDeployment {
+            job: serde_json::from_value(json!({
+                "target":{"id":"local-test","name":"Local test","provider":"cloudflareWorkers",
+                    "cloudflare":CloudflareTarget { workers_dev: Some(false), ..target() }},
+                "suiteIds":["one"],"catalogIds":["one"],"partialConfirmed":true,"mode":"update"
+            }))?,
+            root: output.path().into(),
+            output: output.path().into(),
+            settings: Some(settings.clone()),
+            title: None,
+            heading: None,
+            subheading: None,
+        };
+        DeployTargets {
+            targets: vec![context.job.target.clone()],
+            ..Default::default()
+        }
+        .save(&settings)?;
+        let index_paths = [
+            "index.html",
+            "_snapshot/data/manifest.json",
+            "_snapshot/status.json",
+            "_headers",
+        ];
+        if remote_only {
+            // A valid local-only comment makes premature copying of shared assets observable.
+            let headers = output.path().join("_headers");
+            std::fs::write(
+                &headers,
+                format!("{}# local policy\n", std::fs::read_to_string(&headers)?),
+            )?;
+        }
+        let local_index = || {
+            index_paths
+                .iter()
+                .map(|p| std::fs::read(output.path().join(p)))
+                .collect::<std::io::Result<Vec<_>>>()
+        };
+        let original_index = local_index()?;
+        if !remote_only {
+            // Only recovery can reinstall a complete locally available site.
+            std::fs::remove_file(output.path().join("index.html"))?;
+        }
+        let mut attempts = 0;
+        let outcome = context
+            .generate_and_publish(
+                Prepared {
+                    plan: Plan {
+                        kept: kept.clone(),
+                        ..Plan::default()
+                    },
+                    ..Prepared::default()
+                },
+                staging.path(),
+                &DeploymentClient::Cloudflare(client),
+                || {
+                    attempts += 1;
+                    Ok(crate::cli::Cli {
+                        root: output.path().into(),
+                        ..crate::cli::Cli::try_parse_from(["regressify", "snapshot"])?
+                    })
+                },
+            )
+            .await?;
+        assert!(attempts > 1);
+        assert!(!outcome.unchanged);
+        let served = site_state::load_local(&settings, &context.job.target.id)?
+            .context("published site state")?;
+        assert_ne!(suite.summary.report, served.suites["one"].summary.report);
+        if remote_only {
+            assert_eq!(served.suites["two"], kept[1]);
+            assert_eq!(
+                local_index()?,
+                original_index,
+                "do not expose a remote-only suite locally"
+            );
+        }
+        crate::snapshot::artifact_inventory(output.path(), &["one".into()], &[])?;
+        for (path, file) in &suite.files {
+            assert_eq!(
+                asset_hash(&std::fs::read(output.path().join(path))?, path),
+                file.hash,
+                "{path}"
+            );
+        }
         Ok(())
     }
 

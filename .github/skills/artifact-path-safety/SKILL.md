@@ -18,7 +18,10 @@ and [desktop workspace paths](../../../src/desktop/workspace.rs).
    must not become an arbitrary path or silently select a different root.
 1. Reuse the owning boundary's checks: components, canonical containment, regular
    file/directory type, symlink policy, and Windows reserved/trailing characters.
-   String prefixes and lexical normalization alone are insufficient.
+   String prefixes and lexical normalization alone are insufficient. Use the
+   checked canonical path for source identity and companion files. Preserve casing,
+   not DOS aliases, in published names. Check existing output files and directories
+   before treating a differing spelling as a case-only rename.
 1. Handle missing optional files separately from I/O errors. Revalidate at write,
    copy, delete, package, and open boundaries rather than trusting earlier UI input.
 1. Use same-directory temporary writes/copies. Preserve a valid destination on

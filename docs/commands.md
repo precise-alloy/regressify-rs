@@ -495,8 +495,8 @@ content above and below it. Within the band, the shorter image has no matching
 pixel and shows no crosshair. Alignment comes from the saved comparison, not an
 estimate based on image height or colors. Rerun Compare on an existing run, then
 regenerate and redeploy its snapshot to add alignment to older reports; no new
-capture is needed. Wipe follows mouse
-movement while no button is held; its slider and the overlay-opacity slider also
+capture is needed. Wipe follows the mouse precisely at every zoom when no button
+is held; its slider and the overlay-opacity slider use whole percentages and
 support keyboard and touch input. Hover, focus, or pin
 the Info icon for selectable/copyable diff statistics, capture details, URLs, and
 comparison or engine errors. Previous/next failure arrows on suite pages scroll to visible failed
@@ -510,6 +510,19 @@ timeouts. Pixel and dimension mismatches remain Failed comparisons, including
 dimension changes with zero pixel mismatch. Missing references and comparison
 processing failures also remain Failed, with their diagnostics labeled
 Comparison failed. A capture-error placeholder is not a successful screenshot.
+Snapshots identify placeholder artwork by image role so even an unmarked copy
+of the built-in error icon stays smooth and grid-free, without changing the result.
+If a legacy report uses its failed Test image as the Diff, both show the same
+artwork. Case-only aliases keep the Test's declared spelling. Windows DOS short
+aliases use the resolved long filename for both the public URL and capture-error
+marker lookup. A fresh snapshot keeps literal short names and their distinct
+long-named siblings, including suite directories, regardless of input order.
+Publication refuses to overwrite
+a different existing file through its DOS alias; rollback preserves the previous
+filename spelling as well as its bytes. Distinct files on a
+case-sensitive filesystem are not merged just because their names differ by case.
+A diagnostic such as `Navigation timed out` still counts as a capture error, but
+does not by itself hide the pixels or replace the thumbnail of a valid screenshot.
 Regenerate existing snapshots with `regressify snapshot` and redeploy hosted copies
 to update the UI and overview totals; no new capture run is required.
 

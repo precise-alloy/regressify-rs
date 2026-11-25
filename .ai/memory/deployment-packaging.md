@@ -1,6 +1,6 @@
 # Deployment Packaging
 
-Verified: 2026-11-13
+Verified: 2026-11-25
 
 - The [worker](../../src/desktop/worker.rs) regenerates selected snapshots, then
   stages only the active SPA manifest and its versioned dependencies. The shared
@@ -11,6 +11,16 @@ Verified: 2026-11-13
   optimization copy; Netlify is unchanged. The optimizer's quality floors and
   persistent cache are described in the
   [packaging skill](../../.github/skills/deployment-packaging/SKILL.md).
+- Windows fresh-tree copies share the snapshot path ordering for literal DOS names
+  at every depth; ordering temporary writes must not reorder compression candidates.
+  [Incremental deployment](../../src/desktop/deployment/incremental.rs) stages
+  the union of generated and stashed paths. Only an exact inventory overlap
+  can change a reused hash. Recovery uses the pre-upload records from staging:
+  a budgeted Cloudflare upload can rewrite `deployment.json` without changing
+  the original staged images or suite JSON.
+  A refused merge can leave a newer shared log in the generated output. Recovery
+  fills missing suite paths only and checks the staged index against local
+  dependencies before installing it, including suites kept by provider hash.
 - [Artifact reads](../../src/desktop/deployment.rs) require a canonical root for
   containment checks, including Windows extended-length paths. Cloudflare reads
   hosting policies from the original canonical staging root; its temporary
@@ -32,7 +42,7 @@ Verified: 2026-11-13
   owned by `src/test/data`, outside the generated snapshot directory.
 - Compression roles come from suite data. Post-compression updates image query
   versions, suite JSON versions, and the entry manifest without changing paths.
-  Optional capture `previews` are inventory dependencies and protected images;
+  Optional capture `previews` and per-role `placeholderImages` artwork stay lossless;
   snapshot tests cover their version refresh and suite rename/delete cleanup.
   Versions use `get_asset_version(bytes, 20)` (SHA-384/base64url). Regression coverage:
   `cargo test --features desktop --lib snapshot::site::tests` and

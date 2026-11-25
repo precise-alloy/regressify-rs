@@ -105,23 +105,58 @@ struct LoadedImage {
     width: usize,
     height: usize,
     path: Option<PathBuf>,
+    content: PreviewContent,
 }
 
-impl LoadedImage {
+#[derive(PartialEq, Eq)]
+enum PreviewContent {
+    Capture,
+    SavedErrorIcon,
+    Replacement,
+}
+
+#[derive(Default)]
+struct PreviewLoader {
+    // Reference, Test, then Diff are loaded in order for a single capture.
+    marked_test: Option<PathBuf>,
+}
+
+impl PreviewLoader {
     fn load(
+        &mut self,
         artifacts: &ReportArtifacts,
         root: &Path,
         label: &'static str,
         path: Option<&str>,
-    ) -> Result<Self> {
+    ) -> Result<LoadedImage> {
+        if label == "Test" {
+            self.marked_test = None;
+        }
         match path.map(|path| artifacts.read_image(root, path)) {
             Some(Ok((image, bytes))) => {
                 if matches!(label, "Reference" | "Test")
                     && crate::test::capture::read_error_marker(&image.path).is_some()
                 {
-                    return Self::error_placeholder();
+                    if label == "Test" {
+                        self.marked_test = Some(image.path);
+                    }
+                    return LoadedImage::error_placeholder();
                 }
-                Ok(Self {
+                if label == "Diff" && self.marked_test.as_ref() == Some(&image.path) {
+                    // Share the marked Test's display artwork, but keep the Diff's
+                    // validated file target. Unrelated Diff sidecars aren't capture evidence.
+                    return Ok(LoadedImage {
+                        path: Some(image.path),
+                        ..LoadedImage::error_placeholder()?
+                    });
+                }
+                Ok(LoadedImage {
+                    // Byte identity selects a sampler, not capture status or file actions.
+                    content: if bytes == crate::test::capture::error_icon_png() {
+                        PreviewContent::SavedErrorIcon
+                    } else {
+                        PreviewContent::Capture
+                    },
                     image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
                     width: image.width,
                     height: image.height,
@@ -134,12 +169,18 @@ impl LoadedImage {
                         .downcast_ref::<std::io::Error>()
                         .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
             {
-                Self::error_placeholder()
+                LoadedImage::error_placeholder()
             }
-            None if label == "Reference" => Self::error_placeholder(),
+            None if label == "Reference" => LoadedImage::error_placeholder(),
             Some(Err(error)) => Err(error),
             None => Err(anyhow!("No {} image", label.to_lowercase())),
         }
+    }
+}
+
+impl LoadedImage {
+    fn magnify_pixels(&self, zoom: f32) -> bool {
+        zoom > 1. && self.content == PreviewContent::Capture
     }
 
     fn error_placeholder() -> Result<Self> {
@@ -153,6 +194,7 @@ impl LoadedImage {
             width,
             height,
             path: None,
+            content: PreviewContent::Replacement,
         })
     }
 }
@@ -201,7 +243,7 @@ impl PreviewTexture {
     ) -> impl IntoElement {
         let texture = texture.clone();
         let source = image.image.clone();
-        let pixelated = zoom > 1. && image.path.is_some();
+        let pixelated = image.magnify_pixels(zoom);
         canvas(
             |_, _, _| (),
             move |bounds, (), window, cx| {
@@ -482,6 +524,7 @@ pub(super) struct ResultsPanel {
     preview_focus: FocusHandle,
     blend_focus: FocusHandle,
     blend: Entity<SliderState>,
+    fractional_wipe: Option<f32>,
     _blend_subscription: Subscription,
     previews: Vec<Preview>,
     image_menu_epoch: u64,
@@ -550,12 +593,26 @@ impl ResultsPanel {
         self.pointer_guides.active.set(None);
     }
 
-    fn select_image_mode(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn select_image_mode(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.preview_views.len() || (index >= 4 && !self.can_blend()) {
             return;
         }
         self.image_menu_epoch = self.image_menu_epoch.wrapping_add(1);
         self.image_mode = index;
+        let value = self.blend.read(cx).value().end();
+        // Overlay's accessible control and paint use the same whole percent. Preserve
+        // the finer split for the return trip only while the thumb is still at that stop.
+        if index == 5 && value != value.round() {
+            self.fractional_wipe = Some(value);
+            self.blend
+                .update(cx, |state, cx| state.set_value(value.round(), window, cx));
+        } else if index != 5
+            && let Some(wipe) = self.fractional_wipe.take()
+            && value == wipe.round()
+        {
+            self.blend
+                .update(cx, |state, cx| state.set_value(wipe, window, cx));
+        }
         self.pointer_guides.pan.borrow_mut().take();
         self.pointer_guides.active.set(None);
         cx.notify();
@@ -874,6 +931,7 @@ impl ResultsPanel {
             preview_focus: cx.focus_handle().tab_index(0),
             blend_focus: cx.focus_handle().tab_index(0),
             blend,
+            fractional_wipe: None,
             _blend_subscription: blend_subscription,
             previews: Vec::new(),
             image_menu_epoch: 0,
@@ -1210,23 +1268,27 @@ impl ResultsPanel {
         let load_gate = self.image_load_gate.clone();
         self.image_task = Some(cx.spawn_in(window, async move |view, cx| {
             let mut previews = Vec::with_capacity(images.len());
+            let mut loader = PreviewLoader::default();
             for (label, path) in images {
                 let root = root.clone();
                 let artifacts = artifacts.clone();
                 let gate = load_gate.clone();
                 let task = cx.background_executor().spawn(async move {
                     let _permit = gate.lock().await;
-                    let result = LoadedImage::load(&artifacts, &root, label, path.as_deref())
+                    let result = loader
+                        .load(&artifacts, &root, label, path.as_deref())
                         .map_err(|error| format!("{error:#}"));
-                    Preview { label, result }
+                    (Preview { label, result }, loader)
                 });
-                previews.push(task.await);
+                let (preview, next_loader) = task.await;
+                loader = next_loader;
+                previews.push(preview);
             }
-            let _ = view.update_in(cx, |this, _, cx| {
+            let _ = view.update_in(cx, |this, window, cx| {
                 if this.generation == generation {
                     this.previews = previews;
                     if this.image_mode >= 4 && !this.can_blend() {
-                        this.select_image_mode(3, cx);
+                        this.select_image_mode(3, window, cx);
                     }
                     *this.pointer_guides.alignment.borrow_mut() = alignment;
                     this.image_loading = false;
@@ -1638,6 +1700,10 @@ impl ResultsPanel {
             })
     }
 
+    fn blend_control_percent(&self, cx: &App) -> f32 {
+        self.blend.read(cx).value().end().round()
+    }
+
     fn image_scroll(&self) -> &ScrollHandle {
         if self.image_mode == 3 {
             &self.comparison_scroll
@@ -1862,6 +1928,9 @@ impl ResultsPanel {
                     .as_ref()
                     .and_then(|alignment| {
                         let diff = self.previews.get(2)?.result.as_ref().ok()?;
+                        if diff.content == PreviewContent::Replacement {
+                            return None;
+                        }
                         match index {
                             0 => alignment.reference_for_image(image.height, diff.height),
                             1 => alignment.test_for_image(image.height, diff.height),
@@ -1871,7 +1940,7 @@ impl ResultsPanel {
                     .unwrap_or_default();
                 let gap = gaps.first().copied();
                 *self.pointer_guides.geometry[index].borrow_mut() =
-                    image.path.is_some().then_some(PointerGeometry {
+                    (image.content != PreviewContent::Replacement).then_some(PointerGeometry {
                         canvas: (canvas_width, canvas_height),
                         gap,
                         gaps,
@@ -2029,14 +2098,14 @@ impl ResultsPanel {
                             cx.stop_propagation();
                         }
                     })
-                    .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, _, cx| {
+                    .on_click(cx.listener(move |this, event: &gpui_kit::ClickEvent, window, cx| {
                         // Mixed-button releases must not turn a context-menu gesture into pane activation.
                         if matches!(event, gpui_kit::ClickEvent::Mouse(click)
                             if click.down.button != MouseButton::Left || click.up.button != MouseButton::Left) {
                             return;
                         }
                         if this.image_mode == 3 {
-                            this.select_image_mode(index, cx);
+                            this.select_image_mode(index, window, cx);
                         } else if matches!(event, gpui_kit::ClickEvent::Mouse(click) if click.up.click_count == 2) {
                             let view = this.preview_views[this.image_mode];
                             if view.mode == ZoomMode::Manual && view.zoom == 1. {
@@ -2051,7 +2120,7 @@ impl ResultsPanel {
                                 && let Some(bounds) = this.pointer_guides.bounds[index].get()
                                 && bounds.size.width > px(0.)
                             {
-                                let value = (((event.position.x - bounds.left()) / bounds.size.width) * 100.).round().clamp(0., 100.);
+                                let value = (((event.position.x - bounds.left()) / bounds.size.width) * 100.).clamp(0., 100.);
                                 if this.blend.read(cx).value().end() != value {
                                     this.blend.update(cx, |state, cx| state.set_value(value, window, cx));
                                 }
@@ -2794,8 +2863,8 @@ impl ResultsPanel {
                             .underline()
                             .flex_shrink_0()
                             .selected_index(self.image_mode)
-                            .on_click(cx.listener(|this, index, _, cx| {
-                                this.select_image_mode(*index, cx);
+                            .on_click(cx.listener(|this, index, window, cx| {
+                                this.select_image_mode(*index, window, cx);
                             }))
                             .child(Tab::new().label("Reference"))
                             .child(Tab::new().label("Test"))
@@ -2871,6 +2940,7 @@ impl ResultsPanel {
             )
             .when(self.image_mode >= 4 && self.can_blend(), |content| {
                 let label = if self.image_mode == 4 { "Wipe position" } else { "Test image opacity" };
+                let readout = format!("{}%", self.blend_control_percent(cx));
                 content.child(div().id("comparison-blend-controls").role(Role::Group)
                     .aria_label(label).test_support().flex().items_center().gap_3().px_3().py_1()
                     .flex_shrink_0().child(div().text_sm().child(if self.image_mode == 4 { "Wipe" } else { "Opacity" }))
@@ -2886,7 +2956,7 @@ impl ResultsPanel {
                             if !this.blend_focus.is_focused(window)
                                 || event.keystroke.modifiers != Modifiers::default()
                                 || gpui_kit::base::GlobalState::is_in_deferred_context(cx) { return; }
-                            let value = this.blend.read(cx).value().end();
+                            let value = this.blend_control_percent(cx);
                             let next = match event.keystroke.key.as_str() {
                                 "left" | "down" => value - 1.,
                                 "right" | "up" => value + 1.,
@@ -2900,8 +2970,8 @@ impl ResultsPanel {
                         }))
                         .child(Slider::new(&self.blend)))
                     .child(div().id("comparison-blend-value").role(Role::Status)
-                        .aria_label(format!("{:.0}%", self.blend.read(cx).value().end())).test_support()
-                        .w(px(40.)).text_sm().child(format!("{:.0}%", self.blend.read(cx).value().end()))))
+                        .aria_label(readout.clone()).test_support()
+                        .w(px(40.)).text_sm().child(readout)))
             })
             .children(
                 test.and_then(|test| test.pair.engine_error_msg.as_ref())
@@ -3089,13 +3159,29 @@ mod pointer_tests {
         .unwrap();
         let catalog = super::Catalog::load(&root).unwrap();
         let artifacts = catalog.reports[0].artifacts();
-        let diff =
-            super::LoadedImage::load(&artifacts, &root, "Diff", Some("diff-error.png")).unwrap();
+        let mut loader = super::PreviewLoader::default();
+        let diff = loader
+            .load(&artifacts, &root, "Diff", Some("diff-error.png"))
+            .unwrap();
         let shared = super::LoadedImage::error_placeholder().unwrap();
+        // The same artwork also occurs as a file-backed Diff or in older unmarked captures.
+        for label in ["Reference", "Test", "Diff"] {
+            let icon = loader
+                .load(&artifacts, &root, label, Some("diff-error.png"))
+                .unwrap();
+            assert!(
+                icon.path.is_some(),
+                "Artwork alone is not a capture failure"
+            );
+            assert!(
+                !icon.magnify_pixels(25.),
+                "{label} artwork should stay smooth"
+            );
+        }
         for label in ["Reference", "Test"] {
-            let preview =
-                super::LoadedImage::load(&artifacts, &root, label, Some("legacy-error.png"))
-                    .unwrap();
+            let preview = loader
+                .load(&artifacts, &root, label, Some("legacy-error.png"))
+                .unwrap();
             assert_eq!((preview.width, preview.height), (diff.width, diff.height));
             assert_eq!(
                 (preview.width, preview.height),
@@ -3103,16 +3189,34 @@ mod pointer_tests {
             );
             assert!(preview.path.is_none());
         }
+        let aliased_diff = loader
+            .load(&artifacts, &root, "Diff", Some("legacy-error.png"))
+            .unwrap();
+        assert_eq!(aliased_diff.path, Some(legacy_path.canonicalize().unwrap()));
+        assert!(!aliased_diff.magnify_pixels(25.));
+        assert_eq!(aliased_diff.image.bytes(), shared.image.bytes());
+        std::fs::write(html.join("distinct.png"), &legacy).unwrap();
+        let distinct = loader
+            .load(&artifacts, &root, "Diff", Some("distinct.png"))
+            .unwrap();
+        assert!(distinct.magnify_pixels(25.));
+        assert_eq!(distinct.image.bytes(), legacy);
         assert!(std::fs::read(&legacy_path).unwrap() == legacy);
         std::fs::write(
             crate::test::capture::error_marker_path(&legacy_path),
             r#"{"error":false,"message":""}"#,
         )
         .unwrap();
-        let valid =
-            super::LoadedImage::load(&artifacts, &root, "Test", Some("legacy-error.png")).unwrap();
+        let valid = loader
+            .load(&artifacts, &root, "Test", Some("legacy-error.png"))
+            .unwrap();
         assert_eq!((valid.width, valid.height), (1, 1));
         assert!(valid.path.is_some());
+        assert!(valid.magnify_pixels(25.));
+        let unmarked_alias = loader
+            .load(&artifacts, &root, "Diff", Some("legacy-error.png"))
+            .unwrap();
+        assert!(unmarked_alias.magnify_pixels(25.));
     }
 
     #[test]
@@ -3132,21 +3236,23 @@ mod pointer_tests {
         let catalog = super::Catalog::load(&root).unwrap();
         let artifacts = catalog.reports[0].artifacts();
         let placeholder = lodepng::decode32(crate::test::capture::error_icon_png()).unwrap();
+        let mut loader = super::PreviewLoader::default();
 
         for path in [None, Some("../bitmaps_reference/missing.png")] {
-            let image = super::LoadedImage::load(&artifacts, &root, "Reference", path).unwrap();
+            let image = loader.load(&artifacts, &root, "Reference", path).unwrap();
             assert_eq!(
                 (image.width, image.height),
                 (placeholder.width, placeholder.height)
             );
             assert!(image.path.is_none());
             for label in ["Test", "Diff"] {
-                assert!(super::LoadedImage::load(&artifacts, &root, label, path).is_err());
+                assert!(loader.load(&artifacts, &root, label, path).is_err());
             }
         }
         for label in ["Reference", "Test", "Diff"] {
-            let image =
-                super::LoadedImage::load(&artifacts, &root, label, Some("valid.png")).unwrap();
+            let image = loader
+                .load(&artifacts, &root, label, Some("valid.png"))
+                .unwrap();
             assert_eq!((image.width, image.height), (1, 1));
             assert_eq!(
                 image.path,
@@ -3158,7 +3264,7 @@ mod pointer_tests {
             ("/absolute.png", "relative file path"),
             ("../../../outside.png", "escapes the output directory"),
         ] {
-            let error = match super::LoadedImage::load(&artifacts, &root, "Reference", Some(path)) {
+            let error = match loader.load(&artifacts, &root, "Reference", Some(path)) {
                 Ok(_) => panic!("Invalid reference must not become a placeholder: {path}"),
                 Err(error) => error,
             };
@@ -3309,6 +3415,73 @@ mod pointer_tests {
                     assert_eq!(window.find("comparison-blend-value").label(), Some("25%"));
                     let divider = window.find("comparison-wipe-divider").bounds();
                     assert!((divider.left() - pointer.x).abs() <= px(1.));
+                    window.click("actual-size", cx);
+                    for _ in 0..16 {
+                        window.click("zoom-in", cx);
+                    }
+                    assert_eq!(window.find("zoom-value").label(), Some("2500.0%"));
+                    let pane = window.find(("image-scroll", 0_usize)).bounds();
+                    for dx in [123., 125., 150.] {
+                        let pointer = pane.origin + point(px(dx), px(20.));
+                        window.dispatch_event(
+                            gpui_kit::MouseMoveEvent {
+                                position: pointer,
+                                ..Default::default()
+                            }
+                            .to_platform_input(),
+                            cx,
+                        );
+                        window.render_frame(cx);
+                        let split = window.find("comparison-wipe-divider").bounds().left();
+                        assert!(
+                            (split - pointer.x).abs() <= px(1.),
+                            "split={split}, x={}",
+                            pointer.x
+                        );
+                    }
+                    // At 25x, 150 pixels on this canvas is exactly half a percent.
+                    assert_eq!(results.read(cx).blend.read(cx).value().end(), 0.5);
+                    assert_eq!(window.find("comparison-blend-value").label(), Some("1%"));
+                    window.within("image-modes").click(5_usize, cx);
+                    assert_eq!(window.find("comparison-blend-value").label(), Some("1%"));
+                    {
+                        use gpui_kit::{
+                            Element as _, IntoElement as _, RenderOnce as _, Role, accesskit::Node,
+                        };
+                        let state = &results.read(cx).blend;
+                        assert_eq!(
+                            window.find(("slider", state.entity_id())).role(),
+                            Some(Role::Slider)
+                        );
+                        // Kit's observation exposes text values, not numeric ranges. Read the
+                        // AccessKit projection of the base slider bound to the mounted control.
+                        let mut node = Node::new(Role::Slider);
+                        gpui_kit::base::Slider::new(state)
+                            .render(window, cx)
+                            .into_element()
+                            .write_a11y_info(&mut node);
+                        assert_eq!(node.numeric_value(), Some(1.));
+                    }
+                    window.within("image-modes").click(4_usize, cx);
+                    let split = window.find("comparison-wipe-divider").bounds().left();
+                    assert!((split - pane.left() - px(150.)).abs() <= px(1.));
+                    let slider_focus = results.read(cx).blend_focus.clone();
+                    window.focus(&slider_focus, cx);
+                    window.press("right", cx);
+                    assert_eq!(window.find("comparison-blend-value").label(), Some("2%"));
+                    window.within("image-modes").click(5_usize, cx);
+                    window.click("comparison-blend-slider", cx);
+                    let edited_opacity = results.read(cx).blend.read(cx).value().end();
+                    assert!(
+                        edited_opacity > 2.,
+                        "Clicking the track must move the thumb"
+                    );
+                    window.within("image-modes").click(4_usize, cx);
+                    assert_eq!(
+                        results.read(cx).blend.read(cx).value().end(),
+                        edited_opacity
+                    );
+                    window.click("fit-image", cx);
                 }
                 window.click(("image-content", 0_usize), cx);
                 window.press("1", cx);
@@ -5311,6 +5484,72 @@ mod pointer_tests {
 
     #[cfg(feature = "gui-tests")]
     #[gpui_kit::test]
+    async fn crosshairs_ignore_substituted_diff_even_when_it_has_a_file_target(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::AppContext;
+        use gpui_kit::test::{TestAppContextExt, TestWindowExt};
+        use std::time::Duration;
+        let directory = tempfile::tempdir().unwrap();
+        let run = directory
+            .path()
+            .join(".regressify/ui-test/bitmaps_test/run-1");
+        std::fs::create_dir_all(&run).unwrap();
+        // The genuine Reference happens to contain the icon bytes; its own coordinates are valid.
+        std::fs::write(
+            run.join("reference.png"),
+            crate::test::capture::error_icon_png(),
+        )
+        .unwrap();
+        std::fs::write(
+            run.join("test.png"),
+            lodepng::encode32(&[210_u8, 40, 40, 255], 1, 1).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            run.join("test.png.error.json"),
+            r#"{"error":true,"message":"failed"}"#,
+        )
+        .unwrap();
+        std::fs::write(run.join("report.json"), serde_json::to_vec(&serde_json::json!({
+            "id": "ui-test", "tests": [{"status":"fail","pair":{"label":"Aliased Diff",
+                "reference":"../bitmaps_test/run-1/reference.png","test":"../bitmaps_test/run-1/test.png",
+                "diffImage":"../bitmaps_test/run-1/test.png"}}]
+        })).unwrap()).unwrap();
+        let (handle, view) = crate::desktop::ui::tests::editor(cx, directory.path());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.within("workbench-tabs").click(2_usize, cx);
+        })
+        .unwrap();
+        cx.wait_for(handle.into(), Duration::from_secs(5), |window, _| {
+            window.try_find(("image-details", 2_usize)).is_some()
+        })
+        .await;
+        cx.update_window(handle.into(), |_, window, cx| {
+            let results = view.read(cx).results.clone();
+            let guides = results.read(cx).pointer_guides.clone();
+            assert_eq!(
+                results.read(cx).previews[2].result.as_ref().unwrap().path,
+                Some(run.join("test.png").canonicalize().unwrap())
+            );
+            for source in [0_usize, 1, 2] {
+                window.hover(("image-scroll", source), cx);
+                window.render_frame(cx);
+                for target in 0..3 {
+                    assert_eq!(
+                        guides.position(target, window.mouse_position()).is_some(),
+                        source == 0 && target == 0,
+                        "source={source}, target={target}"
+                    );
+                }
+            }
+        })
+        .unwrap();
+    }
+
+    #[cfg(feature = "gui-tests")]
+    #[gpui_kit::test]
     async fn crosshairs_follow_either_pane_and_clear_on_exit(cx: &mut gpui_kit::TestAppContext) {
         use gpui_kit::test::{TestAppContextExt, TestWindowExt};
         use gpui_kit::{AppContext, InputEvent as _};
@@ -5730,6 +5969,7 @@ mod pointer_tests {
                 }
                 window.render_frame(cx);
                 assert_eq!(window.find("zoom-value").label(), Some("2500.0%"));
+                assert_eq!(window.find("zoom-in").disabled(), Some(true));
                 window.click("zoom-in", cx);
                 results.update(cx, |panel, cx| panel.step_zoom(true, cx));
                 window.render_frame(cx);
@@ -5752,7 +5992,6 @@ mod pointer_tests {
                     .expect("2000% tile should be cached");
                 assert!(window.has_image_atlas_entry(&tile));
                 let weak = Arc::downgrade(&tile);
-                drop(tile);
                 results.update(cx, |panel, cx| panel.clear(window, cx));
                 assert!(
                     results.read(cx).preview_textures[1]
@@ -5760,9 +5999,7 @@ mod pointer_tests {
                         .pixelated
                         .is_empty()
                 );
-                if let Some(alive) = weak.upgrade() {
-                    assert!(!window.has_image_atlas_entry(&alive));
-                }
+                assert!(!window.has_image_atlas_entry(&tile));
                 window.render_frame(cx);
                 weak
             })
@@ -5811,6 +6048,7 @@ mod pointer_tests {
                         width: 1,
                         height: 1,
                         path: Some(directory.path().join("fixture.png")),
+                        content: super::PreviewContent::Capture,
                     }),
                 });
             });
@@ -5830,15 +6068,20 @@ mod pointer_tests {
                     .tile((0, 0))
                     .expect("Magnified tile should be populated before release");
                 assert!(window.has_image_atlas_entry(&tile));
-                let weak = Arc::downgrade(&tile);
-                drop(tile);
                 drop(panel);
-                weak
+                tile
             })
             .unwrap();
         cx.run_until_parked();
+        // The atlas is keyed by image ID; dropping the CPU frame alone doesn't prove eviction.
+        cx.update_window(host.into(), |_, window, _| {
+            assert!(!window.has_image_atlas_entry(&tile));
+        })
+        .unwrap();
+        let released = Arc::downgrade(&tile);
+        drop(tile);
         assert!(
-            tile.upgrade().is_none(),
+            released.upgrade().is_none(),
             "Releasing Results must free magnified preview tiles"
         );
         cx.update(|cx| {

@@ -28,6 +28,7 @@ description: 'Use when changing deployment staging, report asset collection, ima
 
 ```sh
 cargo test --features desktop --lib desktop::deployment::package::tests
+cargo test --features desktop --lib desktop::deployment::incremental::tests
 cargo test --features desktop --lib desktop::deployment::tests
 cargo test --features desktop --lib desktop::deployment::netlify::tests
 cargo test --features desktop --lib desktop::deployment::cloudflare::tests
@@ -36,6 +37,18 @@ cargo test --features desktop --lib snapshot::site::tests
 ```
 
 Cover selected suites only, symlinks, malformed paths/hashes, missing index/images, source preservation, file/size limits, and failed/cancelled staging. Assert exact ZIP entry sets with stale generated files, captures, state, and unselected suites present. Test unchanged filenames after compression, cascading versions, identical bytes at different image paths, and duplicate path/version conflicts.
+
+Protect Reference/Test files flagged by `placeholderImages` even without a capture
+error. A valid peer keeps its ordinary priority unless its path also has a protected role.
+For fresh Windows staging and optimizer copies, use the same component-aware
+materialization order as snapshot publication. Keep compression passes in byte-priority order.
+Order generated and locally reused paths together. Only an exact shared inventory
+path may supersede reused bytes. Verify recovery against the records produced by
+staging, not the provider's rewritten upload state. Use the original site hashes
+when staging did not finish.
+Restore missing suite files without replacing newer shared logs. Check a
+candidate index against the suite files in the output before replacing local
+shared files; the remote manifest can legitimately include remote-only suites.
 
 ## Maintain
 
