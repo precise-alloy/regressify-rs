@@ -61,6 +61,38 @@ type View = {
 const fallback: Size = { width: 640, height: 400 };
 const cssLength = (value: number | string) => (typeof value === "number" ? `${value}px` : value);
 
+type SpanLimit = { direction: Point; span: number };
+const pinchThreshold = 8;
+
+function pinchStep(
+  scale: number,
+  minimum: number,
+  previousSpan: number,
+  span: number,
+  movement: [Point, Point],
+  limit: SpanLimit | undefined,
+) {
+  // A single clipped finger packet can be half of a parallel pan. Keep just its
+  // unmatched overtravel until the peer catches up; a genuine reversal starts
+  // from the last span, not from an overshoot beyond the zoom limit.
+  const follows = (p: Point, d: Point) => p.x * d.x + p.y * d.y >= 0;
+  const paired = limit && movement.every((p) => follows(p, limit.direction));
+  const reference = paired ? limit.span : previousSpan;
+  const raw = (scale * span) / reference;
+  const next = Math.max(minimum, Math.min(maxZoom, raw));
+  let held: SpanLimit | undefined;
+  if (raw !== next) {
+    if (paired) held = limit;
+    else if (!limit) {
+      const still = (p: Point) => p.x === 0 && p.y === 0;
+      const finger = still(movement[1]) ? 0 : still(movement[0]) ? 1 : undefined;
+      if (finger !== undefined)
+        held = { direction: movement[finger], span: (reference * next) / scale };
+    }
+  }
+  return { next, held, reference };
+}
+
 function anchorTarget(scroll: HTMLElement, target: Point | null) {
   return target ?? { x: scroll.clientWidth / 2, y: scroll.clientHeight / 2 };
 }
@@ -226,10 +258,11 @@ export function ComparisonViewer({
     startDistance: number;
     lastDistance: number;
     lastCenter: Point;
+    points: [Point, Point?];
+    limit?: SpanLimit;
     minimum: number;
     currentScale: number;
     anchors: Anchor[];
-    pinched: boolean;
   } | null>(null);
   const pan = useRef<{
     pointer: number | null;
@@ -503,26 +536,11 @@ export function ComparisonViewer({
   };
   const applyScale = (next: number, targets: Anchor[], bounded: boolean) => {
     anchors.current = targets;
-    let horizontalPosition = targets.length ? undefined : view?.horizontalPosition;
-    let verticalPosition = targets.length ? undefined : view?.verticalPosition;
-    const first = bounded && mode === "side" ? targets[0] : undefined;
-    if (first) {
-      const { x, y } = anchorTarget(first.scroll, first.target);
-      const freeWidth = (viewport.width || first.scroll.clientWidth) - size.width * next;
-      const freeHeight = (viewport.height || first.scroll.clientHeight) - size.height * next;
-      if (freeWidth > 0) {
-        horizontalPosition = Math.max(0, Math.min(1, (x - first.imageX * next) / freeWidth));
-      }
-      if (freeHeight > 0) {
-        verticalPosition = Math.max(0, Math.min(1, (y - first.imageY * next) / freeHeight));
-      }
-    }
     const padding =
       bounded && mode === "side"
         ? undefined
         : targets.map(({ scroll, target, imageX, imageY }) => {
             if (bounded) {
-              // Container units use the new lane's content box, excluding any new scrollbar.
               const pad = (
                 axis: "w" | "h",
                 coord: number | undefined,
@@ -545,15 +563,21 @@ export function ComparisonViewer({
             return {
               left: Math.max(0, left),
               top: Math.max(0, top),
-              right: Math.max(0, bounds.width - 2 * scroll.clientLeft - left - size.width * next),
-              bottom: Math.max(0, bounds.height - 2 * scroll.clientTop - top - size.height * next),
+              right:
+                left < 0
+                  ? Math.max(0, bounds.width - 2 * scroll.clientLeft - left - size.width * next)
+                  : 0,
+              bottom:
+                top < 0
+                  ? Math.max(0, bounds.height - 2 * scroll.clientTop - top - size.height * next)
+                  : 0,
             };
           });
     setView({
       fit: "manual",
       scale: next,
-      horizontalPosition,
-      verticalPosition,
+      horizontalPosition: targets.length ? undefined : view?.horizontalPosition,
+      verticalPosition: targets.length ? undefined : view?.verticalPosition,
       padding: targets.length ? padding : undefined,
     });
   };
@@ -583,6 +607,32 @@ export function ComparisonViewer({
   // biome-ignore lint/correctness/useExhaustiveDependencies: Layout inputs change the DOM bounds and native scroll clamping read here.
   useLayoutEffect(() => {
     const pending = view?.fit === "manual" ? anchors.current : [];
+    const first = pending[0];
+    if (mode === "side" && first && view && !view.padding) {
+      // Removing or adding a native scrollbar changes the visible center. Derive
+      // placement only after the new image size has been laid out, before paint.
+      const width = Math.min(...pending.map((a) => a.scroll.clientWidth));
+      const height = Math.min(...pending.map((a) => a.scroll.clientHeight));
+      const target = anchorTarget(first.scroll, first.target);
+      const fraction = (at: number, free: number) =>
+        free > 0 ? Math.max(0, Math.min(1, at / free)) : undefined;
+      const horizontalPosition = fraction(
+        target.x - first.imageX * scale,
+        width - size.width * scale,
+      );
+      const verticalPosition = fraction(
+        target.y - first.imageY * scale,
+        height - size.height * scale,
+      );
+      if (width !== viewport.width || height !== viewport.height) setViewport({ width, height });
+      if (
+        horizontalPosition !== view.horizontalPosition ||
+        verticalPosition !== view.verticalPosition
+      ) {
+        setView({ ...view, horizontalPosition, verticalPosition });
+        return;
+      }
+    }
     anchors.current = [];
     for (const anchor of pending) {
       if (!anchor.element.isConnected) continue;
@@ -591,11 +641,11 @@ export function ComparisonViewer({
       const position = localPoint(scroll, { x: bounds.left, y: bounds.top });
       const target = anchorTarget(scroll, anchor.target);
       scroll.scrollLeft =
-        mode === "side" && view?.horizontalPosition !== undefined
+        view?.horizontalPosition !== undefined
           ? 0
           : scroll.scrollLeft + position.x + anchor.imageX * scale - target.x;
       scroll.scrollTop =
-        mode === "side" && view?.verticalPosition !== undefined
+        view?.verticalPosition !== undefined
           ? 0
           : scroll.scrollTop + position.y + anchor.imageY * scale - target.y;
     }
@@ -604,7 +654,7 @@ export function ComparisonViewer({
       scrollPositions.current.set(pane, { left: pane.scrollLeft, top: pane.scrollTop });
     }
     const activeTouch = touchGesture.current;
-    if (activeTouch?.pinched && activeTouch.scroll.isConnected) {
+    if (activeTouch?.anchors.length && activeTouch.scroll.isConnected) {
       const target = localPoint(activeTouch.scroll, activeTouch.lastCenter);
       activeTouch.anchors = Array.from(
         canvas.current?.querySelectorAll<HTMLElement>(".image-pane") ?? [],
@@ -655,9 +705,15 @@ export function ComparisonViewer({
       left: scroll.scrollLeft,
       top: scroll.scrollTop,
       imageLeft: image ? image.left - bounds.left - scroll.clientLeft : 0,
-      horizontalSpace: mode === "side" && image ? Math.max(0, viewport.width - image.width) : 0,
+      horizontalSpace:
+        mode === "side" && image && scroll.scrollWidth <= scroll.clientWidth
+          ? Math.max(0, viewport.width - image.width)
+          : 0,
       imageTop: image ? image.top - bounds.top - scroll.clientTop : 0,
-      verticalSpace: mode === "side" && image ? Math.max(0, viewport.height - image.height) : 0,
+      verticalSpace:
+        mode === "side" && image && scroll.scrollHeight <= scroll.clientHeight
+          ? Math.max(0, viewport.height - image.height)
+          : 0,
       moved: false,
       scroll,
     };
@@ -717,6 +773,10 @@ export function ComparisonViewer({
       : { x: a.clientX, y: a.clientY };
     const distance = b ? Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) : 0;
     const ids = touches.map((t) => t.identifier);
+    const points: [Point, Point?] = [
+      { x: a.clientX, y: a.clientY },
+      b && { x: b.clientX, y: b.clientY },
+    ];
     if (
       !previous ||
       previous.ids.length !== ids.length ||
@@ -733,44 +793,67 @@ export function ComparisonViewer({
       touchGesture.current = {
         scroll,
         ids,
+        points,
         startDistance: distance,
         lastDistance: distance,
         lastCenter: center,
         minimum: Math.min(scale, 0.25),
         currentScale: scale,
         anchors: [],
-        pinched: false,
       };
       return;
     }
     if (event.type !== "touchmove") return;
+    const priorPoints = previous.points;
+    previous.points = points;
     if (
       !b ||
-      (!previous.pinched &&
-        (Math.abs(distance - previous.startDistance) < 8 ||
-          (fit !== "manual" && scale <= 0.25 && distance <= previous.startDistance)))
+      !priorPoints[1] ||
+      (!previous.anchors.length &&
+        !previous.limit &&
+        Math.abs(distance - previous.startDistance) < pinchThreshold)
     ) {
       movePan(center);
       previous.lastCenter = center;
-      if (fit !== "manual" && scale <= 0.25 && distance < previous.startDistance) {
-        previous.startDistance = distance;
-        previous.lastDistance = distance;
-      }
       return;
     }
-    if (!previous.pinched) {
-      previous.pinched = true;
-      previous.anchors = readAnchors(localPoint(scroll, previous.lastCenter));
+    if (!previous.anchors.length) {
+      previous.currentScale = scale;
+      previous.minimum = Math.min(scale, 0.25);
     }
-    setPanning(true);
-    const target = localPoint(scroll, center);
-    const next = Math.max(
+    const changed = Array.from(event.changedTouches);
+    const delta = (contact: typeof a, prior: Point) =>
+      changed.some((t) => t.identifier === contact.identifier)
+        ? { x: contact.clientX - prior.x, y: contact.clientY - prior.y }
+        : { x: 0, y: 0 };
+    const { next, held, reference } = pinchStep(
+      previous.currentScale,
       previous.minimum,
-      Math.min(maxZoom, (previous.currentScale * distance) / previous.lastDistance),
+      previous.lastDistance,
+      distance,
+      [delta(a, priorPoints[0]), delta(b, priorPoints[1])],
+      previous.limit,
     );
+    previous.limit = held;
+    if (
+      !previous.anchors.length &&
+      fit !== "manual" &&
+      (next === scale || (scale <= 0.25 && distance - reference < pinchThreshold))
+    ) {
+      // A clipped first move is still a fitted pan. Keep the recognition slop
+      // until spread actually changes zoom, including on a peer's catch-up packet.
+      previous.startDistance = previous.lastDistance = next === scale ? distance : reference;
+      movePan(center);
+      previous.lastCenter = center;
+      return;
+    }
     previous.currentScale = next;
     previous.lastDistance = distance;
+    if (!previous.anchors.length)
+      previous.anchors = readAnchors(localPoint(scroll, previous.lastCenter));
     previous.lastCenter = center;
+    setPanning(true);
+    const target = localPoint(scroll, center);
     applyScale(
       next,
       previous.anchors.map((anchor) => ({ ...anchor, target })),
@@ -1036,7 +1119,14 @@ export function ComparisonViewer({
         onTouchStart={updateTouches}
         onTouchMove={updateTouches}
         onTouchEnd={updateTouches}
-        onTouchCancel={cancelPan}
+        onTouchCancel={(event) => {
+          const gesture = touchGesture.current;
+          if (
+            gesture &&
+            Array.from(event.changedTouches).some((t) => gesture.ids.includes(t.identifier))
+          )
+            cancelPan();
+        }}
         onContextMenu={cancelPan}
         onDoubleClick={(event) => {
           if (event.button !== 0) return;
@@ -1122,7 +1212,7 @@ export function ComparisonViewer({
                 onPointerCancel={clearCrosshair}
               >
                 <div
-                  className="comparison-stage [overflow-anchor:none]"
+                  className={`comparison-stage [overflow-anchor:none] ${typeof anchorPadding?.left === "string" ? "print:w-auto! print:p-0!" : ""}`}
                   style={{
                     width: padding
                       ? `calc(${size.width * scale + padding.right}px + ${cssLength(padding.left)})`

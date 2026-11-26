@@ -498,6 +498,8 @@ Image comparison uses bounded image panes with independent canvas scrolling.
 Unmodified mouse-wheel and trackpad scrolling move the active image pane. Drag
 one finger to pan, or pan and pinch with two fingers in one lane. Lifting one
 finger resumes dragging; the gesture does not zoom the page or adjust the blend slider.
+A pinch starts from the current fitted size even if the lane was resized after
+touch-down. Dragging after pointer-wheel zoom preserves its padded scroll range.
 Left-drag pans that pane using pointer capture, without changing zoom or wipe
 position; release, cancellation, lost capture, blur, or a view change clears the
 gesture. Ctrl/Cmd+wheel selects the next zoom preset around the pointer; zoom

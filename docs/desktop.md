@@ -2360,8 +2360,10 @@ Fit views keep smooth scaling. Fit area remains exact and can
 shrink below 25%; zooming out at that size leaves the image fitted.
 Zoom in/out and the `+`/`-` keys keep the center of each visible lane fixed until
 an image edge is reached. Pinch a supported touchpad for continuous zoom around
-the gesture position; slide two fingers to pan. On Windows these native gestures
-come from a precision touchpad, not a direct touchscreen.
+the gesture position; slide two fingers to pan. On Windows, place the pointer
+over the part of the image lane you want to inspect, then pinch on a precision
+touchpad. A pinch starting over the toolbar does not zoom a lane. Direct
+touchscreen pinch is supported in web reports, not the Windows desktop app.
 Ctrl/Cmd+mouse wheel keeps the image point under the pointer fixed. Left-button
 dragging pans images that exceed the viewport; ordinary wheel scrolling,
 scrollbars, and actual-size reset remain available.
