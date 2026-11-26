@@ -3627,6 +3627,260 @@ test("image viewer drags underfilled canvases diagonally without overflow", asyn
   });
 });
 
+// Explicit per-contact packets also exercise partial touchcancel, which CDP only sends for all fingers.
+type LaneContact = { id: number; lane: number; x: number; y: number };
+async function laneTouches(
+  page: Page,
+  type: "touchstart" | "touchmove" | "touchcancel" | "touchend",
+  contacts: LaneContact[],
+  changed: LaneContact[] = contacts,
+) {
+  await page.locator(".image-pane").evaluateAll(
+    (panes, { type, contacts, changed }) => {
+      const touch = (c: LaneContact) => {
+        const target = panes[c.lane];
+        if (!target) throw new Error("Missing touch target lane");
+        const box = target.getBoundingClientRect();
+        return new Touch({
+          identifier: c.id,
+          target,
+          clientX: box.left + c.x,
+          clientY: box.top + c.y,
+        });
+      };
+      const changedTouches = changed.map(touch);
+      const target = changedTouches[0]?.target;
+      if (!target) throw new Error("Missing changed touch");
+      target.dispatchEvent(
+        new TouchEvent(type, { bubbles: true, touches: contacts.map(touch), changedTouches }),
+      );
+    },
+    { type, contacts, changed },
+  );
+}
+
+test("image viewer recognizes pinch from the resized fit and ignores cancelled peer contacts", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const dimensions = { width: 1200, height: 1800 };
+  await mockComparisonImages(
+    page,
+    { reference: dimensions, test: dimensions, diff: dimensions },
+    true,
+  );
+  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
+  const panes = page.locator(".image-pane");
+  await page.getByRole("button", { name: "Fit images", exact: true }).click();
+  const output = page.getByLabel("Zoom level");
+  const initial = await output.innerText();
+  const a = { id: 3, lane: 0, x: 45, y: 70 },
+    b = { id: 4, lane: 0, x: 75, y: 70 };
+  await laneTouches(page, "touchstart", [a, b]);
+  const viewport = page.viewportSize();
+  if (!viewport) throw new Error("Viewport unavailable");
+  await page.setViewportSize({ ...viewport, width: viewport.width + 300 });
+  await expect(output).not.toHaveText(initial);
+  const fitScale = await panes
+    .first()
+    .locator(".image-surface")
+    .evaluate((el) => el.getBoundingClientRect().width / 1200);
+  await laneTouches(page, "touchmove", [
+    { ...a, x: 40 },
+    { ...b, x: 80 },
+  ]);
+  await expect(output).toHaveText(`${Math.round(((fitScale * 4) / 3) * 1000) / 10}%`);
+  await laneTouches(page, "touchend", [], [a, b]);
+
+  await page.getByRole("button", { name: "Actual size", exact: true }).click();
+  await panes.first().evaluate((el) => el.scrollTo(100, 150));
+  const peer = { ...b, lane: 1 };
+  await laneTouches(page, "touchstart", [a]);
+  await laneTouches(page, "touchstart", [a, peer], [peer]);
+  await laneTouches(page, "touchcancel", [a], [peer]);
+  await laneTouches(page, "touchmove", [{ ...a, y: 50 }]);
+  await expect.poll(() => panes.first().evaluate((el) => el.scrollTop)).toBe(170);
+  await laneTouches(page, "touchcancel", [], [a]);
+  await laneTouches(page, "touchmove", [{ ...a, y: 35 }]);
+  expect(await panes.first().evaluate((el) => el.scrollTop)).toBe(170);
+});
+
+test("image viewer parallel contact packets do not ratchet zoom at a limit", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=test");
+  const pane = page.locator(".image-pane");
+  await pane.press("1");
+  for (let i = 0; i < 7; i++) await pane.press("-");
+  const output = page.getByLabel("Zoom level");
+  await expect(output).toHaveText("25%");
+  const a = { id: 3, lane: 0, x: 50, y: 50 },
+    b = { id: 4, lane: 0, x: 90, y: 50 };
+  await laneTouches(page, "touchstart", [a, b]);
+  await laneTouches(page, "touchmove", [{ ...a, x: 62 }, b], [{ ...a, x: 62 }]);
+  await laneTouches(
+    page,
+    "touchmove",
+    [
+      { ...a, x: 62 },
+      { ...b, x: 102 },
+    ],
+    [{ ...b, x: 102 }],
+  );
+  await expect(output).toHaveText("25%");
+  await laneTouches(page, "touchend", [], [a, b]);
+  // A real reversal by the same finger responds from the clipped span, not the starting span.
+  await laneTouches(page, "touchstart", [a, b]);
+  await laneTouches(page, "touchmove", [{ ...a, x: 70 }, b], [{ ...a, x: 70 }]);
+  await laneTouches(page, "touchmove", [{ ...a, x: 60 }, b], [{ ...a, x: 60 }]);
+  await expect(output).toHaveText("37.5%");
+  await laneTouches(page, "touchend", [], [a, b]);
+});
+
+test("image viewer centers after a native horizontal scrollbar disappears", async ({
+  playwright,
+  baseURL,
+  isMobile,
+}) => {
+  test.skip(isMobile, "Requires classic desktop scrollbars.");
+  const browser = await playwright.chromium.launch({
+    executablePath: browserExecutable(),
+    ignoreDefaultArgs: ["--hide-scrollbars"],
+    args: ["--disable-features=OverlayScrollbar,FluentOverlayScrollbar"],
+  });
+  try {
+    const page = await browser.newPage({
+      baseURL,
+      viewport: { width: 1440, height: 1000 },
+      reducedMotion: "reduce",
+    });
+    const dimensions = { width: 320, height: 240 };
+    await mockComparisonImages(
+      page,
+      { reference: dimensions, test: dimensions, diff: dimensions },
+      true,
+    );
+    await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
+    // Fix the test geometry independently of sidebar width, OS theme and scrollbar preferences.
+    await page.addStyleTag({
+      content: `
+      .image-pane { width: 310px !important; height: 400px !important; scrollbar-color: auto; }
+      .image-pane::-webkit-scrollbar { width: 16px; height: 16px; }
+    `,
+    });
+    await page.getByRole("button", { name: "Actual size", exact: true }).click();
+    // Put the underfilled canvas away from either edge; the center anchor can then be preserved exactly.
+    const lane = page.locator(".image-pane").first();
+    const box = await lane.boundingBox();
+    if (!box) throw new Error("Lane unavailable");
+    await page.mouse.move(box.x + 30, box.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 30, box.y + 100);
+    await page.mouse.up();
+    const geometry = () =>
+      lane.evaluate((el, height) => {
+        const image = el.querySelector(".image-surface")?.getBoundingClientRect();
+        if (!image) throw new Error("Missing canvas");
+        return {
+          client: el.clientHeight,
+          row:
+            ((el.getBoundingClientRect().top + el.clientTop + el.clientHeight / 2 - image.top) *
+              height) /
+            image.height,
+        };
+      }, dimensions.height);
+    const before = await geometry();
+    await lane.press("-");
+    await expect(page.getByLabel("Zoom level")).toHaveText("90%");
+    await expect.poll(async () => (await geometry()).client).toBeGreaterThan(before.client + 2);
+    expect(Math.abs((await geometry()).row - before.row)).toBeLessThan(1);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("image viewer drags wheel-padded scroll ranges without replacing them", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  // Both dimensions extend beyond the lane at actual size and underfill it at 25%.
+  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
+  const lane = page.locator(".image-pane").first();
+  const dimensions = await lane.evaluate((el) => ({
+    width: 2 * el.clientWidth,
+    height: 2 * el.clientHeight,
+  }));
+  await mockComparisonImages(
+    page,
+    { reference: dimensions, test: dimensions, diff: dimensions },
+    true,
+  );
+  await page.reload();
+  await page.getByRole("button", { name: "Actual size", exact: true }).click();
+  const box = await lane.boundingBox();
+  if (!box) throw new Error("Lane unavailable");
+  await page.mouse.move(box.x + box.width * 0.9, box.y + box.height * 0.9);
+  await page.keyboard.down("Control");
+  try {
+    for (const level of ["90%", "80%", "75%", "66.7%", "50%", "33.3%", "25%"]) {
+      await page.mouse.wheel(0, 80);
+      await expect(page.getByLabel("Zoom level")).toHaveText(level);
+    }
+  } finally {
+    await page.keyboard.up("Control");
+  }
+  const geometry = () =>
+    lane.evaluate((el) => {
+      const r = el.querySelector(".image-surface")?.getBoundingClientRect();
+      if (!r) throw new Error("Missing image");
+      return {
+        x: r.left,
+        y: r.top,
+        w: el.scrollWidth - el.clientWidth,
+        h: el.scrollHeight - el.clientHeight,
+      };
+    });
+  const before = await geometry();
+  expect(Math.min(before.w, before.h)).toBeGreaterThan(15);
+  const a = { id: 2, lane: 0, x: 60, y: 80 };
+  await laneTouches(page, "touchstart", [a]);
+  await laneTouches(page, "touchmove", [{ ...a, x: 45, y: 65 }]);
+  const after = await geometry();
+  expect(after.w).toBe(before.w);
+  expect(after.h).toBe(before.h);
+  expect(after.x - before.x).toBeCloseTo(-15, 0);
+  expect(after.y - before.y).toBeCloseTo(-15, 0);
+  await laneTouches(page, "touchend", [], [a]);
+});
+
+test("image viewer prints a center-zoomed wipe without screen anchor padding", async ({ page }) => {
+  const dimensions = { width: 80, height: 60 };
+  await mockComparisonImages(
+    page,
+    { reference: dimensions, test: dimensions, diff: dimensions },
+    true,
+  );
+  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=wipe");
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  const stage = page.locator(".comparison-stage");
+  expect(
+    await stage.evaluate((el) => parseFloat(getComputedStyle(el).paddingLeft)),
+  ).toBeGreaterThan(0);
+  await page.emulateMedia({ media: "print" });
+  await expect(stage).toHaveCSS("padding-left", "0px");
+  await expect(stage).toHaveCSS("padding-top", "0px");
+  const centered = await stage.evaluate((el) => {
+    const pane = el.parentElement,
+      image = el.querySelector(".image-surface")?.getBoundingClientRect();
+    if (!pane || !image) throw new Error("Missing print geometry");
+    return (
+      image.left +
+      image.width / 2 -
+      pane.getBoundingClientRect().left -
+      pane.clientLeft -
+      pane.clientWidth / 2
+    );
+  });
+  expect(Math.abs(centered)).toBeLessThan(1);
+});
+
 test("image viewer prints full lanes with the suite index open", async ({ page, isMobile }) => {
   test.skip(isMobile, "The open desktop suite index switches to block layout when printed.");
   await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
@@ -3908,6 +4162,41 @@ test("image viewer anchors center controls and touch gestures in linked lanes", 
           cy: Math.round(r.top + p.clientTop + p.clientHeight / 2),
         };
       });
+      const lead = { id: 5, lane: 1, x: 45, y: 60 },
+        peer = { id: 6, lane: 1, x: 85, y: 60 };
+      await laneTouches(page, "touchstart", [lead, peer]);
+      await laneTouches(page, "touchmove", [{ ...lead, x: 57 }, peer], [{ ...lead, x: 57 }]);
+      await laneTouches(
+        page,
+        "touchmove",
+        [
+          { ...lead, x: 57 },
+          { ...peer, x: 97 },
+        ],
+        [{ ...peer, x: 97 }],
+      );
+      await laneTouches(
+        page,
+        "touchmove",
+        [
+          { ...lead, x: 57 },
+          { ...peer, x: 98 },
+        ],
+        [{ ...peer, x: 98 }],
+      );
+      await expect(fitButton).toHaveAttribute("aria-pressed", "true");
+      await laneTouches(
+        page,
+        "touchmove",
+        [
+          { ...lead, x: 57 },
+          { ...peer, x: 108 },
+        ],
+        [{ ...peer, x: 108 }],
+      );
+      await expect(fitButton).toHaveAttribute("aria-pressed", "false");
+      await laneTouches(page, "touchend", [], [lead, peer]);
+      await fitButton.click();
       await page.mouse.move(shortBox.cx, shortBox.cy);
       await page.keyboard.down("Control");
       try {
@@ -3920,6 +4209,14 @@ test("image viewer anchors center controls and touch gestures in linked lanes", 
         { id: 1, x: shortBox.cx - 40, y: shortBox.cy },
         { id: 2, x: shortBox.cx + 40, y: shortBox.cy },
       ]);
+      // Drift at the fitted floor can move an underfilled axis without committing a manual pinch.
+      for (const dx of [12, 22, 30]) {
+        await touch("touchMove", [
+          { id: 1, x: shortBox.cx - 40 + dx, y: shortBox.cy + dx / 2 },
+          { id: 2, x: shortBox.cx + 40, y: shortBox.cy },
+        ]);
+        await expect(fitButton).toHaveAttribute("aria-pressed", "true");
+      }
       await touch("touchMove", [
         { id: 1, x: shortBox.cx - 20, y: shortBox.cy },
         { id: 2, x: shortBox.cx + 20, y: shortBox.cy },

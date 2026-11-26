@@ -309,10 +309,8 @@ struct PreviewPan {
 #[derive(Clone, Copy)]
 struct PreviewPinch {
     index: usize,
-    image_point: Point<f32>,
-    origin: Point<Pixels>,
+    position: Point<Pixels>,
     minimum: f32,
-    zoom: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2021,72 +2019,45 @@ impl ResultsPanel {
         }
         if event.phase == TouchPhase::Started {
             let zoom = self.preview_scale(index);
-            self.pinch = self
-                .image_point(index, event.position)
-                .zip(self.preview_origin(index, zoom))
-                .map(|(image_point, origin)| PreviewPinch {
-                    index,
-                    image_point,
-                    origin,
-                    minimum: zoom.min(ZOOM_LEVELS[0]),
-                    zoom,
-                });
+            self.pinch = self.preview_size(index, zoom).map(|_| PreviewPinch {
+                index,
+                position: event.position,
+                minimum: zoom.min(ZOOM_LEVELS[0]),
+            });
             self.pointer_guides.pan.borrow_mut().take();
             self.pointer_guides.active.set(None);
             cx.notify();
         }
-        let current_origin = self
-            .pinch
-            .filter(|p| p.index == index)
-            .and_then(|p| self.preview_origin(index, p.zoom));
-        let Some(pinch) = self.pinch.as_mut().filter(|p| p.index == index) else {
+        let Some(pinch) = self.pinch.filter(|p| p.index == index) else {
             return;
         };
         cx.stop_propagation();
-        if let Some(origin) = current_origin {
-            // Trackpads on macOS emit precise ScrollEvents alongside Magnify events while
-            // fingers translate; fold any intervening scroll delta into the pinched pixel.
-            let pan_delta = origin - pinch.origin;
-            let scale = pinch.zoom.max(0.001);
-            pinch.image_point.x -= (pan_delta.x / px(1.)) / scale;
-            pinch.image_point.y -= (pan_delta.y / px(1.)) / scale;
-            pinch.origin = origin;
-        }
         if !event.delta.is_finite()
             || event.delta <= -1.
             || (event.phase == TouchPhase::Started && event.delta == 0.)
         {
             return;
         }
-        let next_zoom = (pinch.zoom * (1. + event.delta)).clamp(pinch.minimum, MAX_ZOOM);
-        if self.preview_views[self.image_mode].mode != ZoomMode::Manual
-            && (next_zoom - pinch.zoom).abs() <= f32::EPSILON
-        {
+        let fitted = self.preview_views[self.image_mode].mode != ZoomMode::Manual;
+        let zoom = self.preview_scale(index);
+        let minimum = if fitted {
+            zoom.min(ZOOM_LEVELS[0])
+        } else {
+            pinch.minimum
+        };
+        let next_zoom = (zoom * (1. + event.delta)).clamp(minimum, MAX_ZOOM);
+        // Use the pixel currently under the previous midpoint: a fit resize, an edge
+        // clamp or an intervening scroll can all change it without a new pinch event.
+        let Some(image_point) = self.image_point(index, pinch.position) else {
             return;
-        }
-        pinch.zoom = next_zoom;
-        let next = *pinch;
-        let lane = self.pointer_guides.lanes[index].get();
-        if let Some(origin) =
-            self.zoom_to(index, next.zoom, next.image_point, event.position, true, cx)
-            && let Some(pinch) = self.pinch.as_mut().filter(|p| p.index == index)
-        {
-            if let Some(lane) = lane {
-                // Keep image_point aligned with the post-clamp origin so pinch reversals
-                // and subsequent interleaved scrolls do not snap back toward the edge.
-                let unclamped =
-                    event.position - lane.origin - next.image_point.map(|v| px(v * next.zoom));
-                let scale = next.zoom.max(0.001);
-                if (origin.x - unclamped.x).abs() > px(0.01) {
-                    pinch.image_point.x =
-                        ((event.position.x - lane.origin.x - origin.x) / px(1.)) / scale;
-                }
-                if (origin.y - unclamped.y).abs() > px(0.01) {
-                    pinch.image_point.y =
-                        ((event.position.y - lane.origin.y - origin.y) / px(1.)) / scale;
-                }
-            }
-            pinch.origin = origin;
+        };
+        self.pinch = Some(PreviewPinch {
+            index,
+            position: event.position,
+            minimum,
+        });
+        if !fitted || (next_zoom - zoom).abs() > f32::EPSILON {
+            self.zoom_to(index, next_zoom, image_point, event.position, true, cx);
         }
     }
 
@@ -2098,8 +2069,10 @@ impl ResultsPanel {
         position: Point<Pixels>,
         bounded: bool,
         cx: &mut Context<Self>,
-    ) -> Option<Point<Pixels>> {
-        let lane = self.pointer_guides.lanes[index].get()?;
+    ) {
+        let Some(lane) = self.pointer_guides.lanes[index].get() else {
+            return;
+        };
         let (width, height) = self.preview_canvas_size(index);
         let next_size = size(px(width as f32 * zoom), px(height as f32 * zoom));
         let scroll = self.image_scroll().clone();
@@ -2134,7 +2107,6 @@ impl ResultsPanel {
         scroll.set_offset(point(anchored.x.min(px(0.)), anchored.y.min(px(0.))));
         self.pointer_guides.pan.borrow_mut().take();
         cx.notify();
-        Some(anchored)
     }
 
     fn render_preview(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -3896,6 +3868,32 @@ mod pointer_tests {
             }
             window.render_frame(cx);
             assert_eq!(window.find("fit-image").checked(), Some(true));
+            window.resize(initial_viewport);
+            window.bounds_changed(cx);
+            window.render_frame(cx);
+            window.click("fit-width", cx);
+            let initial_lane = window.find(("image-scroll", 1_usize)).bounds();
+            let start = point(initial_lane.right() - px(70.), initial_lane.center().y);
+            let pinch = |window: &mut gpui_kit::Window, cx: &mut gpui_kit::App, phase, delta, position| {
+                window.dispatch_event(gpui_kit::PinchEvent {
+                    position, delta, phase, modifiers: Default::default(),
+                }.to_platform_input(), cx);
+            };
+            pinch(window, cx, gpui_kit::TouchPhase::Started, 0., start);
+            window.resize(size(initial_viewport.width + px(360.), initial_viewport.height));
+            window.bounds_changed(cx);
+            window.render_frame(cx);
+            window.render_frame(cx);
+            let resized = image(window, 1);
+            assert!(resized.size.width > initial_lane.size.width + px(10.));
+            let end = start - point(px(5.), px(5.));
+            pinch(window, cx, gpui_kit::TouchPhase::Moved, 0.2, end);
+            window.render_frame(cx);
+            let zoomed = image(window, 1);
+            assert!((zoomed.size.width - resized.size.width * 1.2).abs() <= px(1.));
+            let projected = zoomed.origin + (start - resized.origin) * 1.2;
+            assert!((projected.x - end.x).abs() <= px(1.) && (projected.y - end.y).abs() <= px(1.), "initial={initial_lane:?}, resized={resized:?}, new lane={:?}, zoomed={zoomed:?}, projected={projected:?}, end={end:?}",window.find(("image-scroll", 1_usize)).bounds());
+            pinch(window, cx, gpui_kit::TouchPhase::Ended, 0., end);
             window.resize(initial_viewport);
             window.bounds_changed(cx);
             window.render_frame(cx);

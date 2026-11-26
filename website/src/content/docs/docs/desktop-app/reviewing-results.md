@@ -37,8 +37,10 @@ together. `Ctrl+B` widens the preview.
 
 Zoom buttons and `+`/`-` keep the middle of each lane in view, clamping at
 image edges. On a supported touchpad, slide two fingers to pan or pinch to
-zoom smoothly around the gesture position. Windows uses a precision touchpad
-for these gestures; direct touchscreen pinch is available in web reports.
+zoom smoothly around the gesture position. On Windows, first place the pointer
+over the part of the lane you want to zoom, then pinch on a precision touchpad.
+Pinching over the toolbar does not zoom an image. Direct touchscreen pinch is
+available in web reports.
 
 Double-click an image to toggle actual size. Above 100%, magnified comparison
 images show crisp pixels. Above 1000%, a faint grid marks each pixel. Fit views
