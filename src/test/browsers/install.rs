@@ -11,7 +11,7 @@ use reqwest::Client;
 use tokio::{io::AsyncWriteExt, time::MissedTickBehavior};
 
 use super::{BROWSER_LOG_INTERVAL, ManagedBrowser, browser_status};
-use crate::helpers::HttpExtensions;
+use crate::helpers::{FileLock, HttpExtensions};
 
 const MIB: f64 = 1024.0 * 1024.0;
 const MAX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -40,7 +40,10 @@ impl Default for InstallLimits {
     }
 }
 
-pub(super) async fn install_browser(browser: &ManagedBrowser, cache_lock: Arc<File>) -> Result<()> {
+pub(super) async fn install_browser(
+    browser: &ManagedBrowser,
+    cache_lock: Arc<FileLock>,
+) -> Result<()> {
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .https_only(true)
@@ -56,7 +59,7 @@ async fn install_with_client(
     browser: &ManagedBrowser,
     client: &Client,
     limits: InstallLimits,
-    cache_lock: Arc<File>,
+    cache_lock: Arc<FileLock>,
 ) -> Result<()> {
     let cache_dir = browser
         .directory

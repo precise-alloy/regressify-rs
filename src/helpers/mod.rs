@@ -25,6 +25,7 @@ pub use io::{
     IOExtensions, copy_file_atomically, format_size, is_windows_reserved_path_component,
     write_file_atomically,
 };
+pub(crate) use locks::FileLock;
 pub use locks::{OnceLockBoolExtensions, OnceLockExtensions};
 pub use numbers::format_bytes;
 pub(crate) use scenario_names::{
