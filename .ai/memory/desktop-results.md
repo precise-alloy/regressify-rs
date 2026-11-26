@@ -117,4 +117,4 @@ Verified: 2026-11-26
 - Underfilled side-by-side canvases drag together within unused lane width/height.
   Normalized placement preserves bounds after resize; weak pan notifications
   avoid retaining Results through pointer layers. `image_previews_` covers fit,
-  manual zoom, all edges, diagonal pan, orthogonal scroll, fit reset, and zoom anchors.
+  manual zoom, all edges, diagonal pan, orthogonal scroll, fit reset, and zoom anchors. Measure stationary bounds per lane: the shared scroll handle has one offset, not an independent window-space origin per pane. Windows GPUI pinch comes from precision touchpads.

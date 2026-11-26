@@ -921,6 +921,9 @@ are historical evidence, not open implementation tasks.
 
 ## Image Viewer Parity (2026-10-13)
 
+- Desktop Results and snapshot reports now center toolbar/keyboard zoom on the
+  visible lanes. Snapshot reports handle direct touchscreen pan and pinch;
+  native Results uses toolkit pinch and pan events (precision touchpads on Windows).
 - Resolved (2026-11-25): Wipe follows the pointer between whole-percent slider
   stops at 25× in both viewers. Legacy error artwork, including file-backed Diff
   images, no longer receives pixel sampling or grid lines. Rendering is separate

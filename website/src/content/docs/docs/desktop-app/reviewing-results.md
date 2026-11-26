@@ -35,6 +35,11 @@ together. `Ctrl+B` widens the preview.
 | Zoom 25% to 10000% | **Zoom in**, **Zoom out**, `Ctrl`+wheel | `+`, `-` |
 | Pan                | Drag                                    | Arrows   |
 
+Zoom buttons and `+`/`-` keep the middle of each lane in view, clamping at
+image edges. On a supported touchpad, slide two fingers to pan or pinch to
+zoom smoothly around the gesture position. Windows uses a precision touchpad
+for these gestures; direct touchscreen pinch is available in web reports.
+
 Double-click an image to toggle actual size. Above 100%, magnified comparison
 images show crisp pixels. Above 1000%, a faint grid marks each pixel. Fit views
 keep smooth scaling.

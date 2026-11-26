@@ -11,7 +11,14 @@ import {
   Scan,
   SquareSplitHorizontal,
 } from "lucide-react";
-import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import {
+  type TouchEvent,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   alignedRowToImageRow,
   type Capture,
@@ -33,6 +40,15 @@ const modes = [
 ] as const;
 type Mode = (typeof modes)[number][0];
 type Size = { width: number; height: number };
+type Point = { x: number; y: number };
+type Anchor = {
+  scroll: HTMLElement;
+  element: HTMLElement;
+  imageX: number;
+  imageY: number;
+  // Null targets follow the visible center even if zoom changes native scrollbars.
+  target: Point | null;
+};
 type Fit = "width" | "area" | "manual";
 type View = {
   fit: Fit;
@@ -40,9 +56,14 @@ type View = {
   // Fractions of unused lane space keep fitted dragging bounded after resize.
   horizontalPosition?: number;
   verticalPosition?: number;
-  padding?: { left: number; top: number; right: number; bottom: number }[];
+  padding?: { left: number | string; top: number | string; right: number; bottom: number }[];
 };
 const fallback: Size = { width: 640, height: 400 };
+const cssLength = (value: number | string) => (typeof value === "number" ? `${value}px` : value);
+
+function anchorTarget(scroll: HTMLElement, target: Point | null) {
+  return target ?? { x: scroll.clientWidth / 2, y: scroll.clientHeight / 2 };
+}
 
 const maxZoom = 100;
 const pixelGridThreshold = 10;
@@ -198,18 +219,20 @@ export function ComparisonViewer({
   const scrollPositions = useRef(new WeakMap<HTMLElement, { left: number; top: number }>());
   const toolbar = useRef<HTMLDivElement>(null);
   const gestureScope = useRef({ capture, mode: requestedMode });
-  const anchors = useRef<
-    {
-      x: number;
-      y: number;
-      imageX: number;
-      imageY: number;
-      element: HTMLElement;
-      scroll: HTMLElement;
-    }[]
-  >([]);
+  const anchors = useRef<Anchor[]>([]);
+  const touchGesture = useRef<{
+    scroll: HTMLElement;
+    ids: number[];
+    startDistance: number;
+    lastDistance: number;
+    lastCenter: Point;
+    minimum: number;
+    currentScale: number;
+    anchors: Anchor[];
+    pinched: boolean;
+  } | null>(null);
   const pan = useRef<{
-    pointer: number;
+    pointer: number | null;
     x: number;
     y: number;
     left: number;
@@ -436,73 +459,120 @@ export function ComparisonViewer({
   };
   const cancelPan = () => {
     const pointer = pan.current?.pointer;
+    anchors.current = [];
+    touchGesture.current = null;
     pan.current = null;
     setPanning(false);
-    if (pointer !== undefined && canvas.current?.hasPointerCapture(pointer)) {
+    if (pointer != null && canvas.current?.hasPointerCapture(pointer)) {
       canvas.current.releasePointerCapture(pointer);
     }
   };
   const setView = (next: View) => {
-    cancelPan();
     setCrosshair(null);
     setZoom((current) => ({
       capture,
       views: { ...(current?.capture === capture ? current.views : {}), [mode]: next },
     }));
   };
-  const setScale = (value: number, point?: { x: number; y: number }) => {
-    const next = Math.max(0.001, Math.min(maxZoom, value));
-    if (!Number.isFinite(next) || (fit === "manual" && next === scale)) return;
-    let padding: View["padding"];
-    anchors.current = [];
-    const selected = point && scrollRoot(document.elementFromPoint(point.x, point.y));
-    if (point && selected) {
-      const selectedBounds = selected.getBoundingClientRect();
-      padding = Array.from(
-        canvas.current?.querySelectorAll<HTMLElement>(".image-pane") ?? [],
-        (scroll) => {
-          const source = scroll.querySelector<HTMLElement>(".image-surface");
-          const stage = scroll.querySelector<HTMLElement>(".comparison-stage");
-          if (!source || !stage) return { left: 0, top: 0, right: 0, bottom: 0 };
-          const bounds = scroll.getBoundingClientRect();
-          const surface = stage.getBoundingClientRect();
-          const image = source.getBoundingClientRect();
-          const position = {
-            x: bounds.left + point.x - selectedBounds.left,
-            y: bounds.top + point.y - selectedBounds.top,
-          };
-          const imageX = (position.x - image.left) / scale;
-          const imageY = (position.y - image.top) / scale;
-          const originX = surface.left + scroll.scrollLeft;
-          const originY = surface.top + scroll.scrollTop;
-          const left = position.x - originX - imageX * next;
-          const top = position.y - originY - imageY * next;
-          anchors.current.push({ ...position, imageX, imageY, element: source, scroll });
-          // Full inner bounds retain anchor space as scrollbars appear or disappear.
-          return {
-            left: Math.max(0, left),
-            top: Math.max(0, top),
-            right: Math.max(
-              0,
-              bounds.right - scroll.clientLeft - originX - left - size.width * next,
-            ),
-            bottom: Math.max(
-              0,
-              bounds.bottom - scroll.clientTop - originY - top - size.height * next,
-            ),
-          };
-        },
-      );
+  const readAnchors = (target: Point | null): Anchor[] => {
+    return Array.from(canvas.current?.querySelectorAll<HTMLElement>(".image-pane") ?? []).flatMap(
+      (scroll) => {
+        const element = scroll.querySelector<HTMLElement>(".image-surface");
+        if (!element) return [];
+        const bounds = scroll.getBoundingClientRect();
+        const image = element.getBoundingClientRect();
+        const { x, y } = anchorTarget(scroll, target);
+        return [
+          {
+            scroll,
+            element,
+            target,
+            imageX: (bounds.left + scroll.clientLeft + x - image.left) / scale,
+            imageY: (bounds.top + scroll.clientTop + y - image.top) / scale,
+          },
+        ];
+      },
+    );
+  };
+  const localPoint = (scroll: HTMLElement, point: Point) => {
+    const bounds = scroll.getBoundingClientRect();
+    return {
+      x: point.x - bounds.left - scroll.clientLeft,
+      y: point.y - bounds.top - scroll.clientTop,
+    };
+  };
+  const applyScale = (next: number, targets: Anchor[], bounded: boolean) => {
+    anchors.current = targets;
+    let horizontalPosition = targets.length ? undefined : view?.horizontalPosition;
+    let verticalPosition = targets.length ? undefined : view?.verticalPosition;
+    const first = bounded && mode === "side" ? targets[0] : undefined;
+    if (first) {
+      const { x, y } = anchorTarget(first.scroll, first.target);
+      const freeWidth = (viewport.width || first.scroll.clientWidth) - size.width * next;
+      const freeHeight = (viewport.height || first.scroll.clientHeight) - size.height * next;
+      if (freeWidth > 0) {
+        horizontalPosition = Math.max(0, Math.min(1, (x - first.imageX * next) / freeWidth));
+      }
+      if (freeHeight > 0) {
+        verticalPosition = Math.max(0, Math.min(1, (y - first.imageY * next) / freeHeight));
+      }
     }
+    const padding =
+      bounded && mode === "side"
+        ? undefined
+        : targets.map(({ scroll, target, imageX, imageY }) => {
+            if (bounded) {
+              // Container units use the new lane's content box, excluding any new scrollbar.
+              const pad = (
+                axis: "w" | "h",
+                coord: number | undefined,
+                image: number,
+                extent: number,
+              ) =>
+                `clamp(0px, calc(${coord === undefined ? `50cq${axis}` : `${coord}px`} - ${image * next}px), calc(100cq${axis} - ${extent * next}px))`;
+              return {
+                left: pad("w", target?.x, imageX, size.width),
+                top: pad("h", target?.y, imageY, size.height),
+                right: 0,
+                bottom: 0,
+              };
+            }
+            const { x, y } = anchorTarget(scroll, target);
+            const left = x - imageX * next;
+            const top = y - imageY * next;
+            // Wheel anchors may need space beyond the image, including scrollbar transitions.
+            const bounds = scroll.getBoundingClientRect();
+            return {
+              left: Math.max(0, left),
+              top: Math.max(0, top),
+              right: Math.max(0, bounds.width - 2 * scroll.clientLeft - left - size.width * next),
+              bottom: Math.max(0, bounds.height - 2 * scroll.clientTop - top - size.height * next),
+            };
+          });
     setView({
       fit: "manual",
       scale: next,
-      horizontalPosition: point ? undefined : view?.horizontalPosition,
-      verticalPosition: point ? undefined : view?.verticalPosition,
-      padding,
+      horizontalPosition,
+      verticalPosition,
+      padding: targets.length ? padding : undefined,
     });
   };
+  const setScale = (value: number, point?: Point | "center") => {
+    if (!Number.isFinite(value) || ((fit === "manual" || point === "center") && value === scale))
+      return;
+    cancelPan();
+    const selected =
+      point && point !== "center" && scrollRoot(document.elementFromPoint(point.x, point.y));
+    const targets =
+      point === "center"
+        ? readAnchors(null)
+        : selected && point
+          ? readAnchors(localPoint(selected, point))
+          : [];
+    applyScale(value, targets, point === "center");
+  };
   const setFit = (next: "width" | "area") => {
+    cancelPan();
     anchors.current = [];
     setView({ fit: next, scale: 1 });
     for (const pane of canvas.current?.querySelectorAll<HTMLElement>(".image-pane") ?? []) {
@@ -518,30 +588,56 @@ export function ComparisonViewer({
       if (!anchor.element.isConnected) continue;
       const bounds = anchor.element.getBoundingClientRect();
       const scroll = anchor.scroll;
-      scroll.scrollLeft += bounds.left + anchor.imageX * scale - anchor.x;
-      scroll.scrollTop += bounds.top + anchor.imageY * scale - anchor.y;
+      const position = localPoint(scroll, { x: bounds.left, y: bounds.top });
+      const target = anchorTarget(scroll, anchor.target);
+      scroll.scrollLeft =
+        mode === "side" && view?.horizontalPosition !== undefined
+          ? 0
+          : scroll.scrollLeft + position.x + anchor.imageX * scale - target.x;
+      scroll.scrollTop =
+        mode === "side" && view?.verticalPosition !== undefined
+          ? 0
+          : scroll.scrollTop + position.y + anchor.imageY * scale - target.y;
     }
     // Zoom anchoring and layout clamping are not user scroll gestures.
     for (const pane of canvas.current?.querySelectorAll<HTMLElement>(".image-pane") ?? []) {
       scrollPositions.current.set(pane, { left: pane.scrollLeft, top: pane.scrollTop });
     }
+    const activeTouch = touchGesture.current;
+    if (activeTouch?.pinched && activeTouch.scroll.isConnected) {
+      const target = localPoint(activeTouch.scroll, activeTouch.lastCenter);
+      activeTouch.anchors = Array.from(
+        canvas.current?.querySelectorAll<HTMLElement>(".image-pane") ?? [],
+      ).flatMap((scroll, index) => {
+        const element = scroll.querySelector<HTMLElement>(".image-surface");
+        if (!element) return [];
+        const bounds = scroll.getBoundingClientRect();
+        const image = element.getBoundingClientRect();
+        const imageX = (bounds.left + scroll.clientLeft + target.x - image.left) / scale;
+        const imageY = (bounds.top + scroll.clientTop + target.y - image.top) / scale;
+        const prior = activeTouch.anchors[index];
+        return [
+          {
+            scroll,
+            element,
+            target,
+            imageX:
+              prior && Math.abs((imageX - prior.imageX) * scale) <= 0.5 ? prior.imageX : imageX,
+            imageY:
+              prior && Math.abs((imageY - prior.imageY) * scale) <= 0.5 ? prior.imageY : imageY,
+          },
+        ];
+      });
+    }
     refreshCrosshairLayout();
-  }, [
-    scale,
-    view?.fit,
-    view?.horizontalPosition,
-    view?.verticalPosition,
-    viewport.width,
-    viewport.height,
-    size.width,
-    size.height,
-  ]);
+  }, [scale, view, viewport.width, viewport.height, size.width, size.height]);
   const wheelZoom = useEffectEvent((event: WheelEvent) => {
     if ((!event.ctrlKey && !event.metaKey) || !Number.isFinite(event.deltaY) || event.deltaY === 0)
       return;
     event.preventDefault();
     event.stopPropagation();
-    setScale(nextZoom(scale, event.deltaY < 0), { x: event.clientX, y: event.clientY });
+    const next = nextZoom(scale, event.deltaY < 0);
+    if (next !== scale) setScale(next, { x: event.clientX, y: event.clientY });
   });
   const clearGesture = useEffectEvent(() => {
     cancelPan();
@@ -549,6 +645,138 @@ export function ComparisonViewer({
     anchors.current = [];
     activePane.current = null;
   });
+  const startPan = (scroll: HTMLElement, { x, y }: Point, pointer: number | null) => {
+    const bounds = scroll.getBoundingClientRect();
+    const image = scroll.querySelector(".image-surface")?.getBoundingClientRect();
+    pan.current = {
+      pointer,
+      x,
+      y,
+      left: scroll.scrollLeft,
+      top: scroll.scrollTop,
+      imageLeft: image ? image.left - bounds.left - scroll.clientLeft : 0,
+      horizontalSpace: mode === "side" && image ? Math.max(0, viewport.width - image.width) : 0,
+      imageTop: image ? image.top - bounds.top - scroll.clientTop : 0,
+      verticalSpace: mode === "side" && image ? Math.max(0, viewport.height - image.height) : 0,
+      moved: false,
+      scroll,
+    };
+  };
+  const movePan = ({ x, y }: Point) => {
+    const drag = pan.current;
+    if (!drag) return;
+    const dx = x - drag.x,
+      dy = y - drag.y;
+    if (!drag.moved && Math.max(Math.abs(dx), Math.abs(dy)) < 4) return;
+    drag.moved = true;
+    setPanning(true);
+    setCrosshair(null);
+    if (drag.horizontalSpace > 0 || drag.verticalSpace > 0) {
+      setZoom((current) => {
+        const views = current?.capture === capture ? current.views : {};
+        const placement = { fit, scale, ...views[mode] };
+        if (drag.horizontalSpace > 0)
+          placement.horizontalPosition = Math.max(
+            0,
+            Math.min(1, (drag.imageLeft + dx) / drag.horizontalSpace),
+          );
+        if (drag.verticalSpace > 0)
+          placement.verticalPosition = Math.max(
+            0,
+            Math.min(1, (drag.imageTop + dy) / drag.verticalSpace),
+          );
+        return { capture, views: { ...views, [mode]: placement } };
+      });
+    }
+    drag.scroll.scrollTo({
+      left: drag.horizontalSpace > 0 ? 0 : drag.left - dx,
+      top: drag.verticalSpace > 0 ? 0 : drag.top - dy,
+    });
+    syncScroll(drag.scroll);
+  };
+  const updateTouches = (event: TouchEvent<HTMLElement>) => {
+    const previous = touchGesture.current;
+    if (!previous && event.type !== "touchstart") return;
+    const scroll =
+      previous?.scroll ??
+      (event.target instanceof Element && event.target.closest<HTMLElement>(".image-pane"));
+    if (!scroll) return;
+    // A Touch keeps its original target after leaving the lane. Never borrow a
+    // toolbar contact or a finger from another lane to form a pinch.
+    const touches = Array.from(event.touches)
+      .filter((t) => t.target instanceof Element && scroll.contains(t.target))
+      .sort((a, b) => a.identifier - b.identifier)
+      .slice(0, 2);
+    const [a, b] = touches;
+    if (!a) {
+      cancelPan();
+      return;
+    }
+    const center = b
+      ? { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 }
+      : { x: a.clientX, y: a.clientY };
+    const distance = b ? Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) : 0;
+    const ids = touches.map((t) => t.identifier);
+    if (
+      !previous ||
+      previous.ids.length !== ids.length ||
+      ids.some((id, i) => previous.ids[i] !== id) ||
+      (b && previous.lastDistance === 0)
+    ) {
+      if (!previous) {
+        cancelPan();
+        scroll.focus({ preventScroll: true });
+        activePane.current = scroll;
+        clearCrosshair();
+      }
+      startPan(scroll, center, null);
+      touchGesture.current = {
+        scroll,
+        ids,
+        startDistance: distance,
+        lastDistance: distance,
+        lastCenter: center,
+        minimum: Math.min(scale, 0.25),
+        currentScale: scale,
+        anchors: [],
+        pinched: false,
+      };
+      return;
+    }
+    if (event.type !== "touchmove") return;
+    if (
+      !b ||
+      (!previous.pinched &&
+        (Math.abs(distance - previous.startDistance) < 8 ||
+          (fit !== "manual" && scale <= 0.25 && distance <= previous.startDistance)))
+    ) {
+      movePan(center);
+      previous.lastCenter = center;
+      if (fit !== "manual" && scale <= 0.25 && distance < previous.startDistance) {
+        previous.startDistance = distance;
+        previous.lastDistance = distance;
+      }
+      return;
+    }
+    if (!previous.pinched) {
+      previous.pinched = true;
+      previous.anchors = readAnchors(localPoint(scroll, previous.lastCenter));
+    }
+    setPanning(true);
+    const target = localPoint(scroll, center);
+    const next = Math.max(
+      previous.minimum,
+      Math.min(maxZoom, (previous.currentScale * distance) / previous.lastDistance),
+    );
+    previous.currentScale = next;
+    previous.lastDistance = distance;
+    previous.lastCenter = center;
+    applyScale(
+      next,
+      previous.anchors.map((anchor) => ({ ...anchor, target })),
+      true,
+    );
+  };
   useEffect(() => {
     const element = viewer.current?.closest<HTMLElement>(".review-scroll");
     if (!element) return;
@@ -628,7 +856,7 @@ export function ComparisonViewer({
           <IconButton
             label="Zoom out"
             disabled={scale <= 0.25}
-            onClick={() => setScale(nextZoom(scale, false))}
+            onClick={() => setScale(nextZoom(scale, false), "center")}
           >
             <Minus size={16} />
           </IconButton>
@@ -638,7 +866,7 @@ export function ComparisonViewer({
           <IconButton
             label="Zoom in"
             disabled={scale >= maxZoom}
-            onClick={() => setScale(nextZoom(scale, true))}
+            onClick={() => setScale(nextZoom(scale, true), "center")}
           >
             <Plus size={16} />
           </IconButton>
@@ -756,7 +984,7 @@ export function ComparisonViewer({
         }}
         onPointerDown={(event) => {
           clearCrosshair();
-          if (event.button !== 0 || event.pointerType === "touch") return;
+          if (event.button !== 0 || event.pointerType === "touch" || touchGesture.current) return;
           const scroll = scrollRoot(event.target);
           if (!scroll) return;
           const bounds = scroll.getBoundingClientRect();
@@ -767,22 +995,7 @@ export function ComparisonViewer({
             return;
           event.preventDefault();
           scroll.focus({ preventScroll: true });
-          const image = scroll.querySelector(".image-surface")?.getBoundingClientRect();
-          pan.current = {
-            pointer: event.pointerId,
-            x: event.clientX,
-            y: event.clientY,
-            left: scroll.scrollLeft,
-            top: scroll.scrollTop,
-            imageLeft: image ? image.left - bounds.left - scroll.clientLeft : 0,
-            horizontalSpace:
-              mode === "side" && image ? Math.max(0, viewport.width - image.width) : 0,
-            imageTop: image ? image.top - bounds.top - scroll.clientTop : 0,
-            verticalSpace:
-              mode === "side" && image ? Math.max(0, viewport.height - image.height) : 0,
-            moved: false,
-            scroll,
-          };
+          startPan(scroll, { x: event.clientX, y: event.clientY }, event.pointerId);
           event.currentTarget.setPointerCapture(event.pointerId);
         }}
         onPointerMove={(event) => {
@@ -792,41 +1005,7 @@ export function ComparisonViewer({
               cancelPan();
               return;
             }
-            const deltaX = event.clientX - drag.x;
-            const deltaY = event.clientY - drag.y;
-            if (!drag.moved && Math.max(Math.abs(deltaX), Math.abs(deltaY)) < 4) return;
-            drag.moved = true;
-            setPanning(true);
-            setCrosshair(null);
-            if (drag.horizontalSpace > 0 || drag.verticalSpace > 0) {
-              setZoom((current) => {
-                const views = current?.capture === capture ? current.views : {};
-                const placement = { fit, scale, ...views[mode] };
-                if (drag.horizontalSpace > 0) {
-                  placement.horizontalPosition = Math.max(
-                    0,
-                    Math.min(1, (drag.imageLeft + deltaX) / drag.horizontalSpace),
-                  );
-                }
-                if (drag.verticalSpace > 0) {
-                  placement.verticalPosition = Math.max(
-                    0,
-                    Math.min(1, (drag.imageTop + deltaY) / drag.verticalSpace),
-                  );
-                }
-                return {
-                  capture,
-                  views: {
-                    ...views,
-                    [mode]: placement,
-                  },
-                };
-              });
-            }
-            drag.scroll.scrollTo({
-              left: drag.horizontalSpace > 0 ? 0 : drag.left - deltaX,
-              top: drag.verticalSpace > 0 ? 0 : drag.top - deltaY,
-            });
+            movePan({ x: event.clientX, y: event.clientY });
             return;
           }
           if (mode !== "wipe" || event.pointerType === "touch" || event.buttons !== 0) return;
@@ -838,8 +1017,8 @@ export function ComparisonViewer({
           }
         }}
         onPointerUp={(event) => {
-          cancelPan();
           if (event.pointerType === "touch") return;
+          if (pan.current?.pointer === event.pointerId) cancelPan();
           const pane = document
             .elementFromPoint(event.clientX, event.clientY)
             ?.closest(".image-pane");
@@ -848,8 +1027,16 @@ export function ComparisonViewer({
           const index = elements.indexOf(pane);
           if (index >= 0) updateCrosshair(index, { x: event.clientX, y: event.clientY });
         }}
-        onPointerCancel={cancelPan}
-        onLostPointerCapture={cancelPan}
+        onPointerCancel={(event) => {
+          if (pan.current?.pointer === event.pointerId) cancelPan();
+        }}
+        onLostPointerCapture={(event) => {
+          if (pan.current?.pointer === event.pointerId) cancelPan();
+        }}
+        onTouchStart={updateTouches}
+        onTouchMove={updateTouches}
+        onTouchEnd={updateTouches}
+        onTouchCancel={cancelPan}
         onContextMenu={cancelPan}
         onDoubleClick={(event) => {
           if (event.button !== 0) return;
@@ -866,8 +1053,8 @@ export function ComparisonViewer({
             event.altKey
           )
             return;
-          if (event.key === "+" || event.key === "=") setScale(nextZoom(scale, true));
-          else if (event.key === "-") setScale(nextZoom(scale, false));
+          if (event.key === "+" || event.key === "=") setScale(nextZoom(scale, true), "center");
+          else if (event.key === "-") setScale(nextZoom(scale, false), "center");
           else if (event.key === "0") setFit("area");
           else if (event.key === "1") setScale(1);
           else if (event.key.toLowerCase() === "w") setFit("width");
@@ -919,7 +1106,7 @@ export function ComparisonViewer({
             // guides cannot extend its scroll range.
             <div key={lane.label} className="relative min-h-0 min-w-0 overflow-hidden">
               <section
-                className={`image-pane group/lane size-full min-h-0 min-w-0 overflow-auto overscroll-contain border border-border [scrollbar-gutter:stable] ${mode === "side" ? "comparison-lane has-[.comparison-crosshair]:cursor-crosshair" : ""}`}
+                className={`image-pane group/lane size-full min-h-0 min-w-0 touch-none overflow-auto overscroll-contain border border-border [container-type:size] [scrollbar-gutter:stable] print:[container-type:normal] ${mode === "side" ? "comparison-lane has-[.comparison-crosshair]:cursor-crosshair" : ""}`}
                 aria-label={`${lane.label} image viewport`}
                 // biome-ignore lint/a11y/noNoninteractiveTabindex: Native scroll panes support scoped keyboard zoom and pan.
                 tabIndex={0}
@@ -937,7 +1124,9 @@ export function ComparisonViewer({
                 <div
                   className="comparison-stage [overflow-anchor:none]"
                   style={{
-                    width: padding ? size.width * scale + padding.left + padding.right : undefined,
+                    width: padding
+                      ? `calc(${size.width * scale + padding.right}px + ${cssLength(padding.left)})`
+                      : undefined,
                     paddingLeft: padding?.left,
                     paddingTop: padding?.top,
                     paddingRight: padding?.right,

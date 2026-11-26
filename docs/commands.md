@@ -466,6 +466,10 @@ all use a 3000x1000 canvas at 100%. Images retain their own dimensions and share
 the canvas's top-left origin. Native scrollbars, wheel/touch, drag, and arrow-key
 movement all stay linked, including through blank space beyond smaller images.
 Ctrl/Cmd+wheel zooms around the pointer.
+In a web report, drag one finger inside an image lane to pan. Use two fingers
+in the same lane to pan together or pinch smoothly around their midpoint.
+Zoom buttons and `+`/`-` zoom around each lane's visible center, stopping at
+an edge when necessary to keep the image reachable.
 The pixel under the pointer stays fixed even when the image fits inside the
 viewport. Modifier-wheel gestures over empty viewer space or at the zoom limit
 remain image gestures and do not zoom the browser page.
