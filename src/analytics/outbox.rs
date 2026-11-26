@@ -119,14 +119,13 @@ impl Outbox {
     }
 
     pub fn push(&self, item: Pending) -> Result<()> {
+        #[cfg(unix)]
+        ensure_durable_dir(&self.0, &|dir| File::open(dir)?.sync_all())?;
+        #[cfg(not(unix))]
         if !self.exists()? {
-            let mut builder = fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-            builder.create(&self.0)?;
-            self.exists()?;
+            fs::create_dir_all(&self.0)?;
         }
+        ensure!(self.exists()?, "Missing analytics directory");
         let _lock = self.lock_queue()?;
         let mut queue = self.read()?;
         prune(&mut queue, Utc::now().timestamp_millis());
@@ -176,6 +175,33 @@ impl Outbox {
         self.save(&queue)
     }
 
+    pub async fn dispatch_if_pending<F: Future>(
+        &self,
+        id: Uuid,
+        request: F,
+    ) -> Result<Option<F::Output>> {
+        let mut request = std::pin::pin!(request);
+        let first = {
+            let _lock = self.lock_queue()?;
+            if !self.read()?.iter().any(|item| item.id == id) {
+                return Ok(None);
+            }
+            // Commit dispatch (first poll) under the same lock as purge/eviction.
+            // Never wait for network readiness or acknowledgement with that lock.
+            futures::poll!(request.as_mut())
+        };
+        Ok(Some(match first {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => request.await,
+        }))
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> Result<bool> {
+        let _lock = self.lock_queue()?;
+        Ok(self.read()?.is_empty())
+    }
+
     pub fn purge(&self) -> Result<()> {
         if self.exists()? {
             let _lock = self.lock_queue()?;
@@ -189,6 +215,24 @@ fn prune(queue: &mut VecDeque<Pending>, now: i64) -> bool {
     let before = queue.len();
     queue.retain(|item| item.created_ms > now.saturating_sub(MAX_AGE_MS));
     before != queue.len()
+}
+
+#[cfg(unix)]
+fn ensure_durable_dir(path: &Path, sync_dir: &impl Fn(&Path) -> io::Result<()>) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if !path.try_exists()? {
+        ensure_durable_dir(parent, sync_dir)?;
+        match fs::DirBuilder::new().mode(0o700).create(path) {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => (),
+            result => result?,
+        }
+    }
+    // A concurrent writer may see a new directory before its creator syncs it.
+    // Persist the entry before relying on it or creating the next component.
+    sync_dir(parent)
 }
 
 fn remove_if_present(path: &Path) -> io::Result<()> {
@@ -215,6 +259,39 @@ mod tests {
 
     fn event(n: usize) -> Pending {
         anonymous_event("suite", "finished", json!({"n": n})).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_enqueue_syncs_new_parent_entries_before_using_them() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("regressify");
+        let queue = app.join("analytics");
+        let fail_parent_sync = |parent: &Path| {
+            if parent == root.path() {
+                Err(io::Error::other("injected sync failure"))
+            } else {
+                File::open(parent)?.sync_all()
+            }
+        };
+        assert!(ensure_durable_dir(&queue, &fail_parent_sync).is_err());
+        assert!(app.is_dir());
+        assert!(!queue.exists(), "Cannot use an uncommitted parent");
+        let synced = std::cell::RefCell::new(Vec::new());
+        ensure_durable_dir(&queue, &|parent| {
+            File::open(parent)?.sync_all()?;
+            synced.borrow_mut().push(parent.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(synced.into_inner(), [root.path(), app.as_path()]);
+        let outbox = Outbox::new(queue);
+        let item = event(1);
+        let id = item.id;
+        outbox.push(item).unwrap();
+        assert!(
+            matches!(outbox.select(Utc::now().timestamp_millis()).unwrap(), Selection::Ready(p) if p.id == id)
+        );
     }
 
     #[test]

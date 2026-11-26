@@ -2,7 +2,7 @@ mod outbox;
 
 use std::{
     ffi::OsStr,
-    sync::{OnceLock, mpsc},
+    sync::{Mutex, mpsc},
     time::Duration,
 };
 
@@ -17,7 +17,7 @@ const PROJECT_TOKEN: &str = "phc_rFcdnV8w5LESQjpYoi2Psy7npbXMicUtNt32CnUpg4yk";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
-static WORKER: OnceLock<Option<mpsc::SyncSender<()>>> = OnceLock::new();
+static WORKER: Mutex<Option<mpsc::SyncSender<()>>> = Mutex::new(None);
 
 fn local_outbox() -> Option<Outbox> {
     // Test-launched binaries are not cfg(test). They must neither replay nor
@@ -85,9 +85,25 @@ async fn enqueue(outbox: Outbox, event: Pending, wake: impl FnOnce(Outbox) + Sen
 }
 
 fn wake(outbox: Outbox) {
-    if let Some(sender) = WORKER.get_or_init(|| spawn_worker(outbox, HOST, PROJECT_TOKEN).ok()) {
-        let _ = sender.try_send(());
+    if let Ok(mut worker) = WORKER.lock() {
+        wake_or_restart(&mut worker, || spawn_worker(outbox, HOST, PROJECT_TOKEN));
     }
+}
+
+fn wake_or_restart(
+    worker: &mut Option<mpsc::SyncSender<()>>,
+    spawn: impl FnOnce() -> std::io::Result<mpsc::SyncSender<()>>,
+) {
+    if let Some(sender) = worker
+        && !matches!(
+            sender.try_send(()),
+            Err(mpsc::TrySendError::Disconnected(_))
+        )
+    {
+        return;
+    }
+    // A new worker checks the queue before waiting for its first signal.
+    *worker = spawn().ok();
 }
 
 fn valid_part(part: &str) -> bool {
@@ -114,9 +130,9 @@ fn anonymous_event(object: &str, verb: &str, properties: Value) -> Option<Pendin
 }
 
 impl Pending {
-    fn wire_event(&self) -> Option<Event> {
+    fn wire_event(&self) -> Result<Event, PrepareError> {
         if !valid_part(&self.object) || !valid_part(&self.verb) {
-            return None;
+            return Err(PrepareError::Invalid);
         }
         // Both identifiers are event-scoped. Replay never creates a new identity.
         let mut event = Event::new(
@@ -124,16 +140,31 @@ impl Pending {
             self.id.to_string(),
         );
         event.set_uuid(self.id);
+        let timestamp = chrono::DateTime::from_timestamp_millis(self.created_ms)
+            .ok_or(PrepareError::Invalid)?;
+        // The SDK checks the wall clock again after queue selection.
         event
-            .set_timestamp(chrono::DateTime::from_timestamp_millis(self.created_ms)?)
-            .ok()?;
+            .set_timestamp(timestamp)
+            .map_err(|_| PrepareError::FutureTimestamp)?;
         for (key, value) in &self.properties {
-            event.insert_prop(key, value).ok()?;
+            event
+                .insert_prop(key, value)
+                .map_err(|_| PrepareError::Invalid)?;
         }
-        event.insert_prop("$process_person_profile", false).ok()?;
-        event.insert_prop("$geoip_disable", true).ok()?;
-        Some(event)
+        event
+            .insert_prop("$process_person_profile", false)
+            .map_err(|_| PrepareError::Invalid)?;
+        event
+            .insert_prop("$geoip_disable", true)
+            .map_err(|_| PrepareError::Invalid)?;
+        Ok(event)
     }
+}
+
+#[derive(Debug)]
+enum PrepareError {
+    Invalid,
+    FutureTimestamp,
 }
 
 fn spawn_worker(outbox: Outbox, host: &str, token: &str) -> std::io::Result<mpsc::SyncSender<()>> {
@@ -188,37 +219,72 @@ async fn deliver_one(
         Selection::Wait(delay) => return Ok(delay),
         Selection::Ready(item) => item,
     };
-    let Some(event) = item.wire_event() else {
-        outbox.finish(item.id, false, Utc::now().timestamp_millis())?;
-        return Ok(Duration::ZERO);
+    deliver_selected(outbox, client, host, token, timeout, item).await?;
+    Ok(Duration::ZERO)
+}
+
+async fn deliver_selected(
+    outbox: &Outbox,
+    client: &mut Option<Client>,
+    host: &str,
+    token: &str,
+    timeout: Duration,
+    item: Pending,
+) -> anyhow::Result<()> {
+    let event = match item.wire_event() {
+        Ok(event) => event,
+        Err(PrepareError::FutureTimestamp) => return Ok(()),
+        Err(PrepareError::Invalid) => {
+            return outbox.finish(item.id, false, Utc::now().timestamp_millis());
+        }
     };
     let client = match client {
         Some(client) => client,
         None => {
-            let http = reqwest::Client::builder()
+            let builder = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
-                .retry(reqwest::retry::never())
-                .build()?;
-            let options = ClientOptionsBuilder::default()
-                .host(host)
-                .api_key(token.to_owned())
-                .request_timeout_seconds(REQUEST_TIMEOUT.as_secs())
-                .max_capture_attempts(1)
-                .http_client(http)
-                .disable_geoip(true)
-                .is_server(false)
-                .on_error(|_| {})
-                .build()?;
+                .retry(reqwest::retry::never());
+            #[cfg(test)]
+            let builder = builder.no_proxy();
+            let http = builder.build()?;
+            // The SDK also creates an idle transport thread. Supply its client
+            // so a fallible TLS/runtime setup cannot log outside our silent scope.
+            let (host, token) = (host.to_owned(), token.to_owned());
+            let options = tokio::task::spawn_blocking(move || {
+                tracing::subscriber::with_default(
+                    tracing::subscriber::NoSubscriber::default(),
+                    || -> anyhow::Result<_> {
+                        let builder = reqwest::blocking::Client::builder();
+                        #[cfg(test)]
+                        let builder = builder.no_proxy();
+                        Ok(ClientOptionsBuilder::default()
+                            .host(host.as_str())
+                            .api_key(token)
+                            .request_timeout_seconds(REQUEST_TIMEOUT.as_secs())
+                            .max_capture_attempts(1)
+                            .http_client(http)
+                            .blocking_http_client(builder.build()?)
+                            .disable_geoip(true)
+                            .is_server(false)
+                            .on_error(|_| {})
+                            .build()?)
+                    },
+                )
+            })
+            .await??;
             client.insert(posthog_rs::client(options).await)
         }
     };
-    let retry = match tokio::time::timeout(timeout, client.capture_immediate(event)).await {
+    let send = tokio::time::timeout(timeout, client.capture_immediate(event));
+    let Some(result) = outbox.dispatch_if_pending(item.id, send).await? else {
+        return Ok(());
+    };
+    let retry = match result {
         Ok(Ok(summary)) => summary.submitted() != 1 || !summary.all_persisted(),
         Ok(Err(error)) => retryable(&error),
         Err(_) => true,
     };
-    outbox.finish(item.id, retry, Utc::now().timestamp_millis())?;
-    Ok(Duration::ZERO)
+    outbox.finish(item.id, retry, Utc::now().timestamp_millis())
 }
 
 fn retryable(error: &Error) -> bool {
@@ -319,6 +385,24 @@ mod tests {
     }
 
     #[test]
+    fn a_later_wake_recovers_failed_or_disconnected_workers_but_notifies_live_ones_once() {
+        let mut worker = None;
+        wake_or_restart(&mut worker, || {
+            Err(std::io::Error::other("thread unavailable"))
+        });
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        wake_or_restart(&mut worker, || Ok(sender));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        wake_or_restart(&mut worker, || Ok(sender));
+        for _ in 0..2 {
+            wake_or_restart(&mut worker, || panic!("must reuse the live worker"));
+        }
+        assert_eq!(receiver.try_recv(), Ok(()));
+        assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+    }
+
+    #[test]
     fn do_not_track_is_respected() {
         assert!(opted_out(Some(OsStr::new("1"))));
         for value in [None, Some(OsStr::new("")), Some(OsStr::new("0"))] {
@@ -350,7 +434,7 @@ mod tests {
     async fn unit_tests_never_initialize_the_production_client() {
         capture("site", "deployed", json!({})).await;
         start();
-        assert!(WORKER.get().is_none());
+        assert!(WORKER.lock().unwrap().is_none());
     }
 }
 
