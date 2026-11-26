@@ -2858,6 +2858,7 @@ test("image viewer magnifies original pixels up to 10000%", async ({ page, isMob
   await page.locator(".image-pane").press("+");
   await expect(zoom).toHaveText("10000%");
 
+  await page.locator(".image-pane").evaluate((pane) => pane.scrollTo(0, 0));
   const bounds = await images.boundingBox();
   if (!bounds) throw new Error("Magnified image is unavailable");
   const pixels = PNG.sync.read(
@@ -3320,6 +3321,34 @@ for (const hasDiff of [false, true]) {
         .toBeLessThan(1);
       expect((await placement()).every((pane) => pane.overflow === 0)).toBe(true);
     }
+    await page.getByRole("button", { name: "Actual size", exact: true }).click();
+    await expect(page.getByLabel("Zoom level")).toHaveText("100%");
+    const rightDrag = await lanes.first().evaluate((element) => {
+      const pane = element.getBoundingClientRect();
+      const surface = element.querySelector(".image-surface")?.getBoundingClientRect();
+      if (!surface) throw new Error("Comparison canvas is unavailable");
+      return {
+        x: Math.round(surface.left + surface.width / 2),
+        y: Math.round(pane.top + element.clientTop + 20),
+        right: pane.left + element.clientLeft + element.clientWidth - surface.right + 2,
+      };
+    });
+    await page.mouse.move(rightDrag.x, rightDrag.y);
+    await page.mouse.down();
+    try {
+      await page.mouse.move(rightDrag.x + rightDrag.right, rightDrag.y, { steps: 4 });
+    } finally {
+      await page.mouse.up();
+    }
+    await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+    await expect(page.getByLabel("Zoom level")).toHaveText("110%");
+    for (const width of [viewport.width + 400, viewport.width]) {
+      await page.setViewportSize({ ...viewport, width });
+      await expect
+        .poll(async () => Math.max(...(await placement()).map((pane) => Math.abs(pane.right))))
+        .toBeLessThan(1);
+      expect((await placement()).every((pane) => pane.overflow === 0)).toBe(true);
+    }
     const source = lanes.first();
     const image = source.locator("img");
     const before = await image.boundingBox();
@@ -3596,6 +3625,312 @@ test("image viewer drags underfilled canvases diagonally without overflow", asyn
   await page.screenshot({
     path: `.fixtures\\screenshots\\${isMobile ? "mobile" : "desktop"}\\comparison-diagonal-pan.png`,
   });
+});
+
+test("image viewer prints full lanes with the suite index open", async ({ page, isMobile }) => {
+  test.skip(isMobile, "The open desktop suite index switches to block layout when printed.");
+  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
+  const lanes = page.locator(".comparison-lane");
+  await expect(lanes).toHaveCount(3);
+  await page.emulateMedia({ media: "print" });
+  await expect
+    .poll(() =>
+      lanes.evaluateAll((panes) =>
+        panes.every((pane) => {
+          const image = pane.querySelector(".image-surface")?.getBoundingClientRect();
+          return image && image.height > 2 && pane.clientHeight >= Math.floor(image.height);
+        }),
+      ),
+    )
+    .toBe(true);
+});
+
+test("image viewer anchors center controls and touch gestures in linked lanes", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const size = { width: 1200, height: 1800 };
+  await mockComparisonImages(page, { reference: size, test: size, diff: size }, true);
+  await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=side");
+  await page.getByRole("button", { name: "Actual size", exact: true }).click();
+  const lanes = page.locator(".comparison-lane");
+  await lanes.nth(1).evaluate((pane) => pane.scrollTo(126, 230));
+  await expect.poll(() => lanes.first().evaluate((pane) => pane.scrollTop)).toBe(230);
+  const metrics = () =>
+    lanes.evaluateAll((panes) =>
+      panes.map((pane) => {
+        const surface = pane.querySelector<HTMLElement>(".image-surface");
+        if (!surface) throw new Error("Missing image canvas");
+        const image = surface.getBoundingClientRect();
+        const rect = pane.getBoundingClientRect();
+        const x = rect.left + pane.clientLeft + pane.clientWidth / 2;
+        const y = rect.top + pane.clientTop + pane.clientHeight / 2;
+        const scale = image.width / 1200;
+        return {
+          x,
+          y,
+          left: image.left,
+          top: image.top,
+          scale,
+          imageX: (x - image.left) / scale,
+          imageY: (y - image.top) / scale,
+        };
+      }),
+    );
+  const before = await metrics();
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await expect(page.getByLabel("Zoom level")).toHaveText("110%");
+  const laneAt = (values: typeof before, index: number) => {
+    const lane = values[index];
+    if (!lane) throw new Error(`Missing lane ${index}`);
+    return lane;
+  };
+  for (const [index, pane] of (await metrics()).entries()) {
+    expect(Math.abs(pane.imageX - laneAt(before, index).imageX)).toBeLessThan(1);
+    expect(Math.abs(pane.imageY - laneAt(before, index).imageY)).toBeLessThan(1);
+  }
+  await lanes.nth(1).press("-");
+  await expect(page.getByLabel("Zoom level")).toHaveText("100%");
+  const cdp = await page.context().newCDPSession(page);
+  const touch = (
+    type: "touchStart" | "touchMove" | "touchEnd" | "touchCancel",
+    touchPoints: { x: number; y: number; id: number }[],
+  ) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints });
+  const { x, y } = laneAt(before, 1);
+  const at = (id: number, dx: number, dy: number) => ({
+    id,
+    x: Math.round(x) + dx,
+    y: Math.round(y) + dy,
+  });
+  try {
+    await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+    await touch("touchStart", [at(1, -10, 0)]);
+    await touch("touchMove", [at(1, -20, 15)]);
+    await expect.poll(() => lanes.first().evaluate((p) => p.scrollTop)).toBe(215);
+    const prior = laneAt(await metrics(), 1);
+    await touch("touchStart", [at(1, -20, 15), at(2, 20, 15)]);
+    await touch("touchMove", [at(1, -23, 25), at(2, 33, 25)]);
+    await expect(page.getByLabel("Zoom level")).toHaveText("140%");
+    const imageX = (Math.round(x) - prior.left) / prior.scale;
+    const imageY = (Math.round(y) + 15 - prior.top) / prior.scale;
+    const after = laneAt(await metrics(), 1);
+    expect(Math.abs(after.left + imageX * after.scale - (Math.round(x) + 5))).toBeLessThan(1.5);
+    expect(Math.abs(after.top + imageY * after.scale - (Math.round(y) + 25))).toBeLessThan(1.5);
+    // Parallel two-finger move at unchanged spread after pinching must keep panning both axes.
+    const beforeParallel = await lanes
+      .first()
+      .evaluate((p) => ({ left: p.scrollLeft, top: p.scrollTop }));
+    await touch("touchMove", [at(1, -53, -15), at(2, 3, -15)]);
+    await expect
+      .poll(async () =>
+        Math.round((await lanes.first().evaluate((p) => p.scrollLeft)) - beforeParallel.left),
+      )
+      .toBe(30);
+    await expect
+      .poll(async () =>
+        Math.round((await lanes.first().evaluate((p) => p.scrollTop)) - beforeParallel.top),
+      )
+      .toBe(40);
+    await touch("touchEnd", [at(2, 3, -15)]);
+    const offset = await lanes.first().evaluate((p) => p.scrollTop);
+    await touch("touchMove", [at(1, -53, 5)]);
+    await expect.poll(() => lanes.first().evaluate((p) => p.scrollTop)).toBe(offset - 20);
+    await touch("touchCancel", []);
+    await expect(page.locator(".zoom-canvas")).not.toHaveClass(/is-panning/);
+    expect(await page.evaluate(() => window.visualViewport?.scale)).toBe(1);
+
+    // At the 10000% maximum zoom limit, outward pinch + midpoint pan must still follow fingers
+    // and never leave stale anchors behind for a later resize.
+    await lanes.nth(1).focus();
+    for (let step = 0; step < 24; step++) await lanes.nth(1).press("+");
+    await expect(page.getByLabel("Zoom level")).toHaveText("10000%");
+    const beforeMaxPan = await lanes
+      .first()
+      .evaluate((p) => ({ left: p.scrollLeft, top: p.scrollTop }));
+    await touch("touchStart", [at(1, -20, 0), at(2, 20, 0)]);
+    await touch("touchMove", [at(1, -60, -25), at(2, 0, -25)]);
+    await expect
+      .poll(async () =>
+        Math.round((await lanes.first().evaluate((p) => p.scrollLeft)) - beforeMaxPan.left),
+      )
+      .toBe(30);
+    await expect
+      .poll(async () =>
+        Math.round((await lanes.first().evaluate((p) => p.scrollTop)) - beforeMaxPan.top),
+      )
+      .toBe(25);
+    await touch("touchEnd", []);
+    await lanes.nth(1).evaluate((p) => p.scrollTo(0, 0));
+    await expect.poll(() => lanes.first().evaluate((p) => p.scrollLeft + p.scrollTop)).toBe(0);
+    const maxViewport = page.viewportSize();
+    if (maxViewport) {
+      await page.setViewportSize({ ...maxViewport, width: maxViewport.width + 40 });
+      expect(await lanes.first().evaluate((p) => p.scrollLeft + p.scrollTop)).toBe(0);
+      await page.setViewportSize(maxViewport);
+    }
+
+    await page.getByRole("button", { name: "Fit to window", exact: true }).click();
+    const fitted = await page.getByLabel("Zoom level").innerText();
+    await touch("touchStart", [at(1, -18, 0), at(2, 18, 0)]);
+    // Staggered per-finger packet arrival introduces transient ~3px spread jitter during a parallel pan.
+    await touch("touchMove", [at(1, -18, 15), at(2, 18, 0)]);
+    await touch("touchMove", [at(1, -18, 20), at(2, 18, 20)]);
+    await expect(page.getByLabel("Zoom level")).toHaveText(fitted);
+    await expect(page.getByRole("button", { name: "Fit to window", exact: true })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    await touch("touchMove", [at(1, -32, 20), at(2, 32, 20)]);
+    await touch("touchEnd", []);
+    await expect(page.getByLabel("Zoom level")).toHaveText(fitted);
+
+    // Pinching an underfilled Side-by-side lane centered must stay centered after viewport resize.
+    const initialSize = page.viewportSize();
+    if (initialSize && initialSize.width >= 1000) {
+      await page.getByRole("button", { name: "Fit to window", exact: true }).click();
+      const centerMetric = laneAt(await metrics(), 1);
+      const cx = Math.round(centerMetric.x);
+      const cy = Math.round(centerMetric.y);
+      await touch("touchStart", [
+        { id: 1, x: cx - 60, y: cy },
+        { id: 2, x: cx + 60, y: cy },
+      ]);
+      await touch("touchMove", [
+        { id: 1, x: cx - 30, y: cy },
+        { id: 2, x: cx + 30, y: cy },
+      ]);
+      await touch("touchEnd", []);
+      await expect(page.getByLabel("Zoom level")).toHaveText("25%");
+      await page.setViewportSize({ ...initialSize, width: initialSize.width + 360 });
+      await expect
+        .poll(() =>
+          lanes.nth(1).evaluate((pane) => {
+            const surface = pane.querySelector(".image-surface")?.getBoundingClientRect();
+            const bounds = pane.getBoundingClientRect();
+            if (!surface) return Infinity;
+            const left = surface.left - bounds.left - pane.clientLeft;
+            const right = bounds.left + pane.clientLeft + pane.clientWidth - surface.right;
+            return Math.abs(left - right);
+          }),
+        )
+        .toBeLessThan(2);
+      await page.setViewportSize(initialSize);
+    }
+
+    // Clamped pre-pinch pan, edge-clamped pinch pan, and 25% limit reversal must stay live.
+    await page.getByRole("button", { name: "Actual size", exact: true }).click();
+    await lanes.nth(1).evaluate((p) => p.scrollTo(0, 0));
+    await expect.poll(() => lanes.first().evaluate((p) => p.scrollLeft + p.scrollTop)).toBe(0);
+    const box = await lanes.nth(1).evaluate((p) => {
+      const r = p.getBoundingClientRect();
+      return {
+        left: Math.round(r.left + p.clientLeft),
+        top: Math.round(r.top + p.clientTop),
+        cx: Math.round(r.left + p.clientLeft + p.clientWidth / 2),
+        cy: Math.round(r.top + p.clientTop + p.clientHeight / 2),
+      };
+    });
+    await touch("touchStart", [
+      { id: 1, x: box.left + 40, y: box.top + 60 },
+      { id: 2, x: box.left + 80, y: box.top + 60 },
+    ]);
+    await touch("touchMove", [
+      { id: 1, x: box.left + 100, y: box.top + 130 },
+      { id: 2, x: box.left + 140, y: box.top + 130 },
+    ]);
+    await touch("touchMove", [
+      { id: 1, x: box.left + 80, y: box.top + 130 },
+      { id: 2, x: box.left + 160, y: box.top + 130 },
+    ]);
+    await touch("touchEnd", []);
+    await expect(page.getByLabel("Zoom level")).toHaveText("200%");
+    await expect
+      .poll(() => lanes.first().evaluate((p) => Math.round(p.scrollLeft)))
+      .toBeCloseTo(120, -1);
+    await expect
+      .poll(() => lanes.first().evaluate((p) => Math.round(p.scrollTop)))
+      .toBeCloseTo(130, -1);
+
+    // Edge-clamped inward pinch at (0, 0) must still pan immediately when fingers move up-left.
+    await page.getByRole("button", { name: "Actual size", exact: true }).click();
+    await lanes.nth(1).evaluate((p) => p.scrollTo(0, 0));
+    await expect.poll(() => lanes.first().evaluate((p) => p.scrollLeft + p.scrollTop)).toBe(0);
+    await touch("touchStart", [
+      { id: 1, x: box.cx - 50, y: box.cy },
+      { id: 2, x: box.cx + 50, y: box.cy },
+    ]);
+    await touch("touchMove", [
+      { id: 1, x: box.cx - 40, y: box.cy },
+      { id: 2, x: box.cx + 40, y: box.cy },
+    ]);
+    await expect(page.getByLabel("Zoom level")).toHaveText("80%");
+    await touch("touchMove", [
+      { id: 1, x: box.cx - 65, y: box.cy - 30 },
+      { id: 2, x: box.cx + 15, y: box.cy - 30 },
+    ]);
+    await touch("touchEnd", []);
+    await expect
+      .poll(() => lanes.first().evaluate((p) => Math.round(p.scrollTop)))
+      .toBeCloseTo(30, 0);
+
+    // Reversing outward after clamping at 25% must respond immediately without dead-zone travel.
+    await touch("touchStart", [
+      { id: 1, x: box.cx - 48, y: box.cy },
+      { id: 2, x: box.cx + 48, y: box.cy },
+    ]);
+    await touch("touchMove", [
+      { id: 1, x: box.cx - 12, y: box.cy },
+      { id: 2, x: box.cx + 12, y: box.cy },
+    ]);
+    await expect(page.getByLabel("Zoom level")).toHaveText("25%");
+    await touch("touchMove", [
+      { id: 1, x: box.cx - 24, y: box.cy },
+      { id: 2, x: box.cx + 24, y: box.cy },
+    ]);
+    await touch("touchEnd", []);
+    await expect(page.getByLabel("Zoom level")).toHaveText("50%");
+
+    // Zooming out when Fit to window is already <= 25% must keep Fit to window active.
+    const currentViewport = page.viewportSize();
+    if (currentViewport) {
+      await page.setViewportSize({ width: currentViewport.width, height: 500 });
+      await page.getByRole("button", { name: "Fit to window", exact: true }).click();
+      const fitButton = page.getByRole("button", { name: "Fit to window", exact: true });
+      await expect(fitButton).toHaveAttribute("aria-pressed", "true");
+      await lanes.nth(1).focus();
+      await lanes.nth(1).press("-");
+      await expect(fitButton).toHaveAttribute("aria-pressed", "true");
+      const shortBox = await lanes.nth(1).evaluate((p) => {
+        const r = p.getBoundingClientRect();
+        return {
+          cx: Math.round(r.left + p.clientLeft + p.clientWidth / 2),
+          cy: Math.round(r.top + p.clientTop + p.clientHeight / 2),
+        };
+      });
+      await page.mouse.move(shortBox.cx, shortBox.cy);
+      await page.keyboard.down("Control");
+      try {
+        await page.mouse.wheel(0, 100);
+      } finally {
+        await page.keyboard.up("Control");
+      }
+      await expect(fitButton).toHaveAttribute("aria-pressed", "true");
+      await touch("touchStart", [
+        { id: 1, x: shortBox.cx - 40, y: shortBox.cy },
+        { id: 2, x: shortBox.cx + 40, y: shortBox.cy },
+      ]);
+      await touch("touchMove", [
+        { id: 1, x: shortBox.cx - 20, y: shortBox.cy },
+        { id: 2, x: shortBox.cx + 20, y: shortBox.cy },
+      ]);
+      await touch("touchEnd", []);
+      await expect(fitButton).toHaveAttribute("aria-pressed", "true");
+      await page.setViewportSize(currentViewport);
+    }
+  } finally {
+    await cdp.detach();
+  }
 });
 
 test("image viewer keeps per-mode zoom and cancels interrupted drags", async ({

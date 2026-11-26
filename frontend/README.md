@@ -495,11 +495,14 @@ Overview and suite footers stay at the bottom of short pages and follow longer
 content without covering it. Image review remains footer-free.
 
 Image comparison uses bounded image panes with independent canvas scrolling.
-Unmodified mouse-wheel, trackpad, and touch scrolling move the active image pane.
+Unmodified mouse-wheel and trackpad scrolling move the active image pane. Drag
+one finger to pan, or pan and pinch with two fingers in one lane. Lifting one
+finger resumes dragging; the gesture does not zoom the page or adjust the blend slider.
 Left-drag pans that pane using pointer capture, without changing zoom or wipe
 position; release, cancellation, lost capture, blur, or a view change clears the
 gesture. Ctrl/Cmd+wheel selects the next zoom preset around the pointer; zoom
-buttons offer presets from 25% up to 10000% (100×). Magnified comparison images
+buttons and `+`/`-` select presets from 25% up to 10000% (100×) around each
+visible lane's center, clamped at the image edges. Magnified comparison images
 show crisp pixels above 100% and a grid above 1000%; fit views retain smooth scaling. Fit width (the
 web default) and Fit to window remain responsive and never upscale. Actual size selects 100%.
 Each mode retains its zoom for the current capture; selecting another capture

@@ -38,6 +38,8 @@ description: 'Use when changing desktop comparison reports, image previews, nami
 
 ## Checks
 
+Check toolbar/keyboard steps against the visible lane center, clamped at image edges. Native pinch consumes incremental toolkit deltas, not presets. Precision pans must retain linked offsets and bounded placement; Windows Direct Manipulation delivers touchpad, not raw touchscreen pinch.
+
 The pixel grid is visible strictly above 1000%. Clip its one-device-pixel
 strokes to the image and use the same pixel boundaries as nearest-neighbor sampling.
 Keep the Wipe pointer fraction unrounded; whole percentages belong to the

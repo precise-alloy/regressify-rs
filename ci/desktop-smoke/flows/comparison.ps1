@@ -121,10 +121,10 @@ public static class RegressifySmokeZoomKeys {
             $script:comparisonSignature = $signature -join ','
         } finally { $bitmap.Dispose() }
     }
-    function Send-ComparisonWheel([string]$Pane, [bool]$Horizontal) {
+    function Send-ComparisonWheel([string]$Pane, [bool]$Horizontal, [int]$Notches = 1) {
         Move-ComparisonPointer $Pane | Out-Null
         $flags = if ($Horizontal) { 0x1000 } else { 0x0800 }
-        $amount = if ($Horizontal) { 120 } else { -120 }
+        $amount = if ($Horizontal) { 120 * $Notches } else { -120 * $Notches }
         $data = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$amount), 0)
         [RegressifySmokeNative]::mouse_event($flags, 0, 0, $data, [UIntPtr]::Zero)
         Wait-Control "$Pane image preview" | Out-Null
@@ -316,7 +316,16 @@ public static class RegressifySmokeZoomKeys {
         }
         Invoke-Control 'Zoom in' -Pointer
         Wait-Control '10000.0%' | Out-Null
+        # Center zoom no longer leaves the fixture's top-left pixel probe visible.
+        $preview = (Wait-Control 'Test image preview').Current.BoundingRectangle
+        for ($i = 0; $i -lt 32; $i++) {
+            $canvas = (Wait-Control 'Test image canvas').Current.BoundingRectangle
+            if ($canvas.Left -ge $preview.Left - 1 -and $canvas.Top -ge $preview.Top - 1) { break }
+            if ($canvas.Left -lt $preview.Left - 1) { Send-ComparisonWheel Test $true -200 }
+            if ($canvas.Top -lt $preview.Top - 1) { Send-ComparisonWheel Test $false -200 }
+        }
         $canvas = (Wait-Control 'Test image canvas').Current.BoundingRectangle
+        if ($canvas.Left -lt $preview.Left - 1 -or $canvas.Top -lt $preview.Top - 1) { throw 'Cannot reveal the magnified pixel probe.' }
         $native = [RegressifySmokeNative+Rect]::new()
         if (-not [RegressifySmokeNative]::GetWindowRect($script:window, [ref]$native)) { throw 'Cannot read magnified window bounds.' }
         $pixelWidth = $canvas.Width / 960
