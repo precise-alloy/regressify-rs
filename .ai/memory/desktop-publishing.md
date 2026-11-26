@@ -1,6 +1,6 @@
 # Desktop Publishing
 
-Verified: 2026-11-13
+Verified: 2026-11-26
 
 - [Landing apps](../../src/desktop/landing.rs) are global per-user definitions,
   automatically stored by UUID. The [editor](../../src/desktop/ui/landing.rs)
@@ -86,10 +86,10 @@ Verified: 2026-11-13
   (`original_bytes`) and final (`total_bytes`, `file_count`) Azure package and
   Netlify/Cloudflare manifest inventories without rescanning files. The
   digest fixture counts three paths/15 bytes although only one blob uploads;
-  the cached Cloudflare fixture excludes hosting-policy files. Analytics tests
-  cover silent failures and client reuse across concurrent calls and new runtimes.
-  HTTP timeout cleanup must stay inside the silent tracing scope because request
-  futures log on drop; see the [analytics skill](../../.github/skills/product-analytics/SKILL.md).
+  the cached Cloudflare fixture excludes hosting-policy files. Deployment workers
+  can exit immediately: await the [durable enqueue](../../src/analytics/outbox.rs),
+  not HTTP. The process-local sender owns its runtime; request futures can log
+  on drop, so its entire lifetime stays silent. See the [analytics skill](../../.github/skills/product-analytics/SKILL.md).
 - [Status summaries](../../src/snapshot/site.rs) use `/_snapshot/status.json`
   with aggregate counts and generation time. They revalidate and permit anonymous
   CORS reads; exact ZIP/Netlify inventories include this extra file.

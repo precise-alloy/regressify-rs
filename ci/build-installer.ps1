@@ -237,7 +237,9 @@ if ($SmokeTest) {
             if ($command -cne $expected) { throw "Folder context-menu command is incorrect: $command" }
         }
     }
+    $originalAnalyticsFixture = $env:REGRESSIFY_TEST_NO_ANALYTICS
     try {
+        $env:REGRESSIFY_TEST_NO_ANALYTICS = '1'
         $prepareLog = Join-Path $fixture 'prepare.log'
         $runningForPrepare = [System.Threading.Mutex]::new($false, 'Local\Regressify.Desktop.Running.ED6F0908-7E11-4608-A532-E43482AA117B')
         try {
@@ -334,6 +336,7 @@ if ($SmokeTest) {
         Assert-InstallerCliPath
         Write-Output 'Fresh install, CLI lookup through user PATH, Chromium cache reuse/network fallback/skip, visible update foreground handoff, fully silent setup, shortcuts, folder context menus, running-app protection and downgrade protection passed.'
     } finally {
+        $env:REGRESSIFY_TEST_NO_ANALYTICS = $originalAnalyticsFixture
         if (Test-Path -LiteralPath $uninstaller) {
             $uninstallLog = Join-Path $fixture 'uninstall.log'
             $result = Invoke-InstallerFixture $uninstaller @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="' + $uninstallLog + '"'))

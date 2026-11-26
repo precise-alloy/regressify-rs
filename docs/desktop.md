@@ -549,12 +549,23 @@ and unsafe URLs do not create this event.
 
 Tracking is anonymous, with person profiles and GeoIP enrichment disabled.
 Deployment tokens, workspace paths, target names, and report contents are not
-event properties. Delivery is silent and best effort, with one attempt and a
-two-second deadline; tracking failures do not change the deployment result or
-appear in the UI. Set `DO_NOT_TRACK=1` in the application's environment before
-launch to disable tracking. The [shared analytics API](../src/analytics.rs) also
-serves future CLI and desktop events, automatically naming them
-`regressify_[object]_[verb]`.
+event properties. Deployment waits only for a local queue write, not the network.
+The CLI and Desktop share a per-user queue in `regressify/analytics` under the
+OS local data directory, outside workspaces and reports. It keeps the newest 100
+events; records 30 days old expire the next time the queue is used.
+
+While Regressify runs, a background sender removes acknowledged events. Network
+errors, HTTP 408, 429, and 5xx are retried with backoff: up to three attempts per
+round, 30 seconds per request, then a five-minute pause for that event. Other HTTP
+rejections discard only the rejected event. Closing the app leaves unfinished work
+for the next CLI or Desktop launch; it does not leave a helper process running.
+Replays use the original event ID and timestamp. Delivery is silent and best effort:
+tracking failures do not change the deployment result or appear in the UI.
+
+Set `DO_NOT_TRACK=1` before launch to disable collection and delivery and delete
+pending events. This cannot recall a request already sent. Launching does not
+collect a launch event. New event types can use the same
+[capture API](../src/analytics.rs) and `regressify_[object]_[verb]` namespace.
 
 In **Runs**, **Open Site** appears beside **Open Report** in the toolbar and on
 each published suite's row. It opens the most recently deployed site containing

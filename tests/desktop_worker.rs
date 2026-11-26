@@ -19,6 +19,12 @@ fn desktop_launches() -> RwLockReadGuard<'static, ()> {
     SETUP_MUTEX.read().unwrap_or_else(PoisonError::into_inner)
 }
 
+fn fixture_command(executable: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command.env("REGRESSIFY_TEST_NO_ANALYTICS", "1");
+    command
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LogBenchmarkSample {
@@ -206,7 +212,7 @@ fn logging_cli_command(
     disabled: bool,
     skip_compare: bool,
 ) -> Command {
-    let mut process = Command::new(env!("CARGO_BIN_EXE_regressify"));
+    let mut process = fixture_command(Path::new(env!("CARGO_BIN_EXE_regressify")));
     process
         .args(["--root"])
         .arg(root)
@@ -791,7 +797,7 @@ fn installer_browser_mode_reuses_cache_without_network_during_setup() {
         "Do not run this test during an actual installation"
     );
 
-    let mut child = Command::new(executable)
+    let mut child = fixture_command(executable)
         .arg("--install-chromium")
         .current_dir(workspace.path())
         .env("HTTP_PROXY", "http://127.0.0.1:9")
@@ -1315,7 +1321,7 @@ fn invoke_with_events(
     events_path: Option<&Path>,
 ) -> Output {
     let scratch = (request.command == RunCommand::Deploy).then(|| tempfile::tempdir().unwrap());
-    let mut child = Command::new(executable)
+    let mut child = fixture_command(executable)
         .arg(WORKER_FLAG)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1356,7 +1362,7 @@ fn duplicate_workspace_launches_activate_the_owner_without_starting_another_gui(
         OpenInstance::Activated => panic!("Expected isolated workspace ownership"),
     };
     for path in [workspace.path().to_path_buf(), workspace.path().join(".")] {
-        let mut child = Command::new(executable)
+        let mut child = fixture_command(executable)
             .arg(path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

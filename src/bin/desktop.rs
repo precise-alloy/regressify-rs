@@ -66,6 +66,7 @@ fn run() -> ExitCode {
             }
         };
     }
+    regressify::analytics::start();
     let args = match DesktopArgs::try_parse() {
         Ok(args) => args,
         Err(error) => {

@@ -4,7 +4,7 @@ description: Deploy reports to Azure Static Web Apps, Netlify, or Cloudflare Wor
 sidebar:
   label: Publish reports
   order: 9
-lastUpdated: 2026-11-16
+lastUpdated: 2026-11-26
 # The DO_NOT_TRACK paragraph applies to every deployment, so it sits before the
 # subsections rather than under Landing apps. (A YAML comment is not rendered.)
 ---
@@ -38,8 +38,10 @@ Publish to Azure Static Web Apps, Netlify, or Cloudflare Workers without extra t
 For Cloudflare, **workers.dev** can be **Public (production)** (the default, which makes the report reachable at a
 public workers.dev address and needs a workers.dev subdomain), **Private**, or **Preserve existing routing**.
 
-Reports ask search engines not to index them but aren't private. Use your provider's access controls. Each successful
-deployment sends one anonymous event; set `DO_NOT_TRACK=1` to disable it.
+Reports ask search engines not to index them but aren't private. Use your provider's access controls.
+A successful public deployment queues one anonymous event, including its public URL. Delivery happens
+in the background and resumes on a later CLI or Desktop launch if interrupted. The per-user queue keeps
+up to 100 events for 30 days. Set `DO_NOT_TRACK=1` before launch to disable tracking and clear pending events.
 
 ## Update a site
 

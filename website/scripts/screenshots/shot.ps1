@@ -107,7 +107,11 @@ switch ($Action) {
     New-Item -ItemType Directory -Force $root | Out-Null
     # Windows passes one command-line string; quoting keeps a workspace path with spaces as a
     # single argument, and Windows paths cannot contain quotes. No shell is involved.
-    $proc = Start-Process -FilePath $exe -ArgumentList "`"$workspace`"" -PassThru
+    $previousAnalyticsFixture = $env:REGRESSIFY_TEST_NO_ANALYTICS
+    try {
+      $env:REGRESSIFY_TEST_NO_ANALYTICS = '1'
+      $proc = Start-Process -FilePath $exe -ArgumentList "`"$workspace`"" -PassThru
+    } finally { $env:REGRESSIFY_TEST_NO_ANALYTICS = $previousAnalyticsFixture }
     Set-Content -Encoding ASCII $pidFile $proc.Id
     for ($i = 0; $i -lt 60; $i++) { try { $h = Get-Window; break } catch { Start-Sleep -Milliseconds 500 } }
     [DocShot]::MoveWindow($h, 40, 40, 1440, 900, $true) | Out-Null

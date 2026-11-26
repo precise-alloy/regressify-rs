@@ -1,154 +1,251 @@
-use std::{ffi::OsStr, time::Duration};
+mod outbox;
 
-use posthog_rs::{Client, ClientOptions, ClientOptionsBuilder, ClientOptionsBuilderError, Event};
+use std::{
+    ffi::OsStr,
+    sync::{OnceLock, mpsc},
+    time::Duration,
+};
+
+use chrono::Utc;
+use outbox::{Outbox, Pending, Selection};
+use posthog_rs::{Client, ClientOptionsBuilder, Error, Event};
 use serde_json::Value;
-use tokio::sync::OnceCell;
-use tracing::{instrument::WithSubscriber, subscriber::NoSubscriber};
+use uuid::Uuid;
 
 const HOST: &str = "https://us.i.posthog.com";
 const PROJECT_TOKEN: &str = "phc_rFcdnV8w5LESQjpYoi2Psy7npbXMicUtNt32CnUpg4yk";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
-static CLIENT: OnceCell<Option<Client>> = OnceCell::const_new();
+static WORKER: OnceLock<Option<mpsc::SyncSender<()>>> = OnceLock::new();
 
-/// Captures `regressify_[object]_[verb]` with JSON object properties, anonymously.
-/// Object and verb must be nonempty ASCII letters, digits, or underscores.
-/// Callers must exclude credentials and personal data from the properties.
-/// Delivery is silent, bounded, and skipped without a Tokio runtime or with DO_NOT_TRACK=1.
-pub async fn capture(object: &str, verb: &str, properties: Value) {
-    if cfg!(test) || opted_out(std::env::var_os("DO_NOT_TRACK").as_deref()) {
+fn local_outbox() -> Option<Outbox> {
+    // Test-launched binaries are not cfg(test). They must neither replay nor
+    // purge the user's queue, even when the child inherits DO_NOT_TRACK.
+    if std::env::var_os("REGRESSIFY_TEST_NO_ANALYTICS").as_deref() == Some(OsStr::new("1")) {
+        return None;
+    }
+    Some(Outbox::new(
+        directories::BaseDirs::new()?
+            .data_local_dir()
+            .join("regressify")
+            .join("analytics"),
+    ))
+}
+
+/// Resume pending delivery without collecting a launch event. Opt-out purges
+/// synchronously so even a short-lived CLI invocation honors it before exit.
+pub fn start() {
+    if cfg!(test) {
         return;
     }
-    capture_using(&CLIENT, object, verb, properties, || {
-        client_options(HOST, PROJECT_TOKEN)
-    })
-    .await;
+    if let Some(outbox) = local_outbox() {
+        start_using(
+            outbox,
+            opted_out(std::env::var_os("DO_NOT_TRACK").as_deref()),
+        );
+    }
+}
+
+fn start_using(outbox: Outbox, disabled: bool) {
+    if disabled {
+        let _ = outbox.purge();
+    } else {
+        wake(outbox);
+    }
 }
 
 fn opted_out(value: Option<&OsStr>) -> bool {
     value == Some(OsStr::new("1"))
 }
 
-async fn capture_using(
-    client: &OnceCell<Option<Client>>,
-    object: &str,
-    verb: &str,
-    properties: Value,
-    options: impl FnOnce() -> Result<ClientOptions, ClientOptionsBuilderError>,
-) {
-    if tokio::runtime::Handle::try_current().is_err() {
+/// Queue an anonymous `regressify_[object]_[verb]` event. Callers must exclude
+/// credentials and personal data. Only the local write is awaited, never HTTP.
+pub async fn capture(object: &str, verb: &str, properties: Value) {
+    if cfg!(test) || opted_out(std::env::var_os("DO_NOT_TRACK").as_deref()) {
         return;
     }
-    let work = async {
-        let Some(event) = anonymous_event(object, verb, properties) else {
-            return;
-        };
-        let client = client
-            .get_or_init(|| async { Some(posthog_rs::client(options().ok()?).await) })
-            .await;
-        if let Some(client) = client {
-            // Workers exit after completion; an in-memory queue would lose their events.
-            let _ = client.capture_immediate(event).await;
-        }
+    let (Some(outbox), Some(event)) = (local_outbox(), anonymous_event(object, verb, properties))
+    else {
+        return;
     };
-    // Keep timeout cleanup inside the silent scope too; HTTP futures log on drop.
-    async {
-        let _ = tokio::time::timeout(REQUEST_TIMEOUT, work).await;
+    enqueue(outbox, event, wake).await;
+}
+
+async fn enqueue(outbox: Outbox, event: Pending, wake: impl FnOnce(Outbox) + Send + 'static) {
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let _ = runtime
+            .spawn_blocking(move || {
+                if outbox.push(event).is_ok() {
+                    wake(outbox);
+                }
+            })
+            .await;
     }
-    .with_subscriber(NoSubscriber::default())
-    .await;
 }
 
-fn client_options(host: &str, token: &str) -> Result<ClientOptions, ClientOptionsBuilderError> {
-    ClientOptionsBuilder::default()
-        .host(host)
-        .api_key(token.to_owned())
-        .request_timeout_seconds(REQUEST_TIMEOUT.as_secs())
-        .max_capture_attempts(1)
-        .shutdown_timeout_ms(REQUEST_TIMEOUT.as_millis() as u64)
-        .disable_geoip(true)
-        .is_server(false)
-        .on_error(|_| {})
-        .build()
+fn wake(outbox: Outbox) {
+    if let Some(sender) = WORKER.get_or_init(|| spawn_worker(outbox, HOST, PROJECT_TOKEN).ok()) {
+        let _ = sender.try_send(());
+    }
 }
 
-fn anonymous_event(object: &str, verb: &str, properties: Value) -> Option<Event> {
-    if [object, verb].into_iter().any(|part| {
-        part.is_empty()
-            || !part
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    }) {
+fn valid_part(part: &str) -> bool {
+    !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn anonymous_event(object: &str, verb: &str, properties: Value) -> Option<Pending> {
+    if !valid_part(object) || !valid_part(verb) {
         return None;
     }
-    let mut event = Event::new_anon(format!("regressify_{object}_{verb}"));
-    for (key, value) in properties.as_object()? {
-        event.insert_prop(key, value).ok()?;
+    let Value::Object(mut properties) = properties else {
+        return None;
+    };
+    properties.insert("app_version".into(), env!("CARGO_PKG_VERSION").into());
+    Some(Pending {
+        id: Uuid::new_v4(),
+        created_ms: Utc::now().timestamp_millis(),
+        object: object.to_owned(),
+        verb: verb.to_owned(),
+        properties,
+        attempts: 0,
+        due_ms: 0,
+    })
+}
+
+impl Pending {
+    fn wire_event(&self) -> Option<Event> {
+        if !valid_part(&self.object) || !valid_part(&self.verb) {
+            return None;
+        }
+        // Both identifiers are event-scoped. Replay never creates a new identity.
+        let mut event = Event::new(
+            format!("regressify_{}_{}", self.object, self.verb),
+            self.id.to_string(),
+        );
+        event.set_uuid(self.id);
+        event
+            .set_timestamp(chrono::DateTime::from_timestamp_millis(self.created_ms)?)
+            .ok()?;
+        for (key, value) in &self.properties {
+            event.insert_prop(key, value).ok()?;
+        }
+        event.insert_prop("$process_person_profile", false).ok()?;
+        event.insert_prop("$geoip_disable", true).ok()?;
+        Some(event)
     }
-    event
-        .insert_prop("app_version", env!("CARGO_PKG_VERSION"))
-        .ok()?;
-    event.insert_prop("$process_person_profile", false).ok()?;
-    event.insert_prop("$geoip_disable", true).ok()?;
-    Some(event)
+}
+
+fn spawn_worker(outbox: Outbox, host: &str, token: &str) -> std::io::Result<mpsc::SyncSender<()>> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let (host, token) = (host.to_owned(), token.to_owned());
+    std::thread::Builder::new()
+        .name("analytics".into())
+        .spawn(move || {
+            // Own the runtime and silence its entire lifetime, including HTTP cleanup.
+            tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                let mut client = None;
+                loop {
+                    let wait = runtime
+                        .block_on(deliver_one(
+                            &outbox,
+                            &mut client,
+                            &host,
+                            &token,
+                            REQUEST_TIMEOUT,
+                        ))
+                        .unwrap_or(POLL_INTERVAL);
+                    if matches!(
+                        receiver.recv_timeout(wait.min(POLL_INTERVAL)),
+                        Err(mpsc::RecvTimeoutError::Disconnected)
+                    ) {
+                        break;
+                    }
+                }
+            });
+        })?;
+    Ok(sender)
+}
+
+async fn deliver_one(
+    outbox: &Outbox,
+    client: &mut Option<Client>,
+    host: &str,
+    token: &str,
+    timeout: Duration,
+) -> anyhow::Result<Duration> {
+    // Only senders take this lock. Neither capture nor opt-out waits on the network.
+    let Some(_sender) = outbox.try_sender()? else {
+        return Ok(POLL_INTERVAL);
+    };
+    let item = match outbox.select(Utc::now().timestamp_millis())? {
+        Selection::Wait(delay) => return Ok(delay),
+        Selection::Ready(item) => item,
+    };
+    let Some(event) = item.wire_event() else {
+        outbox.finish(item.id, false, Utc::now().timestamp_millis())?;
+        return Ok(Duration::ZERO);
+    };
+    let client = match client {
+        Some(client) => client,
+        None => {
+            let http = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
+                .build()?;
+            let options = ClientOptionsBuilder::default()
+                .host(host)
+                .api_key(token.to_owned())
+                .request_timeout_seconds(REQUEST_TIMEOUT.as_secs())
+                .max_capture_attempts(1)
+                .http_client(http)
+                .disable_geoip(true)
+                .is_server(false)
+                .on_error(|_| {})
+                .build()?;
+            client.insert(posthog_rs::client(options).await)
+        }
+    };
+    let retry = match tokio::time::timeout(timeout, client.capture_immediate(event)).await {
+        Ok(Ok(summary)) => summary.submitted() != 1 || !summary.all_persisted(),
+        Ok(Err(error)) => retryable(&error),
+        Err(_) => true,
+    };
+    outbox.finish(item.id, retry, Utc::now().timestamp_millis())?;
+    Ok(Duration::ZERO)
+}
+
+fn retryable(error: &Error) -> bool {
+    match error {
+        Error::RateLimit | Error::ServerError { .. } => true,
+        Error::Connection(message) => {
+            // posthog-rs v0 exposes unmapped HTTP statuses (including 403 and
+            // 408) as Connection, with this prefix, rather than a typed status.
+            let status = message
+                .strip_prefix("Unexpected HTTP status ")
+                .and_then(|rest| rest.split_once(':'))
+                .and_then(|(code, _)| code.parse::<u16>().ok());
+            matches!(status, None | Some(408 | 429 | 500..=599))
+        }
+        Error::BadRequest(_)
+        | Error::Unauthorized
+        | Error::BillingLimitExceeded(_)
+        | Error::InvalidTimestamp(_)
+        | Error::Serialization(_) => false,
+        _ => true,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
-    use tracing_subscriber::{Layer, layer::Context, prelude::*};
-
-    #[derive(Clone, Default)]
-    struct RecordedEvents(Arc<Mutex<Vec<String>>>);
-
-    impl<Subscriber: tracing::Subscriber> Layer<Subscriber> for RecordedEvents {
-        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, Subscriber>) {
-            let metadata = event.metadata();
-            self.0
-                .lock()
-                .unwrap()
-                .push(format!("{}: {}", metadata.target(), metadata.name()));
-        }
-    }
-
-    fn mock_server(
-        status: u16,
-        count: usize,
-    ) -> (
-        Arc<tiny_http::Server>,
-        String,
-        std::thread::JoinHandle<Vec<Value>>,
-    ) {
-        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
-        let host = format!("http://{}", server.server_addr());
-        let receiver = server.clone();
-        let task = std::thread::spawn(move || {
-            (0..count)
-                .map(|_| {
-                    let mut request = receiver
-                        .recv_timeout(Duration::from_secs(5))
-                        .unwrap()
-                        .expect("Expected a local capture request");
-                    assert_eq!(request.method().as_str(), "POST");
-                    assert_eq!(request.url(), "/batch/");
-                    let payload = serde_json::from_reader(request.as_reader()).unwrap();
-                    request
-                        .respond(
-                            tiny_http::Response::from_string("synthetic response")
-                                .with_status_code(status),
-                        )
-                        .unwrap();
-                    payload
-                })
-                .collect()
-        });
-        (server, host, task)
-    }
 
     #[test]
     fn anonymous_events_preserve_properties_without_person_profiles() {
@@ -162,6 +259,8 @@ mod tests {
                 "$geoip_disable": false,
             }),
         )
+        .unwrap()
+        .wire_event()
         .unwrap();
         assert_eq!(event.event_name(), "regressify_site_deployed");
         assert!(uuid::Uuid::parse_str(event.distinct_id()).is_ok());
@@ -176,7 +275,7 @@ mod tests {
     fn events_have_independent_anonymous_identities() {
         let first = anonymous_event("application", "started", json!({})).unwrap();
         let second = anonymous_event("application", "started", json!({})).unwrap();
-        assert_ne!(first.distinct_id(), second.distinct_id());
+        assert_ne!(first.id, second.id);
     }
 
     #[test]
@@ -189,7 +288,10 @@ mod tests {
     #[test]
     fn event_names_always_use_the_regressify_object_verb_format() {
         for (object, verb) in [("site", "deployed"), ("test_suite", "run_started")] {
-            let event = anonymous_event(object, verb, json!({})).unwrap();
+            let event = anonymous_event(object, verb, json!({}))
+                .unwrap()
+                .wire_event()
+                .unwrap();
             assert_eq!(event.event_name(), format!("regressify_{object}_{verb}"));
             assert!(!event.event_name().contains(' '));
         }
@@ -206,176 +308,14 @@ mod tests {
     }
 
     #[test]
-    fn us_cloud_options_are_valid() {
-        assert!(client_options(HOST, "phc_test_project").is_ok());
-    }
-
-    #[tokio::test]
-    async fn captures_events_and_reuses_the_client() {
-        let (server, host, task) = mock_server(200, 2);
-        let client = OnceCell::new();
-        let initializations = AtomicUsize::new(0);
-        for (object, verb) in [("site", "deployed"), ("application", "started")] {
-            capture_using(
-                &client,
-                object,
-                verb,
-                json!({ "url": "https://reports.example.com/" }),
-                || {
-                    initializations.fetch_add(1, Ordering::Relaxed);
-                    client_options(&host, "phc_test_project")
-                },
-            )
-            .await;
-        }
-        let payloads = task.join().unwrap();
-        assert_eq!(initializations.load(Ordering::Relaxed), 1);
-        for (payload, name) in payloads
-            .iter()
-            .zip(["regressify_site_deployed", "regressify_application_started"])
-        {
-            assert_eq!(payload["api_key"], "phc_test_project");
-            assert_eq!(payload["batch"].as_array().unwrap().len(), 1);
-            let event = &payload["batch"][0];
-            assert_eq!(event["event"], name);
-            assert_eq!(event["properties"]["url"], "https://reports.example.com/");
-            assert_eq!(event["properties"]["$process_person_profile"], false);
-            assert_eq!(event["properties"]["$geoip_disable"], true);
-        }
-        assert!(server.try_recv().unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn rejected_requests_are_silent_and_do_not_retry_or_fail() {
-        for status in [400, 401, 403, 429, 500, 503] {
-            let (server, host, task) = mock_server(status, 1);
-            let client = OnceCell::new();
-            let recorded = RecordedEvents::default();
-            capture_using(&client, "site", "deployed", json!({}), || {
-                client_options(&host, "phc_test_project")
-            })
-            .with_subscriber(tracing_subscriber::registry().with(recorded.clone()))
-            .await;
-            let payloads = task.join().unwrap();
-            assert_eq!(payloads.len(), 1);
-            assert_eq!(payloads[0]["batch"][0]["event"], "regressify_site_deployed");
-            if let Some(mut extra) = server.try_recv().unwrap() {
-                // Distinguish a retry from another fixture's POST without logging either body.
-                let first_id = payloads[0]["batch"][0]["distinct_id"]
-                    .as_str()
-                    .expect("Expected an anonymous event ID");
-                let body = std::io::Read::take(extra.as_reader(), 16 * 1024);
-                let same_event = serde_json::from_reader::<_, Value>(body)
-                    .ok()
-                    .and_then(|v| {
-                        v["batch"][0]["distinct_id"]
-                            .as_str()
-                            .map(|id| id == first_id)
-                    });
-                panic!(
-                    "Unexpected additional request after HTTP {status}; same event ID: {same_event:?}"
-                );
-            }
-            assert_eq!(*recorded.0.lock().unwrap(), Vec::<String>::new());
-        }
-    }
-
-    #[test]
-    fn shared_client_handles_concurrent_calls_and_runtime_restarts() {
-        let (server, host, task) = mock_server(200, 4);
-        let client = OnceCell::new();
-        let initializations = AtomicUsize::new(0);
-        let options = || {
-            initializations.fetch_add(1, Ordering::Relaxed);
-            client_options(&host, "phc_test_project")
-        };
-        for _ in 0..2 {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async {
-                    tokio::join!(
-                        capture_using(&client, "site", "deployed", json!({}), &options),
-                        capture_using(&client, "application", "started", json!({}), &options),
-                    );
-                });
-        }
-        assert_eq!(initializations.load(Ordering::Relaxed), 1);
-        assert_eq!(task.join().unwrap().len(), 4);
-        assert!(server.try_recv().unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn connection_failures_are_silent() {
-        // Reserve the endpoint without listening. Dropping a listener here lets a
-        // parallel mock server receive this POST and mistake it for its own retry.
-        let socket = tokio::net::TcpSocket::new_v4().unwrap();
-        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let address = socket.local_addr().unwrap();
-        let host = format!("http://{address}");
-        let client = OnceCell::new();
-        let recorded = RecordedEvents::default();
-        capture_using(&client, "application", "started", json!({}), || {
-            client_options(&host, "phc_test_project")
-        })
-        .with_subscriber(tracing_subscriber::registry().with(recorded.clone()))
-        .await;
-        assert_eq!(*recorded.0.lock().unwrap(), Vec::<String>::new());
-    }
-
-    #[tokio::test]
-    async fn stalled_requests_time_out_without_failing() {
-        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-        let host = format!("http://{}", server.server_addr());
-        let (release, wait) = std::sync::mpsc::channel();
-        let task = std::thread::spawn(move || {
-            let request = server
-                .recv_timeout(Duration::from_secs(10))
-                .unwrap()
-                .expect("Expected a local capture request");
-            wait.recv_timeout(Duration::from_secs(10)).unwrap();
-            drop(request);
-        });
-        let started = std::time::Instant::now();
-        capture_using(
-            &OnceCell::new(),
-            "application",
-            "started",
-            json!({}),
-            || client_options(&host, "phc_test_project"),
-        )
-        .await;
-        let elapsed = started.elapsed();
-        release.send(()).unwrap();
-        task.join().unwrap();
-        assert!(elapsed >= Duration::from_secs(1));
-        assert!(elapsed < REQUEST_TIMEOUT + Duration::from_secs(2));
-    }
-
-    #[tokio::test]
-    async fn configuration_failures_disable_tracking_without_failing() {
-        let client = OnceCell::new();
-        capture_using(&client, "application", "started", json!({}), || {
-            Err(ClientOptionsBuilderError::ValidationError(
-                "invalid options".into(),
-            ))
-        })
-        .await;
-        assert!(matches!(client.get(), Some(None)));
-    }
-
-    #[test]
-    fn missing_runtime_skips_tracking_without_initializing_the_client() {
-        let client = OnceCell::new();
-        futures::executor::block_on(capture_using(
-            &client,
-            "application",
-            "started",
-            json!({}),
-            || panic!("Tracking without a runtime must not initialize a client"),
+    fn missing_runtime_skips_tracking() {
+        let root = tempfile::tempdir().unwrap();
+        futures::executor::block_on(enqueue(
+            Outbox::new(root.path().join("analytics")),
+            anonymous_event("application", "started", json!({})).unwrap(),
+            |_| panic!("Must not start a sender"),
         ));
-        assert!(client.get().is_none());
+        assert!(!root.path().join("analytics").exists());
     }
 
     #[test]
@@ -386,9 +326,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fixture_process_cannot_resolve_the_real_outbox() {
+        const FLAG: &str = "REGRESSIFY_TEST_NO_ANALYTICS";
+        if std::env::var(FLAG).as_deref() == Ok("1") {
+            // Resolving a path does no I/O, even if this regression fails.
+            assert!(local_outbox().is_none());
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "analytics::tests::fixture_process_cannot_resolve_the_real_outbox",
+            ])
+            .env(FLAG, "1")
+            .env("DO_NOT_TRACK", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     #[tokio::test]
     async fn unit_tests_never_initialize_the_production_client() {
         capture("site", "deployed", json!({})).await;
-        assert!(CLIENT.get().is_none());
+        start();
+        assert!(WORKER.get().is_none());
     }
 }
+
+#[cfg(test)]
+mod delivery_tests;

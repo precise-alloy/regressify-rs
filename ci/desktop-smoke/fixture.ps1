@@ -33,7 +33,7 @@ function Start-Fixture([string]$Root = $workspace, [string]$Name = 'native', [sw
     $errorLog = Join-Path $artifacts ($Name + '-stderr.log')
     $start = @{ FilePath = $executable; RedirectStandardError = $errorLog; RedirectStandardOutput = (Join-Path $artifacts ($Name + '-stdout.log')); PassThru = $true }
     if (-not $Empty) { $start.ArgumentList = '"' + $Root + '"' }
-    $script:process = Start-Process @start
+    $script:process = Start-Process @start -Environment @{ REGRESSIFY_TEST_NO_ANALYTICS = '1' }
     $script:fixtureProcesses.Add($process)
     if (-not $process.WaitForInputIdle(15000)) { throw 'Desktop did not initialize.' }
     $initialization = [System.Diagnostics.Stopwatch]::StartNew()
