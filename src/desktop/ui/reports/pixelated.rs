@@ -57,7 +57,7 @@ impl Tiles {
         let y_clip = clip(mask.top(), mask.bottom(), origin.y, extent.1);
         let columns = visible_tiles(&x_clip);
         let rows = visible_tiles(&y_clip);
-        // Only live viewport tiles occupy the atlas, even for full-page captures at 25x.
+        // Only live viewport tiles occupy the atlas, regardless of magnification.
         self.images.retain(|&(x, y), image| {
             let keep = columns.contains(&x) && rows.contains(&y);
             if !keep {

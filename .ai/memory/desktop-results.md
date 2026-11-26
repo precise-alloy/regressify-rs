@@ -1,6 +1,6 @@
 # Results Review
 
-Verified: 2026-11-25
+Verified: 2026-11-26
 
 - [Overview](../../src/desktop/ui/overview.rs) uses uniform DataTable rows with
   full summaries/errors retained in explicit selectable Details. `overview_table_`
@@ -92,7 +92,7 @@ Verified: 2026-11-25
   cover one-decimal labels, independent modes, pointer zoom, and resized previews.
 - Wipe/Overlay share source bounds and exclude placeholders; native blend Slider
   needs capture-phase focus for keys. `image_previews_` covers all modes; native
-  Comparison samples blend endpoints and 2500%. Overlay projects the applied whole percent into the stock slider; returning at the same stop restores the precise Wipe split.
+  Comparison smoke samples blend endpoints and 10000%. Overlay projects the applied whole percent into the stock slider; returning at the same stop restores the precise Wipe split.
   [Magnified previews](../../src/desktop/ui/reports/pixelated.rs) bypass GPUI's linear
   sampling with viewport-bounded device-pixel tiles. Crosshairs use displayed file pixels, not the presence of a file-action path on a replacement Diff.
 - Side-by-side FitWidth pixel-aligns pane widths through public canvas layout;

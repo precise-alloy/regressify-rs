@@ -2737,16 +2737,16 @@ async function mockComparisonImages(
   });
 }
 
-test("wipe follows fine pointer motion on a scrolled 25x comparison", async ({ page }) => {
+test("wipe follows fine pointer motion on a scrolled 100x comparison", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   const size = { width: 1920, height: 80 };
   await mockComparisonImages(page, { reference: size, test: size, diff: size }, false);
   await page.goto("/suites/workspace-overview/images/overview__desktop.png?mode=wipe");
   const pane = page.locator(".image-pane");
   await pane.press("1");
-  for (let step = 0; step < 16; step++) await pane.press("+");
-  await expect(page.getByLabel("Zoom level")).toHaveText("2500%");
-  await pane.evaluate((element) => element.scrollTo(23800, 0));
+  for (let step = 0; step < 22; step++) await pane.press("+");
+  await expect(page.getByLabel("Zoom level")).toHaveText("10000%");
+  await pane.evaluate((element) => element.scrollTo(95800, 0));
   const bounds = await pane.boundingBox();
   if (!bounds) throw new Error("Missing wipe viewport");
   const divider = page.locator(".wipe-divider");
@@ -2817,7 +2817,7 @@ test("artifact metadata keeps legacy error artwork smooth without hiding valid p
   }
 });
 
-test("image viewer magnifies original pixels up to 2500%", async ({ page, isMobile }) => {
+test("image viewer magnifies original pixels up to 10000%", async ({ page, isMobile }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   const size = { width: 80, height: 80 };
   await mockComparisonImages(page, { reference: size, test: size, diff: size }, true, (image) => {
@@ -2850,14 +2850,20 @@ test("image viewer magnifies original pixels up to 2500%", async ({ page, isMobi
   await expect(zoom).toHaveText("2000%");
   await more.click();
   await expect(zoom).toHaveText("2500%");
+  for (const percent of [3200, 4000, 5000, 6400, 8000, 10000]) {
+    await more.click();
+    await expect(zoom).toHaveText(`${percent}%`);
+  }
   await expect(more).toBeDisabled();
+  await page.locator(".image-pane").press("+");
+  await expect(zoom).toHaveText("10000%");
 
   const bounds = await images.boundingBox();
   if (!bounds) throw new Error("Magnified image is unavailable");
   const pixels = PNG.sync.read(
     await page.screenshot({
       scale: "css",
-      clip: { x: Math.round(bounds.x) + 18, y: Math.round(bounds.y) + 18, width: 15, height: 15 },
+      clip: { x: Math.round(bounds.x) + 93, y: Math.round(bounds.y) + 93, width: 15, height: 15 },
     }),
   );
   const red = (x: number, y: number) => pixels.data[(y * pixels.width + x) * 4];
@@ -2868,7 +2874,7 @@ test("image viewer magnifies original pixels up to 2500%", async ({ page, isMobi
     0, 0, 0, 0, 0, 0, 0, 42, 0, 0, 0, 0, 0, 0, 0,
   ]);
   await less.click();
-  await expect(zoom).toHaveText("2000%");
+  await expect(zoom).toHaveText("8000%");
 
   // Verify both layers in blend modes and all available lanes in side-by-side.
   for (const [mode, label] of [
@@ -2887,8 +2893,8 @@ test("image viewer magnifies original pixels up to 2500%", async ({ page, isMobi
       await expect(image).toHaveCSS("image-rendering", "pixelated");
     if (mode === "wipe") {
       await page.locator(".image-pane").focus();
-      for (let step = 0; step < 15; step++) await page.locator(".image-pane").press("+");
-      await expect(zoom).toHaveText("2500%");
+      for (let step = 0; step < 21; step++) await page.locator(".image-pane").press("+");
+      await expect(zoom).toHaveText("10000%");
       const divider = await page.locator(".wipe-divider").boundingBox();
       expect(divider?.width).toBe(3);
     }

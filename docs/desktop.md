@@ -2337,9 +2337,10 @@ the same scenario, including across report refreshes and viewport captures of th
 scenario. Selecting a different scenario, leaving Results, or restarting the app
 resets every tab to Fit area. Legacy reports without scenario IDs reset on each
 different capture.
-Zoom buttons and Ctrl/Cmd+mouse wheel use Chrome-style zoom presets, extended to 2500% (25×):
+Zoom buttons and Ctrl/Cmd+mouse wheel use Chrome-style zoom presets, extended to 10000% (100×):
 25%, 33.3%, 50%, 66.7%, 75%, 80%, 90%, 100%, 110%, 125%, 150%, 175%, 200%, 250%,
-300%, 400%, 500%, 600%, 800%, 1000%, 1250%, 1500%, 2000%, and 2500%.
+300%, 400%, 500%, 600%, 800%, 1000%, 1250%, 1500%, 2000%, 2500%, 3200%, 4000%,
+5000%, 6400%, 8000%, and 10000%.
 Each action selects the nearest preset in the requested direction, starting
 from the displayed scale. Above 100%, comparison images show crisp source
 pixels instead of interpolated colors. Above 1000%, a faint grid marks each pixel.
@@ -2354,7 +2355,7 @@ Escape cancels a drag. Shortcuts do not intercept editor, filter, slider, or men
 input. Double-click a single-image, wipe, or overlay view to toggle actual size
 and fit-to-window.
 Wipe reveals Reference on the left and Test on the right. The divider follows
-the pointer without rounding, even at 25×. Overlay shows and announces the whole
+the pointer without rounding. Overlay shows and announces the whole
 percentage actually applied to the Test image. Switching back to Wipe at the
 same opacity restores its precise position. Both use a
 0-100% slider with arrow keys and Home/End, share the original images' scale and
