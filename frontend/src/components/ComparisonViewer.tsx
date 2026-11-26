@@ -44,7 +44,7 @@ type View = {
 };
 const fallback: Size = { width: 640, height: 400 };
 
-const maxZoom = 25;
+const maxZoom = 100;
 const pixelGridThreshold = 10;
 const zoomLevels = [
   0.25,
@@ -70,6 +70,12 @@ const zoomLevels = [
   12.5,
   15,
   20,
+  25,
+  32,
+  40,
+  50,
+  64,
+  80,
   maxZoom,
 ];
 

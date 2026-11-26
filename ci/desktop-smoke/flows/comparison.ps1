@@ -252,7 +252,7 @@ public static class RegressifySmokeZoomKeys {
                 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
                 try { $graphics.Clear($image[1]) } finally { $graphics.Dispose() }
                 if ($image[0] -eq 'blend-test.png') {
-                    # One contrasting source pixel wide, visible near the left edge at 25x.
+                    # One contrasting source pixel wide, visible near the left edge at maximum zoom.
                     for ($row = 0; $row -lt 8; $row++) { $bitmap.SetPixel(1, $row, $referenceColor) }
                 }
                 $bitmap.Save((Join-Path $output ('bitmaps_test/smoke-run/' + $image[0])), [System.Drawing.Imaging.ImageFormat]::Png)
@@ -310,18 +310,18 @@ public static class RegressifySmokeZoomKeys {
         }
         Invoke-Control 'Test'
         Invoke-Control 'Actual size (100%)'
-        foreach ($zoom in @(110, 125, 150, 175, 200, 250, 300, 400, 500, 600, 800, 1000, 1250, 1500, 2000, 2500)) {
+        foreach ($zoom in @(110, 125, 150, 175, 200, 250, 300, 400, 500, 600, 800, 1000, 1250, 1500, 2000, 2500, 3200, 4000, 5000, 6400, 8000, 10000)) {
             Invoke-Control 'Zoom in'
             Wait-Control "$zoom.0%" | Out-Null
         }
         Invoke-Control 'Zoom in' -Pointer
-        Wait-Control '2500.0%' | Out-Null
+        Wait-Control '10000.0%' | Out-Null
         $canvas = (Wait-Control 'Test image canvas').Current.BoundingRectangle
         $native = [RegressifySmokeNative+Rect]::new()
         if (-not [RegressifySmokeNative]::GetWindowRect($script:window, [ref]$native)) { throw 'Cannot read magnified window bounds.' }
         $pixelWidth = $canvas.Width / 960
-        Capture-Window 'comparison-pixelated-2500'
-        $bitmap = [System.Drawing.Bitmap]::FromFile((Join-Path $artifacts 'comparison-pixelated-2500.png'))
+        Capture-Window 'comparison-pixelated-10000'
+        $bitmap = [System.Drawing.Bitmap]::FromFile((Join-Path $artifacts 'comparison-pixelated-10000.png'))
         try {
             $y = [int]($canvas.Top - $native.Top + $pixelWidth / 2)
             $left = $canvas.Left - $native.Left
@@ -335,13 +335,13 @@ public static class RegressifySmokeZoomKeys {
                 }
                 $expected = if ($x -gt $left + $pixelWidth -and $x -lt $left + 2 * $pixelWidth) { $referenceColor } else { $testColor }
                 if ([Math]::Abs($actual.R - $expected.R) -gt 3 -or [Math]::Abs($actual.G - $expected.G) -gt 3 -or [Math]::Abs($actual.B - $expected.B) -gt 3) {
-                    throw 'The 2500% comparison blended or misplaced a source pixel.'
+                    throw 'The 10000% comparison blended or misplaced a source pixel.'
                 }
             }
             if (-not $verticalLine) { throw 'The pixel grid did not render on a magnified source-pixel boundary.' }
         } finally { $bitmap.Dispose() }
         Invoke-Control 'Zoom out'
-        Wait-Control '2000.0%' | Out-Null
+        Wait-Control '8000.0%' | Out-Null
     }
     Write-ComparisonImage (Join-Path $output 'bitmaps_reference/checkout.png') 1600 2200
     Write-ComparisonImage (Join-Path $output 'bitmaps_test/smoke-run/checkout.png') 1280 1800

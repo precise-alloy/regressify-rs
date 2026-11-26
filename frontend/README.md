@@ -499,7 +499,7 @@ Unmodified mouse-wheel, trackpad, and touch scrolling move the active image pane
 Left-drag pans that pane using pointer capture, without changing zoom or wipe
 position; release, cancellation, lost capture, blur, or a view change clears the
 gesture. Ctrl/Cmd+wheel selects the next zoom preset around the pointer; zoom
-buttons offer presets from 25% up to 2500% (25×). Magnified comparison images
+buttons offer presets from 25% up to 10000% (100×). Magnified comparison images
 show crisp pixels above 100% and a grid above 1000%; fit views retain smooth scaling. Fit width (the
 web default) and Fit to window remain responsive and never upscale. Actual size selects 100%.
 Each mode retains its zoom for the current capture; selecting another capture

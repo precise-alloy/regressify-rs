@@ -21,8 +21,8 @@ use gpui_kit::component::slider::{Slider, SliderState};
 mod log;
 mod pixelated;
 
-const MAX_ZOOM: f32 = 25.;
-const ZOOM_LEVELS: [f32; 24] = [
+const MAX_ZOOM: f32 = 100.;
+const ZOOM_LEVELS: [f32; 30] = [
     0.25,
     1. / 3.,
     0.5,
@@ -46,6 +46,12 @@ const ZOOM_LEVELS: [f32; 24] = [
     12.5,
     15.,
     20.,
+    25.,
+    32.,
+    40.,
+    50.,
+    64.,
+    80.,
     MAX_ZOOM,
 ];
 
@@ -1749,7 +1755,7 @@ impl ResultsPanel {
         let canvas_width = self.preview_canvas_size(index).0 as f32;
         let guides = self.pointer_guides.clone();
         div()
-            .w(px(68.))
+            .w(px(76.))
             .self_stretch()
             .flex_shrink_0()
             // Fitted bounds are only current after the image panes have been laid out.
@@ -3331,7 +3337,8 @@ mod pointer_tests {
         assert_eq!(next_zoom(6., true), 8.);
         assert_eq!(next_zoom(8., true), 10.);
         assert_eq!(next_zoom(20., true), 25.);
-        assert_eq!(next_zoom(25., true), 25.);
+        assert_eq!(next_zoom(25., true), 32.);
+        assert_eq!(next_zoom(100., true), 100.);
         assert_eq!(next_zoom(0.1, true), 0.25);
         assert_eq!(next_zoom(0.1, false), 0.1);
         assert_eq!(next_zoom(1.0005, true), 1.1);
@@ -3416,28 +3423,32 @@ mod pointer_tests {
                     let divider = window.find("comparison-wipe-divider").bounds();
                     assert!((divider.left() - pointer.x).abs() <= px(1.));
                     window.click("actual-size", cx);
-                    for _ in 0..16 {
-                        window.click("zoom-in", cx);
-                    }
-                    assert_eq!(window.find("zoom-value").label(), Some("2500.0%"));
                     let pane = window.find(("image-scroll", 0_usize)).bounds();
-                    for dx in [123., 125., 150.] {
-                        let pointer = pane.origin + point(px(dx), px(20.));
-                        window.dispatch_event(
-                            gpui_kit::MouseMoveEvent {
-                                position: pointer,
-                                ..Default::default()
-                            }
-                            .to_platform_input(),
-                            cx,
-                        );
-                        window.render_frame(cx);
-                        let split = window.find("comparison-wipe-divider").bounds().left();
-                        assert!(
-                            (split - pointer.x).abs() <= px(1.),
-                            "split={split}, x={}",
-                            pointer.x
-                        );
+                    for (button, steps, label) in
+                        [("zoom-in", 22, "10000.0%"), ("zoom-out", 6, "2500.0%")]
+                    {
+                        for _ in 0..steps {
+                            window.click(button, cx);
+                        }
+                        assert_eq!(window.find("zoom-value").label(), Some(label));
+                        for dx in [123., 125., 150.] {
+                            let pointer = pane.origin + point(px(dx), px(20.));
+                            window.dispatch_event(
+                                gpui_kit::MouseMoveEvent {
+                                    position: pointer,
+                                    ..Default::default()
+                                }
+                                .to_platform_input(),
+                                cx,
+                            );
+                            window.render_frame(cx);
+                            let split = window.find("comparison-wipe-divider").bounds().left();
+                            assert!(
+                                (split - pointer.x).abs() <= px(1.),
+                                "split={split}, x={}",
+                                pointer.x
+                            );
+                        }
                     }
                     // At 25x, 150 pixels on this canvas is exactly half a percent.
                     assert_eq!(results.read(cx).blend.read(cx).value().end(), 0.5);
@@ -5826,7 +5837,7 @@ mod pointer_tests {
 
     #[cfg(feature = "gui-tests")]
     #[gpui_kit::test]
-    async fn magnified_previews_clamp_at_25x_retain_tiles_across_pan_and_evict_atlas_entries(
+    async fn magnified_previews_clamp_at_100x_retain_tiles_across_pan_and_evict_atlas_entries(
         cx: &mut gpui_kit::TestAppContext,
     ) {
         use gpui_kit::AppContext;
@@ -5963,33 +5974,62 @@ mod pointer_tests {
                 );
                 assert!(!window.has_image_atlas_entry(&visible));
 
-                // Stepping to 2500% clamps and disables Zoom in until zoomed back out.
+                // The old maximum is still a stop, not the end of the scale.
                 for _ in 0..16 {
                     window.click("zoom-in", cx);
                 }
                 window.render_frame(cx);
                 assert_eq!(window.find("zoom-value").label(), Some("2500.0%"));
+                for label in [
+                    "3200.0%", "4000.0%", "5000.0%", "6400.0%", "8000.0%", "10000.0%",
+                ] {
+                    window.click("zoom-in", cx);
+                    window.render_frame(cx);
+                    assert_eq!(window.find("zoom-value").label(), Some(label));
+                }
                 assert_eq!(window.find("zoom-in").disabled(), Some(true));
                 window.click("zoom-in", cx);
                 results.update(cx, |panel, cx| panel.step_zoom(true, cx));
                 window.render_frame(cx);
-                assert_eq!(window.find("zoom-value").label(), Some("2500.0%"));
+                assert_eq!(window.find("zoom-value").label(), Some("10000.0%"));
 
+                let extent = window.find(("image-content", 1_usize)).bounds().size;
+                assert_eq!(extent, size(px(184_500.), px(16_400.)));
+                results.update(cx, |panel, cx| {
+                    panel.preview_scrolls[1].set_offset(point(-extent.width, -extent.height));
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                {
+                    let texture = results.read(cx).preview_textures[1].borrow();
+                    assert!(texture.pixelated.tile((0, 0)).is_none());
+                    // At 1× DPI the last source pixel lies in this 256px atlas tile.
+                    assert!(
+                        texture
+                            .pixelated
+                            .tile((184_499 / 256, 16_399 / 256))
+                            .is_some()
+                    );
+                }
+                results.update(cx, |panel, cx| {
+                    panel.preview_scrolls[1].set_offset(point(px(0.), px(0.)));
+                    cx.notify();
+                });
                 window.click("zoom-out", cx);
                 window.render_frame(cx);
-                assert_eq!(window.find("zoom-value").label(), Some("2000.0%"));
+                assert_eq!(window.find("zoom-value").label(), Some("8000.0%"));
                 window.click("zoom-in", cx);
                 window.render_frame(cx);
-                assert_eq!(window.find("zoom-value").label(), Some("2500.0%"));
+                assert_eq!(window.find("zoom-value").label(), Some("10000.0%"));
                 window.click("zoom-out", cx);
                 window.render_frame(cx);
-                assert_eq!(window.find("zoom-value").label(), Some("2000.0%"));
+                assert_eq!(window.find("zoom-value").label(), Some("8000.0%"));
 
                 let tile = results.read(cx).preview_textures[1]
                     .borrow()
                     .pixelated
                     .tile((0, 0))
-                    .expect("2000% tile should be cached");
+                    .expect("8000% tile should be cached");
                 assert!(window.has_image_atlas_entry(&tile));
                 let weak = Arc::downgrade(&tile);
                 results.update(cx, |panel, cx| panel.clear(window, cx));

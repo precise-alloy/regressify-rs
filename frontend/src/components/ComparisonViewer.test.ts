@@ -15,6 +15,12 @@ describe("image viewer zoom steps", () => {
       [12.5, 15],
       [15, 20],
       [20, 25],
+      [25, 32],
+      [32, 40],
+      [40, 50],
+      [50, 64],
+      [64, 80],
+      [80, 100],
     ] as const) {
       expect(nextZoom(lower, true)).toBe(upper);
       expect(nextZoom(upper, false)).toBe(lower);
@@ -25,7 +31,7 @@ describe("image viewer zoom steps", () => {
     expect(nextZoom(0.1, false)).toBe(0.1);
     expect(nextZoom(0.1, true)).toBe(0.25);
     expect(nextZoom(0.25, false)).toBe(0.25);
-    expect(nextZoom(25, true)).toBe(25);
+    expect(nextZoom(100, true)).toBe(100);
   });
 
   test("does not get stuck on rounded fit percentages", () => {

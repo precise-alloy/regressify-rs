@@ -452,7 +452,7 @@ byte-identical previews from identical input. Full-resolution captures remain
 unchanged for comparison and download. Regenerate and redeploy existing reports
 to get these previews; no new capture run is required.
 The image viewer supports reference, test, diff, side-by-side, wipe, overlay,
-stepped zoom through 2500% (25×), fit-width, fit-to-window, actual size, downloads,
+stepped zoom through 10000% (100×), fit-width, fit-to-window, actual size, downloads,
 and safe links to captured pages. Above 100%, comparison images render with
 crisp pixels, with a grid above 1000%; fit views keep smooth scaling.
 The name, navigation buttons, and viewer controls
