@@ -3728,12 +3728,20 @@ test("image viewer parallel contact packets do not ratchet zoom at a limit", asy
   );
   await expect(output).toHaveText("25%");
   await laneTouches(page, "touchend", [], [a, b]);
-  // A real reversal by the same finger responds from the clipped span, not the starting span.
-  await laneTouches(page, "touchstart", [a, b]);
-  await laneTouches(page, "touchmove", [{ ...a, x: 70 }, b], [{ ...a, x: 70 }]);
-  await laneTouches(page, "touchmove", [{ ...a, x: 60 }, b], [{ ...a, x: 60 }]);
-  await expect(output).toHaveText("37.5%");
-  await laneTouches(page, "touchend", [], [a, b]);
+  // The leading finger can reopen the span by turning, not just by moving straight back.
+  for (const [x, y, expected] of [
+    [70, 65, "31.3%"],
+    [71, 65, "30.3%"],
+    [60, 50, "37.5%"],
+  ] as const) {
+    await pane.press("-");
+    await expect(output).toHaveText("25%");
+    await laneTouches(page, "touchstart", [a, b]);
+    await laneTouches(page, "touchmove", [{ ...a, x: 70 }, b], [{ ...a, x: 70 }]);
+    await laneTouches(page, "touchmove", [{ ...a, x, y }, b], [{ ...a, x, y }]);
+    await expect(output).toHaveText(expected);
+    await laneTouches(page, "touchend", [], [a, b]);
+  }
 });
 
 test("image viewer centers after a native horizontal scrollbar disappears", async ({

@@ -61,7 +61,7 @@ type View = {
 const fallback: Size = { width: 640, height: 400 };
 const cssLength = (value: number | string) => (typeof value === "number" ? `${value}px` : value);
 
-type SpanLimit = { direction: Point; span: number };
+type SpanLimit = { finger: 0 | 1; direction: Point; span: number };
 const pinchThreshold = 8;
 
 function pinchStep(
@@ -75,19 +75,21 @@ function pinchStep(
   // A single clipped finger packet can be half of a parallel pan. Keep just its
   // unmatched overtravel until the peer catches up; a genuine reversal starts
   // from the last span, not from an overshoot beyond the zoom limit.
-  const follows = (p: Point, d: Point) => p.x * d.x + p.y * d.y >= 0;
-  const paired = limit && movement.every((p) => follows(p, limit.direction));
+  const still = (p: Point) => p.x === 0 && p.y === 0;
+  const finger = still(movement[1]) ? 0 : still(movement[0]) ? 1 : undefined;
+  const reversing = scale === minimum ? span > previousSpan : span < previousSpan;
+  const paired =
+    limit &&
+    !(finger === limit.finger && reversing) &&
+    movement.every((p) => still(p) || p.x * limit.direction.x + p.y * limit.direction.y > 0);
   const reference = paired ? limit.span : previousSpan;
   const raw = (scale * span) / reference;
   const next = Math.max(minimum, Math.min(maxZoom, raw));
   let held: SpanLimit | undefined;
   if (raw !== next) {
     if (paired) held = limit;
-    else if (!limit) {
-      const still = (p: Point) => p.x === 0 && p.y === 0;
-      const finger = still(movement[1]) ? 0 : still(movement[0]) ? 1 : undefined;
-      if (finger !== undefined)
-        held = { direction: movement[finger], span: (reference * next) / scale };
+    else if (!limit && finger !== undefined) {
+      held = { finger, direction: movement[finger], span: (reference * next) / scale };
     }
   }
   return { next, held, reference };
