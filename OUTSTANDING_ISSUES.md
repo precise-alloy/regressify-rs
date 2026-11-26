@@ -3,6 +3,15 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Linux Lease Handoff (2026-11-26)
+
+- Resolved: run-history, desktop update, Chromium install and analytics sender
+  leases relied on closing their file to release ownership. A descriptor inherited
+  during a concurrent fork could keep the lock held after normal lease teardown.
+  These leases now explicitly unlock;
+  live owners still reject conflicting requests immediately. The
+  [regression](src/helpers/locks.rs) holds a duplicate open during handoff.
+
 ## Action and Screenshot Selectors (2026-11-19)
 
 - Resolved: website-only deployment of the `v2.4.4` catalog failed because

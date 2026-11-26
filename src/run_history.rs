@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::compare::report_gen::read_bounded_regular_file;
+use crate::helpers::FileLock;
 
 pub mod cleanup;
 pub mod staging;
@@ -194,7 +195,7 @@ fn now_millis() -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
-fn lock_artifact_file(suite_dir: &Path, name: &str, shared: bool) -> Result<fs::File> {
+fn lock_artifact_file(suite_dir: &Path, name: &str, shared: bool) -> Result<FileLock> {
     fs::create_dir_all(suite_dir)?;
     require_real_directory(suite_dir)?;
     let path = suite_dir.join(name);
@@ -215,21 +216,20 @@ fn lock_artifact_file(suite_dir: &Path, name: &str, shared: bool) -> Result<fs::
         .truncate(false)
         .open(&path)?;
     let result = if shared {
-        file.try_lock_shared()
+        FileLock::try_shared(file)
     } else {
-        file.try_lock()
+        FileLock::try_exclusive(file)
     };
     result.map_err(|error| {
         anyhow::anyhow!(
             "Suite artifacts are busy at '{}': {error}",
             suite_dir.display()
         )
-    })?;
-    Ok(file)
+    })
 }
 
 pub struct ArtifactLease {
-    _file: fs::File,
+    _file: FileLock,
 }
 
 impl ArtifactLease {
@@ -242,7 +242,7 @@ impl ArtifactLease {
 
 pub struct SuiteLease {
     suite_dir: PathBuf,
-    _file: fs::File,
+    _file: FileLock,
     _artifacts: ArtifactLease,
 }
 

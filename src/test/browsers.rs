@@ -20,7 +20,7 @@ use crate::{
         },
         runtime as diagnostics,
     },
-    helpers::OnceLockBoolExtensions,
+    helpers::{FileLock, OnceLockBoolExtensions},
     progress::{self, Event as ProgressEvent},
 };
 
@@ -102,14 +102,14 @@ fn browser_status(message: impl Into<String>) {
     progress::emit(ProgressEvent::Phase { name: message });
 }
 
-async fn lock_browser_cache(cache_dir: &Path) -> anyhow::Result<std::fs::File> {
+async fn lock_browser_cache(cache_dir: &Path) -> anyhow::Result<FileLock> {
     lock_browser_cache_with_timeout(cache_dir, BROWSER_LOCK_TIMEOUT).await
 }
 
 async fn lock_browser_cache_with_timeout(
     cache_dir: &Path,
     timeout: Duration,
-) -> anyhow::Result<std::fs::File> {
+) -> anyhow::Result<FileLock> {
     let lock_path = cache_dir.join(".install.lock");
     let lock = tokio::fs::OpenOptions::new()
         .read(true)
@@ -131,7 +131,7 @@ async fn lock_browser_cache_with_timeout(
     let mut next_log = started;
     loop {
         match lock.try_lock() {
-            Ok(()) => return Ok(lock),
+            Ok(()) => return Ok(FileLock::from_locked(lock)),
             Err(std::fs::TryLockError::WouldBlock) => {}
             Err(std::fs::TryLockError::Error(error)) => {
                 return Err(error).context("Cannot lock the shared Chromium cache");

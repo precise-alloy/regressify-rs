@@ -6,6 +6,11 @@ Verified: 2026-10-17
   scope, completion order, comparison availability, and deferred log cleanup.
   Import legacy folders before recording a new running capture; never infer
   completion from directory names or a report file written just before termination.
+- Lease handoff (verified 2026-11-26): suite, staging and [update leases](../../src/desktop/updates.rs)
+  use [FileLock](../../src/helpers/locks.rs) to unlock on normal drop. On Linux,
+  a concurrent fork shares the open file description until exec, even with
+  close-on-exec set. The regression holds a `try_clone` duplicate open across
+  handoff; retrying `WouldBlock` instead would mask genuine contention.
 - [Orchestration](../../src/test/test_suites.rs) observes jobs in completion order
   and finalizes each suite independently. Full requested scenario coverage decides
   default eligibility; website failures still qualify, infrastructure failures do

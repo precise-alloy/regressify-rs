@@ -7,6 +7,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{lock_artifact_file, now_millis, read_bounded_regular_file, require_real_directory};
+use crate::helpers::FileLock;
 
 const STAGING_ROOT: &str = ".staging";
 const OWNER_FILE: &str = "owner.json";
@@ -30,7 +31,7 @@ struct Owner {
 pub struct StagingDirectory {
     container: PathBuf,
     files: PathBuf,
-    lease: Option<fs::File>,
+    lease: Option<FileLock>,
 }
 
 impl StagingDirectory {
@@ -130,11 +131,11 @@ fn cleanup_container(container: &Path) -> Result<bool> {
         .create(true)
         .truncate(false)
         .open(&lock)?;
-    match file.try_lock() {
-        Ok(()) => {}
+    let lease = match FileLock::try_exclusive(file) {
+        Ok(lease) => lease,
         Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-    }
+    };
     let owner = read_owner(container)?;
     let payload = container.join("files");
     if owner.is_none() {
@@ -173,7 +174,7 @@ fn cleanup_container(container: &Path) -> Result<bool> {
             .with_context(|| format!("Cannot remove staging payload '{}'", payload.display()))?;
     }
     // Ownership survives failed payload removal, allowing the next deployment to retry.
-    drop(file);
+    drop(lease);
     for entry in fs::read_dir(container)? {
         fs::remove_file(entry?.path())?;
     }

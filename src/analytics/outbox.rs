@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::helpers::FileLock;
+
 const LIMIT: usize = 100;
 const MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const QUEUE: &str = "queue-v1.json";
@@ -73,13 +75,13 @@ impl Outbox {
         Ok(lock)
     }
 
-    pub fn try_sender(&self) -> Result<Option<File>> {
+    pub fn try_sender(&self) -> Result<Option<FileLock>> {
         if !self.exists()? {
             return Ok(None);
         }
         let file = self.lockfile("sender.lock")?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(file)),
+        match FileLock::try_exclusive(file) {
+            Ok(lease) => Ok(Some(lease)),
             Err(fs::TryLockError::WouldBlock) => Ok(None),
             Err(fs::TryLockError::Error(e)) => Err(e.into()),
         }

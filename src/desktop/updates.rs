@@ -13,6 +13,8 @@ use reqwest::{StatusCode, Url, blocking::Client, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::helpers::FileLock;
+
 pub const CURRENT_VERSION: &str = match option_env!("REGRESSIFY_DESKTOP_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
@@ -263,7 +265,7 @@ enum CheckMode {
 }
 
 pub struct UpdateLease {
-    _lock: fs::File,
+    _lock: FileLock,
     cache: PathBuf,
 }
 
@@ -276,8 +278,8 @@ impl UpdateLease {
             .create(true)
             .truncate(false)
             .open(cache.join("coordinator.lock"))?;
-        match lock.try_lock() {
-            Ok(()) => Ok(Some(Self {
+        match FileLock::try_exclusive(lock) {
+            Ok(lock) => Ok(Some(Self {
                 _lock: lock,
                 cache: cache.to_path_buf(),
             })),
@@ -315,7 +317,7 @@ impl UpdateLease {
     }
 }
 
-fn lock_cache(cache: &Path) -> Result<fs::File> {
+fn lock_cache(cache: &Path) -> Result<FileLock> {
     fs::create_dir_all(cache).context("Cannot create the update cache")?;
     let lock = OpenOptions::new()
         .read(true)
@@ -323,9 +325,8 @@ fn lock_cache(cache: &Path) -> Result<fs::File> {
         .create(true)
         .truncate(false)
         .open(cache.join("update.lock"))?;
-    lock.try_lock()
-        .map_err(|error| anyhow::anyhow!("Update cache is in use or cannot be locked: {error}"))?;
-    Ok(lock)
+    FileLock::try_exclusive(lock)
+        .map_err(|error| anyhow::anyhow!("Update cache is in use or cannot be locked: {error}"))
 }
 
 #[derive(Debug)]
