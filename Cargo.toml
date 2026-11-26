@@ -57,7 +57,7 @@ posthog-rs = { version = "0.30", default-features = false, features = ["async-cl
 pulldown-cmark = "0.13.0"
 rayon = "1.11.0"
 regex = "1"
-reqwest = { version = "0.13", features = ["json", "stream" ] }
+reqwest = { version = "0.13", features = ["blocking", "json", "stream" ] }
 rgb = "0.8"
 rfd = { version = "0.15", optional = true }
 saphyr-parser = { version = "0.0.12", optional = true }

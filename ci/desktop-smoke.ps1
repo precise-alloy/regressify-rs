@@ -68,7 +68,10 @@ if (-not $SkipBuild) {
 . (Join-Path $PSScriptRoot 'desktop-smoke/flows/updates.ps1')
 
 $cleanupSnapshot = $null
+$previousAnalyticsFixture = $env:REGRESSIFY_TEST_NO_ANALYTICS
 try {
+    # All fixture launches inherit this, including duplicate windows and workers.
+    $env:REGRESSIFY_TEST_NO_ANALYTICS = '1'
     Initialize-FixtureClipboard -OverwriteClipboard:$OverwriteClipboard
     Write-JsonFixture $settingsPath @{ theme = 'light'; sourceFontSize = 14; sourceWrap = $true; sourceLineNumbers = $true; navigatorHidden = $false; recentWorkspaces = @() }
     if ($PublishingFlows) {
@@ -140,6 +143,9 @@ try {
 } finally {
     try {
         . (Join-Path $PSScriptRoot 'desktop-smoke/cleanup.ps1')
-    } finally { Restore-FixtureClipboard }
+    } finally {
+        $env:REGRESSIFY_TEST_NO_ANALYTICS = $previousAnalyticsFixture
+        Restore-FixtureClipboard
+    }
 }
 Write-Output "Native smoke test passed. Fixture: $workspace"

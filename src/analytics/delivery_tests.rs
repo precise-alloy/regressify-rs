@@ -70,6 +70,56 @@ async fn statuses_retry_only_transient_errors_and_ack_only_the_sent_item() {
 }
 
 #[tokio::test]
+async fn a_clock_rollback_after_selection_does_not_cost_an_attempt_or_the_event() {
+    let root = tempfile::tempdir().unwrap();
+    let outbox = Outbox::new(root.path().into());
+    let mut event = anonymous_event("site", "deployed", json!({})).unwrap();
+    let later = Utc::now().timestamp_millis() + 60_000;
+    event.created_ms = later;
+    let id = event.id;
+    outbox.push(event).unwrap();
+    let Selection::Ready(item) = outbox.select(later).unwrap() else {
+        panic!("not selected")
+    };
+    let mut client = None;
+    deliver_selected(&outbox, &mut client, "", TOKEN, REQUEST_TIMEOUT, item)
+        .await
+        .unwrap();
+    assert!(client.is_none());
+    assert!(matches!(
+        outbox.select(Utc::now().timestamp_millis()).unwrap(),
+        Selection::Wait(_)
+    ));
+    assert!(matches!(outbox.select(later).unwrap(), Selection::Ready(p)
+        if p.id == id && p.created_ms == later && p.attempts == 0 && p.due_ms == 0));
+}
+
+#[tokio::test]
+async fn a_purge_between_selection_and_dispatch_prevents_the_request() {
+    let root = tempfile::tempdir().unwrap();
+    let outbox = Outbox::new(root.path().into());
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let host = format!("http://{}", server.server_addr());
+    put(&outbox, "suite");
+    let Selection::Ready(item) = outbox.select(Utc::now().timestamp_millis()).unwrap() else {
+        panic!("not selected")
+    };
+    outbox.purge().unwrap();
+    deliver_selected(
+        &outbox,
+        &mut None,
+        &host,
+        TOKEN,
+        Duration::from_millis(200),
+        item,
+    )
+    .await
+    .unwrap();
+    assert!(server.try_recv().unwrap().is_none());
+    assert!(outbox.is_empty().unwrap());
+}
+
+#[tokio::test]
 async fn connection_failures_and_stalled_requests_remain_queued() {
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -156,13 +206,7 @@ fn interrupted_sender_replays_the_original_event_without_blocking_producers() {
         req.respond(tiny_http::Response::empty(204)).unwrap();
     }
     let until = Instant::now() + DEADLINE;
-    loop {
-        if matches!(
-            outbox.select(Utc::now().timestamp_millis()).unwrap(),
-            Selection::Wait(_)
-        ) {
-            break;
-        }
+    while !outbox.is_empty().unwrap() {
         assert!(Instant::now() < until, "Acknowledged item was not removed");
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -182,13 +226,18 @@ fn real_worker_retries_three_times_then_defers_the_timed_out_event() {
         TOKEN,
     )
     .unwrap();
-    for status in [503, 429] {
-        let (req, event) = request(&server);
+    let (mut req, mut event) = request(&server);
+    for (status, min_backoff) in [(503, Duration::from_secs(1)), (429, Duration::from_secs(2))] {
         assert_eq!(event["uuid"], id.to_string());
+        let responded = Instant::now();
         req.respond(tiny_http::Response::empty(status)).unwrap();
+        (req, event) = request(&server);
+        assert!(
+            responded.elapsed() + Duration::from_millis(30) >= min_backoff,
+            "Retried {status} too early"
+        );
     }
-    let (stalled, third) = request(&server);
-    assert_eq!(third["uuid"], id.to_string());
+    assert_eq!(event["uuid"], id.to_string());
     let started = Instant::now();
     loop {
         if let Selection::Wait(delay) = outbox.select(Utc::now().timestamp_millis()).unwrap() {
@@ -209,6 +258,6 @@ fn real_worker_retries_three_times_then_defers_the_timed_out_event() {
         matches!(outbox.select(Utc::now().timestamp_millis() + 300_000).unwrap(),
         Selection::Ready(p) if p.id == id && p.attempts == 0)
     );
-    drop(stalled);
+    drop(req);
     drop(sender);
 }

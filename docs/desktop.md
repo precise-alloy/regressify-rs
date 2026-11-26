@@ -563,7 +563,8 @@ Replays use the original event ID and timestamp. Delivery is silent and best eff
 tracking failures do not change the deployment result or appear in the UI.
 
 Set `DO_NOT_TRACK=1` before launch to disable collection and delivery and delete
-pending events. This cannot recall a request already sent. Launching does not
+pending events. A delivery already in flight may finish; an event merely selected
+from the queue cannot start delivery after the purge. Launching does not
 collect a launch event. New event types can use the same
 [capture API](../src/analytics.rs) and `regressify_[object]_[verb]` namespace.
 
