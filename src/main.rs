@@ -7,6 +7,7 @@ use regressify::{application, cli::Cli};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    regressify::analytics::start();
     regressify::diagnostics::install::install_subscriber();
     let startup = regressify::diagnostics::startup::StartupLog::begin();
     let cli = match Cli::try_parse() {

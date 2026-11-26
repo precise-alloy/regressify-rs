@@ -78,7 +78,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 tree-sitter = { version = "0.26", optional = true }
 tree-sitter-json = { version = "0.24", optional = true }
 tree-sitter-yaml = { version = "0.7", optional = true }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
 webbrowser = { version = "1.2", optional = true }
 yaml-edit = { version = "0.3.1", optional = true }

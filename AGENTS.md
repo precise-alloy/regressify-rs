@@ -49,7 +49,7 @@ Regressify is a Rust visual regression CLI and native desktop app. Read this gui
 - A scenario failure stops that scenario, not its peers. Website/action/visual
   failures are report results with zero exit; config, infrastructure, and artifact
   write failures are process errors. Do not panic or swallow errors in these paths.
-- Diagnostic archive failures warn without changing capture/command outcomes; preserve original execution provenance and explicit completeness. See the [diagnostics skill](.github/skills/logging-diagnostics/SKILL.md).
+- [Diagnostic archive](.github/skills/logging-diagnostics/SKILL.md) failures warn without changing outcomes; preserve provenance and explicit completeness. [Analytics](.github/skills/product-analytics/SKILL.md) failures stay silent; callers await the local queue write, never HTTP.
 - Promote only successful captures. Never replace a good reference with an error placeholder or delete it before a replacement capture succeeds.
 - Default results use completed full-suite runs; cleanup preserves baselines and active artifacts. Follow the [retention skill](.github/skills/run-retention/SKILL.md).
 - Preserve `camelCase` config and untagged action deserialization precedence. Configuration resolves scenario -> suite -> workspace -> defaults.

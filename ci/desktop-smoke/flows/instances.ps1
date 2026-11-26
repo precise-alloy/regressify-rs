@@ -21,7 +21,7 @@ public static class RegressifyInstanceWindow {
         throw 'The existing workspace window was not restored and foregrounded.'
     }
     function Open-Duplicate([string]$Root, [System.Diagnostics.Process]$Owner, [string]$Name) {
-        $duplicate = Start-Process -FilePath $executable -ArgumentList ('"' + $Root + '"') -PassThru `
+        $duplicate = Start-Process -FilePath $executable -ArgumentList ('"' + $Root + '"') -PassThru -Environment @{ REGRESSIFY_TEST_NO_ANALYTICS = '1' } `
             -RedirectStandardOutput (Join-Path $artifacts ($Name + '-stdout.log')) -RedirectStandardError (Join-Path $artifacts ($Name + '-stderr.log'))
         $script:fixtureProcesses.Add($duplicate)
         if (-not $duplicate.WaitForExit(15000)) { throw 'A duplicate launcher did not exit after workspace handoff.' }
