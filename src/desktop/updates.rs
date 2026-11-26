@@ -3423,18 +3423,41 @@ mod tests {
                 (preparation.await, true)
             }
         };
-        assert!(
-            result.is_err(),
-            "{mode} completed while a child was still running"
-        );
-        if lock_path.exists() {
-            let hold = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .unwrap();
-            hold.try_lock().expect("Preparation child survived cleanup");
-        }
+        let error = result.expect_err("Preparation completed while a descendant was still running");
+        let expected = if became_ready && mode != "timeout" {
+            "Download cancelled. No update was installed"
+        } else {
+            "Update binary preparation timed out; retry later"
+        };
+        assert_eq!(error.to_string(), expected, "{mode}: {error:#}");
+        let hold = match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(hold) => hold,
+            Err(error) if !became_ready && error.kind() == std::io::ErrorKind::NotFound => {
+                return false;
+            }
+            Err(error) => panic!("{mode}: cannot open preparation descendant lock: {error}"),
+        };
+        // Windows can release a terminated process's file locks asynchronously.
+        // A surviving fixture never unlocks: it parks with this handle held.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match hold.try_lock() {
+                    Ok(()) => break,
+                    Err(fs::TryLockError::WouldBlock) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(fs::TryLockError::Error(error)) => {
+                        panic!("{mode}: cannot check preparation descendant lock: {error}");
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{mode}: descendant lock still held 5s after cleanup"));
         became_ready
     }
 }
