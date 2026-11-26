@@ -1,6 +1,6 @@
 # Test Parallelism
 
-Verified: 2026-11-03
+Verified: 2026-11-26
 
 ## Facts
 
@@ -43,11 +43,11 @@ Verified: 2026-11-03
 - Fixed wall-clock budgets that include child-process startup can flake under
   parallel load. Wait for readiness the descendant signals itself, and keep the
   process alive while waiting.
-  - [updates.rs](../../src/desktop/updates.rs):
-    `preparation_cancellation_and_timeout_reap_launcher_descendants` failed once
-    in parallel. Its fixture now checks child liveness instead of using a 5 s
-    deadline. The test retries with a doubled preparation timeout only when the
-    descendant never became ready.
+  - [updates.rs](../../src/desktop/updates.rs): `preparation_cancellation_and_timeout_reap_launcher_descendants`
+    checks child liveness during startup and retries preparation only if the child never became ready.
+    After termination it retries only `WouldBlock` for up to 5 s:
+    [Windows can release locks after exit](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex#remarks).
+    A surviving fixture parks with the lock held and still fails the check.
   - [runner.rs](../../src/desktop/runner.rs) `orphan-pipe` fixture: the parent
     exits only after the orphan writes a ready marker. Before this, the orphan
     raced the 250 ms `PIPE_DRAIN_TIMEOUT`.
