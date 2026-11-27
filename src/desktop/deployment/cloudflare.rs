@@ -3050,20 +3050,23 @@ mod tests {
                             == Some("nosniff"),
                         "Published security headers are missing"
                     );
-                    if path.ends_with(".png")
-                        || path.ends_with(".json")
-                        || path.ends_with(".js")
-                        || path.ends_with(".css")
-                    {
-                        ensure!(
-                            response
-                                .headers()
-                                .get("Cache-Control")
-                                .and_then(|value| value.to_str().ok())
-                                .is_some_and(|value| value.contains("immutable")),
-                            "Published asset cache policy is missing"
-                        );
-                    }
+                    // Only content-versioned directories are immutable; the entry page, status,
+                    // and deployment state revalidate whatever their extension.
+                    let versioned = [
+                        "/_snapshot/assets/",
+                        "/_snapshot/data/",
+                        "/_snapshot/images/",
+                    ]
+                    .iter()
+                    .any(|directory| path.starts_with(directory));
+                    ensure!(
+                        response
+                            .headers()
+                            .get("Cache-Control")
+                            .and_then(|value| value.to_str().ok())
+                            .is_some_and(|value| value.contains("immutable") == versioned),
+                        "Published cache policy does not match the file's role"
+                    );
                     let bytes = response_bytes(response, MAX_FILE_BYTES as usize).await?;
                     ensure!(
                         bytes.len() as u64 == asset.size && asset_hash(&bytes, path) == asset.hash,
@@ -3075,26 +3078,41 @@ mod tests {
             .buffer_unordered(4)
             .try_collect::<Vec<_>>()
             .await?;
+        // Capture routes end with the image filename but serve the entry page, which must
+        // revalidate so a later deployment is visible without a forced reload.
         for suite in &suites {
-            let mut url = base.clone();
-            url.path_segments_mut()
-                .map_err(|_| anyhow!("Invalid public URL"))?
-                .extend(["suites", suite]);
-            let response = client
-                .client
-                .get(url)
-                .send()
-                .await
-                .map_err(|_| anyhow!("Cannot retrieve suite deep link"))?;
-            ensure!(
-                response.status().is_success(),
-                "Suite deep link is unavailable"
-            );
-            let bytes = response_bytes(response, MAX_FILE_BYTES as usize).await?;
-            ensure!(
-                asset_hash(&bytes, "index.html") == manifest.files["/index.html"].hash,
-                "Suite deep link did not serve the report application"
-            );
+            for route in [
+                vec!["suites", suite.as_str()],
+                vec!["suites", suite.as_str(), "images", "page_desktop.png"],
+            ] {
+                let mut url = base.clone();
+                url.path_segments_mut()
+                    .map_err(|_| anyhow!("Invalid public URL"))?
+                    .extend(route);
+                let response = client
+                    .client
+                    .get(url)
+                    .send()
+                    .await
+                    .map_err(|_| anyhow!("Cannot retrieve suite deep link"))?;
+                ensure!(
+                    response.status().is_success(),
+                    "Suite deep link is unavailable"
+                );
+                ensure!(
+                    response
+                        .headers()
+                        .get("Cache-Control")
+                        .and_then(|value| value.to_str().ok())
+                        == Some("no-cache"),
+                    "Suite deep links must revalidate the report application"
+                );
+                let bytes = response_bytes(response, MAX_FILE_BYTES as usize).await?;
+                ensure!(
+                    asset_hash(&bytes, "index.html") == manifest.files["/index.html"].hash,
+                    "Suite deep link did not serve the report application"
+                );
+            }
         }
         for path in [
             "_snapshot/data/missing.json",

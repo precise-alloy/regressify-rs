@@ -2435,22 +2435,15 @@ mod tests {
                 .take_while(|line| !line.is_empty())
                 .any(|line| line.trim() == "Cache-Control: no-cache")
         );
-        // Azure applies the first matching route: the state's precedes the immutable assets'.
-        let routes = config["routes"].as_array().unwrap();
-        let state = routes
-            .iter()
-            .position(|route| route["route"] == "/_snapshot/deployment.json")
-            .unwrap();
-        assert_eq!(routes[state]["headers"]["Cache-Control"], "no-cache");
-        let immutable = routes
-            .iter()
-            .position(|route| {
-                route["route"]
-                    .as_str()
-                    .is_some_and(|route| route.contains("json}"))
+        assert_eq!(
+            azure_cache_control(&config, "/_snapshot/deployment.json"),
+            Some("no-cache")
+        );
+        assert!(
+            config["routes"].as_array().unwrap().iter().any(|route| {
+                route["route"] == "/suites/*" && route["rewrite"] == "/index.html"
             })
-            .unwrap();
-        assert!(state < immutable);
+        );
         assert!(
             fs::read_to_string(temp.path().join("_redirects"))
                 .unwrap()
@@ -2468,6 +2461,170 @@ mod tests {
                 "Missing {required} in generated .gitignore"
             );
         }
+    }
+
+    /// Values of `name` that Netlify and Cloudflare send for `path`. Both hosts merge every
+    /// `_headers` rule matching the requested path, also for `/suites/*` 200 rewrites, and
+    /// join repeated names instead of letting a narrower rule win.
+    fn edge_headers(rules: &str, path: &str, name: &str) -> Vec<String> {
+        let mut values = Vec::new();
+        let mut matched = false;
+        for line in rules.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if !line.starts_with(char::is_whitespace) {
+                // Placeholders and repeated splats differ between the hosts; one splat, which
+                // Cloudflare matches greedily across segments, behaves the same on both.
+                assert!(
+                    trimmed.starts_with('/')
+                        && !trimmed.contains(':')
+                        && trimmed.matches('*').count() <= 1,
+                    "Unsupported _headers pattern {trimmed}"
+                );
+                matched = match trimmed.split_once('*') {
+                    Some((prefix, suffix)) => {
+                        path.len() >= prefix.len() + suffix.len()
+                            && path.starts_with(prefix)
+                            && path.ends_with(suffix)
+                    }
+                    None => trimmed == path,
+                };
+            } else if matched {
+                let (header, value) = trimmed.split_once(':').unwrap();
+                if header.eq_ignore_ascii_case(name) {
+                    values.push(value.trim().to_owned());
+                }
+            }
+        }
+        values
+    }
+
+    /// Cache-Control of the first Azure route matching `path`, the only route Azure applies.
+    /// An exact `.../index.html` route also matches its folder, so `/index.html` matches `/`.
+    fn azure_cache_control<'a>(config: &'a serde_json::Value, path: &str) -> Option<&'a str> {
+        config["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|route| {
+                let pattern = route["route"].as_str().unwrap();
+                match pattern.strip_suffix("/*") {
+                    Some(directory) => path.starts_with(&format!("{directory}/")),
+                    None => {
+                        pattern == path
+                            || pattern.strip_suffix("index.html").is_some_and(|folder| {
+                                path == folder || Some(path) == folder.strip_suffix('/')
+                            })
+                    }
+                }
+            })
+            .and_then(|route| route["headers"]["Cache-Control"].as_str())
+    }
+
+    #[test]
+    fn host_cache_policies_follow_published_directories_not_route_extensions() {
+        let temp = tempfile::tempdir().unwrap();
+        generate_site(temp.path(), &[], &args(), &WorkspaceConfig::default()).unwrap();
+        let headers = fs::read_to_string(temp.path().join("_headers")).unwrap();
+        let config: serde_json::Value = serde_json::from_slice(
+            &fs::read(temp.path().join("staticwebapp.config.json")).unwrap(),
+        )
+        .unwrap();
+        for route in config["routes"].as_array().unwrap() {
+            let pattern = route["route"].as_str().unwrap();
+            // Azure also accepts extension filters such as `/*.{png,json}`, but those match
+            // report routes too; policies must name exact files or whole directories.
+            assert!(
+                !pattern.trim_end_matches("/*").contains(['*', '{']),
+                "Azure routes must be exact files or directory prefixes: {pattern}"
+            );
+        }
+        let immutable = |policy: &str| policy.split(',').any(|value| value.trim() == "immutable");
+        // The /suites/* rewrite serves the entry HTML for report routes. Capture routes end with
+        // the image filename and suite IDs may contain dots, so extensions say nothing here.
+        for route in [
+            "/",
+            "/index.html",
+            "/suites/shop",
+            "/suites/home.png",
+            "/suites/api.json",
+            "/suites/app.js",
+            "/suites/theme.css",
+            "/suites/shop/images/home.png",
+            "/suites/a.b/images/professionals_desktop__FINAL.png",
+        ] {
+            assert_eq!(
+                edge_headers(&headers, route, "Cache-Control"),
+                ["no-cache"],
+                "{route}"
+            );
+            let content_types = edge_headers(&headers, route, "Content-Type");
+            assert!(
+                content_types
+                    .iter()
+                    .all(|value| value.starts_with("text/html")),
+                "{route}: {content_types:?}"
+            );
+            // Azure applies the first route matching the requested path even to fallback
+            // responses; report routes matching no route would get its 30-second default.
+            assert_eq!(
+                azure_cache_control(&config, route),
+                Some("no-cache"),
+                "{route}"
+            );
+        }
+        let mut published = artifact_paths(temp.path(), &[])
+            .unwrap()
+            .into_iter()
+            .map(|path| format!("/{}", path.to_string_lossy().replace('\\', "/")))
+            .collect::<BTreeSet<_>>();
+        // Files an empty report cannot contain, in their writers' layouts.
+        published.extend(
+            [
+                "/_snapshot/deployment.json",
+                "/_snapshot/data/suites/a.b.json",
+                "/_snapshot/data/logs/operation/chunk-000000.json",
+                "/_snapshot/images/a.b/test/home.png",
+                "/_snapshot/images/a.b/diff/home.png",
+                "/_snapshot/images/a.b/test-preview/home.png",
+                "/_snapshot/images/a.b/reference-error-icon-thumbnail/home.png",
+            ]
+            .map(String::from),
+        );
+        for path in &published {
+            let edge = edge_headers(&headers, path, "Cache-Control");
+            let azure = azure_cache_control(&config, path);
+            match path.as_str() {
+                "/_headers" | "/_redirects" | "/staticwebapp.config.json" => continue,
+                "/index.html" | "/_snapshot/status.json" | "/_snapshot/deployment.json" => {
+                    assert_eq!(edge, ["no-cache"], "{path}");
+                    assert_eq!(azure, Some("no-cache"), "{path}");
+                }
+                _ => {
+                    // Every other published file is requested with a content version (?v=).
+                    assert!(
+                        [
+                            "/_snapshot/assets/",
+                            "/_snapshot/data/",
+                            "/_snapshot/images/"
+                        ]
+                        .iter()
+                        .any(|directory| path.starts_with(directory)),
+                        "Unclassified published path {path}"
+                    );
+                    assert!(edge.len() == 1 && immutable(&edge[0]), "{path}: {edge:?}");
+                    assert!(azure.is_some_and(immutable), "{path}: {azure:?}");
+                }
+            }
+            assert!(
+                edge_headers(&headers, path, "Content-Type").len() <= 1,
+                "{path}"
+            );
+        }
+        assert!(published.contains("/_snapshot/status.json"));
+        assert!(published.contains("/_snapshot/assets/app.js"));
     }
 
     #[test]

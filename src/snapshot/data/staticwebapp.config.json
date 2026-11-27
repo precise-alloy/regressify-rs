@@ -14,7 +14,32 @@
       }
     },
     {
-      "route": "/*.{woff,woff2,ttf,otf,svg,css,js,ico,png,jpg,jpeg,webp,gif,xsl,json}",
+      "route": "/index.html",
+      "headers": {
+        "Cache-Control": "no-cache"
+      }
+    },
+    {
+      "route": "/suites/*",
+      "rewrite": "/index.html",
+      "headers": {
+        "Cache-Control": "no-cache"
+      }
+    },
+    {
+      "route": "/_snapshot/assets/*",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000"
+      }
+    },
+    {
+      "route": "/_snapshot/data/*",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000"
+      }
+    },
+    {
+      "route": "/_snapshot/images/*",
       "headers": {
         "Cache-Control": "public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000"
       }

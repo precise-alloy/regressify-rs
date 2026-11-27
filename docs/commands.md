@@ -583,6 +583,9 @@ and suite rewrites as Workers asset metadata, using `/` as the canonical rewrite
 destination rather than `/index.html`.
 Other static hosts must serve `/index.html` for `/suites/*`, return real 404s for
 missing `/_snapshot/*`, revalidate HTML, and cache versioned assets immutably.
+Select immutable files by directory (`/_snapshot/assets/`, `/_snapshot/data/`,
+`/_snapshot/images/`), not by extension: report routes such as
+`/suites/<suite>/images/<capture>.png` serve the HTML entry page.
 CDN cache keys must include `v`; do not cache HTML indefinitely. Publish the whole
 site atomically and reload an old report after deployment because origin files
 contain the latest version, not historical copies.

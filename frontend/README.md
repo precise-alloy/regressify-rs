@@ -383,7 +383,11 @@ are external source pages, not local report artifacts, and remain unchanged.
 Configure any CDN to **include the `v` query parameter in its cache key** and keep
 it on origin requests. Generated asset policies use immutable one-year caching.
 **The entry HTML must revalidate** so visitors discover new versions; do not cache
-`/`, `/index.html`, or SPA route responses indefinitely. Publish the complete output
+`/`, `/index.html`, or SPA route responses indefinitely. Hosts match header rules
+against the requested path, and a capture route such as
+`/suites/<suite>/images/<capture>.png` is the entry page, so the
+[hosting policies](hosting/_headers) select immutable files by their `_snapshot`
+directory, never by extension. Publish the complete output
 atomically, as the desktop Azure/Netlify/Cloudflare deployers do. Old versions are not retained
 at the origin; reload an old report after a deployment. The local preview rejects
 stale `v` values, making accidental version/content mismatches visible.
