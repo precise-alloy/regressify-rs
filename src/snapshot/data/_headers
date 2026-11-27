@@ -6,75 +6,42 @@
   X-Content-Type-Options: nosniff
   X-Robots-Tag: noindex,nofollow,nocache,nosnippet,noarchive
 
-/*.woff
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
+# Rules match the requested path, including report routes served by the /suites/* rewrite.
+# A route such as /suites/<suite>/images/<capture>.png is the HTML entry page, so scope every
+# policy by its published directory, never by file extension. Matching rules are merged and
+# repeated headers joined, so Cache-Control rules must not overlap.
+/
+  Cache-Control: no-cache
 
-/*.woff2
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-
-/*.ttf
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-
-/*.otf
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-
-/*.svg
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-
-/*.css
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-  Content-Type: text/css; charset=utf-8
-
-/*.js
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-  Content-Type: text/javascript; charset=utf-8
-
-/*.ico
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-
-/*.png
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-
-/*.jpg
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-
-/*.jpeg
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-
-/*.webp
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-
-/*.gif
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-
-/*.xsl
-  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
-  Content-Type: application/xml; charset=utf-8
-
-/*.html
+/index.html
+  Cache-Control: no-cache
   Content-Type: text/html; charset=utf-8
 
-/*.map
-  Content-Type: text/plain; charset=utf-8
+/suites/*
+  Cache-Control: no-cache
 
-/*.json
-  Content-Type: application/json; charset=utf-8
+# These directories contain only files requested with a content version (?v=).
+/_snapshot/assets/*
+  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
+
+/_snapshot/assets/*.css
+  Content-Type: text/css; charset=utf-8
+
+/_snapshot/assets/*.js
+  Content-Type: text/javascript; charset=utf-8
 
 /_snapshot/data/*
+  Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
+  Content-Type: application/json; charset=utf-8
+
+/_snapshot/images/*
   Cache-Control: public, max-age=31536000, s-maxage=31536000, immutable, stale-while-revalidate=31536000
 
 /_snapshot/status.json
   Access-Control-Allow-Origin: *
   Cache-Control: no-cache
+  Content-Type: application/json; charset=utf-8
 
 /_snapshot/deployment.json
   Cache-Control: no-cache
-
-/*.ps1
-  Content-Type: text/plain; charset=utf-8
-
-/*.sh
-  Content-Type: text/plain; charset=utf-8
-
-/*.xml
-  Content-Type: application/xml; charset=utf-8
+  Content-Type: application/json; charset=utf-8

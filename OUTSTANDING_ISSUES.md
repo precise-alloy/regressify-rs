@@ -3,6 +3,25 @@
 Current verification gaps and dated resolution history. Entries marked resolved
 are historical evidence, not open implementation tasks.
 
+## Report Route Cache Policy (2026-11-27)
+
+- Resolved: Netlify and Cloudflare match `_headers` against the requested path,
+  also when `/suites/*` rewrites it to the entry page. The extension rules gave
+  capture routes such as `/suites/<suite>/images/<capture>.png` the immutable
+  one-year policy, so browsers and the CDN kept an old report page, and its old
+  manifest, until a forced reload. Suite IDs containing dots could also receive a
+  JSON Content-Type on the HTML page. Policies are now scoped by published directory.
+  Azure applies the first route matching the requested path, also to
+  `navigationFallback` responses, so its extension route had the same effect;
+  unmatched report routes got Azure's default `public, must-revalidate, max-age=30`.
+  Azure routes now match the same directories, and a `/suites/*` rewrite route gives
+  report routes `no-cache`. The
+  [hosting regression](src/snapshot/site.rs) models each host's rule matching.
+  Live Cloudflare, Netlify and Azure deployments and the SWA emulator reproduced
+  the old policy and verified the new one, including a full fixture report. A browser
+  that already cached a capture route keeps that stale copy until a reload; Firefox
+  honors `immutable` on ordinary reloads and may need a forced reload.
+
 ## Linux Lease Handoff (2026-11-26)
 
 - Resolved: run-history, desktop update, Chromium install and analytics sender

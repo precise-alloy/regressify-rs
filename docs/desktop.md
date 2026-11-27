@@ -991,8 +991,10 @@ not public files. With HTML normalization enabled, it translates
 `/suites/* /index.html 200` to `/suites/* / 200` because Workers rejects the former
 as a canonical-HTML redirect loop. With HTML handling set to `none`, the original
 `index.html` rewrite is retained. Default not-found handling keeps missing
-`/_snapshot/*` assets as real 404s. HTML and `/_snapshot/status.json` revalidate;
-versioned assets use immutable one-year caching. Versioned resource URLs include
+`/_snapshot/*` assets as real 404s. HTML, every `/suites/*` report route (including
+capture routes ending in `.png`), `/_snapshot/status.json`, and the deployment state
+revalidate; versioned assets under `/_snapshot/assets/`, `/_snapshot/data/`, and
+`/_snapshot/images/` use immutable one-year caching. Versioned resource URLs include
 `?v=...`; any additional CDN must include that parameter
 in its cache key. Stable origin files contain only the current report version.
 These directives ask search engines not to index reports, but do not restrict
