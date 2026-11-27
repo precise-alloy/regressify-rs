@@ -30,11 +30,12 @@ description: 'Use when choosing Rust validation gates, changing Cargo features/d
 
 ## Current CI Gates
 
-Windows runs:
+Windows runs the checks below. The `gui-tests` command reproduces one of the
+10 CI shards; omit `--partition` to run the full suite locally with Nextest.
 
 ```sh
 cargo test --locked --all-targets
-cargo test --locked --features gui-tests --all-targets
+cargo nextest run --locked --features gui-tests --all-targets --no-fail-fast --partition hash:1/10
 cargo clippy --locked --features gui --lib -- -D warnings
 cargo build --locked --features gui --bin regressify-desktop
 ```

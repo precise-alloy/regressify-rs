@@ -2477,6 +2477,7 @@ cargo build --features gui --bin regressify-desktop
 
 [Desktop Checks](../.github/workflows/desktop-checks.yml) defines Windows CLI,
 native interaction, build, and lint gates plus Linux headless model tests.
+CI splits the Windows `gui-tests` suite into shards with Cargo Nextest.
 GPUI tests use production views and real clicks/typing; they verify events,
 state, and layout bounds, not full OS IME behavior or pixels.
 

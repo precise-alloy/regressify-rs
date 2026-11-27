@@ -74,12 +74,12 @@ jobs:
         run: cargo test --locked --all-targets
 
   windows-gui-tests:
-    name: Windows desktop tests (shard ${{ matrix.shard }}/4)
+    name: Windows desktop tests (shard ${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -92,7 +92,7 @@ jobs:
       # Same test set as `cargo test --all-targets`, split by a stable hash of the test name,
       # so new tests are picked up automatically. Doctests are not part of --all-targets.
       - name: Desktop models and native interaction tests
-        run: cargo nextest run --locked --features gui-tests --all-targets --no-fail-fast --partition hash:${{ matrix.shard }}/4
+        run: cargo nextest run --locked --features gui-tests --all-targets --no-fail-fast --partition hash:${{ matrix.shard }}/${{ strategy.job-total }}
 
   windows-gui-build:
     name: Windows desktop build
